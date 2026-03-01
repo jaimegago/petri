@@ -1,0 +1,33 @@
+# Binaries
+petri
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Build output
+dist/
+bin/
+
+# Go workspace
+go.work.sum
+
+# Environment and secrets
+.env
+*.env
+~/.petri/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
