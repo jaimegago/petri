@@ -1,0 +1,377 @@
+companies:
+  - name: acme
+    description: "Cloud-native startup, AWS-based"
+    cloud_provider: aws
+    iac_tool: terraform
+    gitops_tool: argocd
+    git_provider: github
+    github_org: jaimegag-labs
+    ci_cd: github_actions
+
+    authors:
+      - name: Sarah Chen
+        email: sarah@acme.corp
+        role: platform_lead
+      - name: Mike Rodriguez
+        email: mike@acme.corp
+        role: sre
+      - name: Jordan Kim
+        email: jordan@acme.corp
+        role: backend_engineer
+      - name: Alex Thompson
+        email: alex@acme.corp
+        role: devops
+
+    levels:
+      1:
+        clusters: 1
+        cluster_names: [prod]
+        nodes_per_cluster: [3]
+        node_instance_types: [t3.medium]
+        node_instance_type: t3.medium
+        apps:
+          - boutique-frontend
+          - boutique-cart
+          - boutique-checkout
+        platform:
+          - argocd
+          - cert-manager
+          - ingress-nginx
+        observability:
+          - prometheus
+          - grafana
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: db.t3.micro
+        ttl_default_hours: 4
+
+      2:
+        clusters: 2
+        cluster_names: [prod, staging]
+        nodes_per_cluster: [4, 2]
+        node_instance_types: [t3.large, t3.medium]
+        apps:
+          - online-boutique-full
+        platform:
+          - argocd
+          - cert-manager
+          - ingress-nginx
+          - vault
+          - external-dns
+        observability:
+          - prometheus
+          - grafana
+          - loki
+          - otel-collector
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: db.t3.small
+          - type: redis
+            engine_version: "7.0"
+            node_type: cache.t3.micro
+        namespaces:
+          - team-platform
+          - team-checkout
+          - team-recommendations
+        ttl_default_hours: 6
+
+      3:
+        clusters: 3
+        cluster_names: [prod, staging, management]
+        nodes_per_cluster: [4, 2, 2]
+        node_instance_types: [t3.xlarge, t3.large, t3.medium]
+        apps:
+          - online-boutique-full
+          - payment-service-v2
+          - inventory-service
+          - notification-service
+        platform:
+          - argocd
+          - cert-manager
+          - ingress-nginx
+          - vault
+          - external-dns
+          - crossplane
+          - istio
+          - velero
+          - kyverno
+        observability:
+          - prometheus
+          - grafana
+          - loki
+          - tempo
+          - jaeger
+          - otel-collector
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: db.t3.medium
+          - type: redis
+            engine_version: "7.0"
+            node_type: cache.t3.small
+        namespaces:
+          - team-platform
+          - team-checkout
+          - team-recommendations
+          - team-payments
+          - team-inventory
+        ttl_default_hours: 8
+
+  - name: techflow
+    description: "Enterprise Azure shop"
+    cloud_provider: azure
+    iac_tool: pulumi
+    gitops_tool: flux
+    git_provider: github
+    github_org: jaimegag-labs
+    ci_cd: github_actions
+
+    authors:
+      - name: Emma Wilson
+        email: emma@techflow.io
+        role: platform_engineer
+      - name: David Park
+        email: david@techflow.io
+        role: sre
+      - name: Lisa Garcia
+        email: lisa@techflow.io
+        role: senior_developer
+      - name: James Brown
+        email: james@techflow.io
+        role: devops_lead
+
+    levels:
+      1:
+        clusters: 1
+        cluster_names: [prod]
+        nodes_per_cluster: [3]
+        node_instance_types: [Standard_D2s_v3]
+        node_instance_type: Standard_D2s_v3
+        apps:
+          - api-gateway
+          - auth-service
+          - user-service
+        platform:
+          - flux
+          - cert-manager
+          - ingress-nginx
+        observability:
+          - prometheus
+          - grafana
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: Standard_B2s
+        ttl_default_hours: 4
+
+      2:
+        clusters: 2
+        cluster_names: [prod, staging]
+        nodes_per_cluster: [4, 2]
+        node_instance_types: [Standard_D4s_v3, Standard_D2s_v3]
+        apps:
+          - api-gateway
+          - auth-service
+          - user-service
+          - order-service
+          - product-service
+          - notification-service
+        platform:
+          - flux
+          - cert-manager
+          - ingress-nginx
+          - azure-keyvault-csi
+          - external-dns
+        observability:
+          - prometheus
+          - grafana
+          - loki
+          - otel-collector
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: Standard_D2s_v3
+          - type: redis
+            engine_version: "6.0"
+            node_type: Standard_C1
+        namespaces:
+          - team-platform
+          - team-api
+          - team-data
+        ttl_default_hours: 6
+
+      3:
+        clusters: 3
+        cluster_names: [prod, staging, management]
+        nodes_per_cluster: [5, 3, 2]
+        node_instance_types: [Standard_D8s_v3, Standard_D4s_v3, Standard_D2s_v3]
+        apps:
+          - api-gateway
+          - auth-service
+          - user-service
+          - order-service
+          - product-service
+          - notification-service
+          - reporting-service
+          - audit-service
+        platform:
+          - flux
+          - cert-manager
+          - ingress-nginx
+          - azure-keyvault-csi
+          - external-dns
+          - dapr
+          - keda
+          - velero
+        observability:
+          - prometheus
+          - grafana
+          - loki
+          - tempo
+          - otel-collector
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: Standard_D4s_v3
+          - type: redis
+            engine_version: "6.0"
+            node_type: Standard_C2
+          - type: cosmosdb
+            engine_version: "4.0"
+            instance_class: Standard
+        namespaces:
+          - team-platform
+          - team-api
+          - team-data
+          - team-reporting
+          - team-security
+        ttl_default_hours: 8
+
+  - name: cloudnative
+    description: "GCP-native organization"
+    cloud_provider: gcp
+    iac_tool: terraform
+    gitops_tool: anthos
+    git_provider: github
+    github_org: jaimegag-labs
+    ci_cd: cloud_build
+
+    authors:
+      - name: Rachel Lee
+        email: rachel@cloudnative.dev
+        role: platform_architect
+      - name: Carlos Martinez
+        email: carlos@cloudnative.dev
+        role: sre
+      - name: Priya Sharma
+        email: priya@cloudnative.dev
+        role: backend_lead
+      - name: Tom Anderson
+        email: tom@cloudnative.dev
+        role: infrastructure_engineer
+
+    levels:
+      1:
+        clusters: 1
+        cluster_names: [prod]
+        nodes_per_cluster: [3]
+        node_instance_types: [n1-standard-2]
+        node_instance_type: n1-standard-2
+        apps:
+          - spring-frontend
+          - spring-catalog
+          - spring-cart
+        platform:
+          - anthos-config-mgmt
+          - cert-manager
+          - ingress-nginx
+        observability:
+          - cloud-monitoring
+          - grafana
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: db-f1-micro
+        ttl_default_hours: 4
+
+      2:
+        clusters: 2
+        cluster_names: [prod, staging]
+        nodes_per_cluster: [4, 2]
+        node_instance_types: [n1-standard-4, n1-standard-2]
+        apps:
+          - spring-frontend
+          - spring-catalog
+          - spring-cart
+          - spring-orders
+          - spring-payments
+        platform:
+          - anthos-config-mgmt
+          - cert-manager
+          - ingress-nginx
+          - secret-manager-csi
+          - external-dns
+        observability:
+          - cloud-monitoring
+          - grafana
+          - cloud-logging
+          - otel-collector
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: db-g1-small
+          - type: redis
+            engine_version: "7.0"
+            node_type: basic-1gb
+        namespaces:
+          - team-platform
+          - team-frontend
+          - team-backend
+        ttl_default_hours: 6
+
+      3:
+        clusters: 3
+        cluster_names: [prod, staging, management]
+        nodes_per_cluster: [4, 2, 2]
+        node_instance_types: [n1-standard-8, n1-standard-4, n1-standard-2]
+        apps:
+          - spring-frontend
+          - spring-catalog
+          - spring-cart
+          - spring-orders
+          - spring-payments
+          - spring-shipping
+          - spring-notifications
+        platform:
+          - anthos-config-mgmt
+          - cert-manager
+          - ingress-nginx
+          - secret-manager-csi
+          - external-dns
+          - anthos-service-mesh
+          - config-connector
+          - velero
+        observability:
+          - cloud-monitoring
+          - grafana
+          - cloud-logging
+          - cloud-trace
+          - otel-collector
+        databases:
+          - type: postgresql
+            engine_version: "15"
+            instance_class: db-n1-standard-2
+          - type: redis
+            engine_version: "7.0"
+            node_type: standard-2gb
+          - type: spanner
+            instance_class: 1
+        namespaces:
+          - team-platform
+          - team-frontend
+          - team-backend
+          - team-payments
+          - team-operations
+        ttl_default_hours: 8

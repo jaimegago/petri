@@ -42,6 +42,44 @@ Read these files in order:
 1. petri-architecture.md - Complete technical architecture, component specifications, data flows, design decisions
 2. README.md - User-facing documentation, CLI commands, examples
 3. petri-build-plan.md - Phased implementation plan with dependencies and acceptance criteria
+4. go-standards.md - Go code quality and architecture standards (MUST follow for all Go code)
+
+GO STANDARDS
+
+All Go code in this project MUST follow docs/go-standards.md. Key rules enforced here:
+
+Architecture:
+
+- Use dependency injection via constructor parameters. No package-level singletons or global state.
+- Organize internal packages by domain (e.g., internal/orders/), not by layer (not internal/handlers/).
+- Define interfaces at the point of use (in the consuming package), not at the provider.
+- Business logic must never import transport, database, or instrumentation packages directly.
+
+Error Handling:
+
+- Always wrap errors with context using the `%w` verb: `fmt.Errorf("doing X: %w", err)`.
+- Use errors.Is() / errors.As() when inspecting error types in callers.
+- No panics in production code paths.
+
+Testing:
+
+- Unit tests use table-driven patterns with t.Run() sub-tests.
+- Mock interfaces (defined in business logic), not concrete types. Use testify/mock or simple hand-rolled mocks.
+- Unit tests must achieve >80% code coverage.
+- Integration tests use build tag `//go:build integration` and run separately from unit tests.
+
+Observability:
+
+- Instrumentation (metrics, logs, traces) is added via middleware/decorator wrappers — NOT embedded in business logic.
+- Pass context.Context through all call chains for trace propagation.
+- Structured logging only (zerolog). Never use fmt.Println for operational output in library code.
+
+Code Style:
+
+- Follow Effective Go: clear names, small interfaces, explicit errors, defer for cleanup.
+- One type per file unless types are tightly coupled.
+- All exported functions, types, and packages must have doc comments.
+- Run go fmt, go vet, and golangci-lint before committing.
 
 IMPLEMENTATION REQUIREMENTS
 
