@@ -98,18 +98,24 @@ func DefaultConfig() *Config {
 }
 
 // Load reads Petri configuration from ~/.petri/config.yaml and environment variables.
-func Load() (*Config, error) {
+// If cfgFile is non-empty it is used as the config path instead of the default location.
+func Load(cfgFile ...string) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("resolving home directory: %w", err)
 	}
 
 	v := viper.New()
-	v.SetConfigName("config")
-	v.SetConfigType("yaml")
-	v.AddConfigPath(filepath.Join(home, ".petri"))
 	v.SetEnvPrefix("PETRI")
 	v.AutomaticEnv()
+
+	if len(cfgFile) > 0 && cfgFile[0] != "" {
+		v.SetConfigFile(cfgFile[0])
+	} else {
+		v.SetConfigName("config")
+		v.SetConfigType("yaml")
+		v.AddConfigPath(filepath.Join(home, ".petri"))
+	}
 
 	// Set defaults.
 	cfg := DefaultConfig()
@@ -136,7 +142,23 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
+	// Expand ~ in file paths so users can write ~/.petri/... in config.yaml.
+	cfg.State.SQLitePath = expandHome(cfg.State.SQLitePath)
+	cfg.Credentials.MasterKeyPath = expandHome(cfg.Credentials.MasterKeyPath)
+
 	return cfg, nil
+}
+
+// expandHome replaces a leading ~ with the current user's home directory.
+func expandHome(path string) string {
+	if len(path) == 0 || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[1:])
 }
 
 // LoadCompanies reads company definitions from the given YAML file path.

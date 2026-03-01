@@ -1,15 +1,24 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/jaimegago/petri/pkg/state"
+	"github.com/jaimegago/petri/pkg/types"
 )
 
 func (c *CLI) newListCmd() *cobra.Command {
 	var (
 		filterCompany string
 		filterLevel   int
+		filterStatus  string
 		showExpired   bool
 		format        string
 	)
@@ -18,20 +27,73 @@ func (c *CLI) newListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List labs",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return c.runList(filterCompany, filterLevel, showExpired, format)
+			return c.runList(filterCompany, filterLevel, filterStatus, showExpired, format)
 		},
 	}
 
 	cmd.Flags().StringVar(&filterCompany, "company", "", "Filter by company")
 	cmd.Flags().IntVar(&filterLevel, "level", 0, "Filter by level (1-3)")
-	cmd.Flags().BoolVar(&showExpired, "expired", false, "Show expired labs")
+	cmd.Flags().StringVar(&filterStatus, "status", "", "Filter by status (CREATING, ACTIVE, EXPIRING, DESTROYING, DESTROYED, ERROR)")
+	cmd.Flags().BoolVar(&showExpired, "expired", false, "Include expired labs")
 	cmd.Flags().StringVar(&format, "format", "table", "Output format: table or json")
 
 	return cmd
 }
 
-func (c *CLI) runList(_ string, _ int, _ bool, _ string) error {
-	fmt.Println("No labs found. State management will be available in Phase 2.")
-	fmt.Println("Run 'petri create' to create a lab.")
+func (c *CLI) runList(company string, level int, status string, showExpired bool, format string) error {
+	mgr, err := c.stateManager()
+	if err != nil {
+		return err
+	}
+
+	filter := state.ListFilter{
+		Company:        company,
+		Level:          level,
+		Status:         types.LabStatus(status),
+		IncludeExpired: showExpired,
+	}
+
+	labs, err := mgr.ListLabs(context.Background(), filter)
+	if err != nil {
+		return fmt.Errorf("listing labs: %w", err)
+	}
+
+	if len(labs) == 0 {
+		fmt.Println("No labs found.")
+		fmt.Println("Run 'petri create' to create a lab.")
+		return nil
+	}
+
+	switch format {
+	case "json":
+		return printLabsJSON(labs)
+	default:
+		printLabsTable(labs)
+		return nil
+	}
+}
+
+func printLabsTable(labs []*types.Lab) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tCOMPANY\tLEVEL\tPROVIDER\tSTATUS\tEXPIRES")
+	for _, lab := range labs {
+		expires := lab.ExpiresAt.Format(time.RFC3339)
+		if lab.IsExpired() {
+			expires += " (expired)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n",
+			lab.Name, lab.Company, lab.Level,
+			lab.CloudProvider, lab.Status, expires,
+		)
+	}
+	_ = w.Flush()
+}
+
+func printLabsJSON(labs []*types.Lab) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(labs); err != nil {
+		return fmt.Errorf("encoding labs as JSON: %w", err)
+	}
 	return nil
 }

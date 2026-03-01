@@ -69,8 +69,11 @@ func (c *CLI) runInit() error {
 }
 
 const defaultConfigYAML = `state:
-  backend: postgresql
-  connection_string: "postgres://localhost/petri?sslmode=disable"
+  backend: sqlite
+  sqlite_path: ~/.petri/petri.db
+  # To use PostgreSQL instead:
+  # backend: postgresql
+  # connection_string: "postgres://localhost/petri?sslmode=disable"
 
 credentials:
   master_key_path: ~/.petri/master.key

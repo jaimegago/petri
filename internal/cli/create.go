@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/jaimegago/petri/pkg/config"
@@ -81,7 +84,8 @@ func (c *CLI) runCreate(opts *createOptions) error {
 		return fmt.Errorf("unknown company %q (available: %s)", opts.company, strings.Join(names, ", "))
 	}
 
-	if _, err := company.GetLevel(opts.level); err != nil {
+	spec, err := company.GetLevel(opts.level)
+	if err != nil {
 		return fmt.Errorf("validating level: %w", err)
 	}
 
@@ -94,35 +98,86 @@ func (c *CLI) runCreate(opts *createOptions) error {
 
 	name := opts.name
 	if name == "" {
-		name = fmt.Sprintf("%s-l%d-%s", opts.company, opts.level, randomSuffix(6))
+		name = fmt.Sprintf("%s-l%d-%s", strings.ToLower(opts.company), opts.level, randomSuffix(6))
 	}
 
 	if opts.dryRun {
-		printDryRun(name, company, opts.level, provider, opts)
+		printDryRun(name, company, opts.level, provider, spec, opts)
 		return nil
 	}
 
+	// Parse optional TTL override.
+	ttlHours := spec.TTLDefaultHours
+	if opts.ttl != "" {
+		d, parseErr := time.ParseDuration(opts.ttl)
+		if parseErr != nil {
+			return fmt.Errorf("parsing --ttl %q: %w", opts.ttl, parseErr)
+		}
+		ttlHours = int(d.Hours())
+		if ttlHours < 1 {
+			ttlHours = 1
+		}
+	}
+
+	now := time.Now().UTC()
+	lab := &types.Lab{
+		ID:            uuid.New(),
+		Name:          name,
+		Company:       strings.ToLower(opts.company),
+		Level:         opts.level,
+		CloudProvider: provider,
+		Status:        types.LabStatusCreating,
+		CreatedAt:     now,
+		TTLHours:      ttlHours,
+		ExpiresAt:     now.Add(time.Duration(ttlHours) * time.Hour),
+	}
+
+	mgr, err := c.stateManager()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+
+	// Guard against duplicate lab names.
+	if existing, _ := mgr.GetLabByName(ctx, name); existing != nil {
+		return fmt.Errorf("lab %q already exists (status: %s)", name, existing.Status)
+	}
+
+	if err := mgr.CreateLab(ctx, lab); err != nil {
+		return fmt.Errorf("recording lab in state: %w", err)
+	}
+
 	c.log.Info().
+		Str("lab_id", lab.ID.String()).
 		Str("name", name).
-		Str("company", opts.company).
+		Str("company", lab.Company).
 		Int("level", opts.level).
 		Str("cloud_provider", string(provider)).
-		Msg("Creating lab (orchestrator not yet implemented)")
+		Msg("Lab record created in state")
 
-	fmt.Printf("Lab creation requested:\n")
-	fmt.Printf("  Name:     %s\n", name)
+	// Mark ACTIVE immediately; actual provisioning will happen in Phase 8.
+	lab.Status = types.LabStatusActive
+	if err := mgr.UpdateLab(ctx, lab); err != nil {
+		return fmt.Errorf("updating lab status: %w", err)
+	}
+
+	fmt.Printf("Lab created:\n")
+	fmt.Printf("  Name:     %s\n", lab.Name)
+	fmt.Printf("  ID:       %s\n", lab.ID)
 	fmt.Printf("  Company:  %s (%s)\n", company.Name, company.Description)
 	fmt.Printf("  Level:    %d\n", opts.level)
 	fmt.Printf("  Provider: %s\n", provider)
+	fmt.Printf("  Status:   %s\n", lab.Status)
+	fmt.Printf("  Expires:  %s\n", lab.ExpiresAt.Format(time.RFC3339))
 	fmt.Println()
-	fmt.Println("Note: Full orchestration will be available in Phase 8. State management and provisioners are being implemented.")
+	fmt.Println("Note: Provisioning (clusters, apps, IaC) will be available in Phase 8.")
+	fmt.Printf("Run 'petri info %s' to view lab details.\n", name)
 
 	return nil
 }
 
-func printDryRun(name string, company *types.Company, level int, provider types.CloudProvider, opts *createOptions) {
-	spec, _ := company.GetLevel(level)
-
+func printDryRun(name string, company *types.Company, level int, provider types.CloudProvider, spec types.LevelSpec, opts *createOptions) {
 	fmt.Println("=== DRY RUN ===")
 	fmt.Printf("Lab Name:      %s\n", name)
 	fmt.Printf("Company:       %s (%s)\n", company.Name, company.Description)
@@ -144,9 +199,9 @@ func printDryRun(name string, company *types.Company, level int, provider types.
 	}
 	fmt.Println()
 	fmt.Printf("Git repos that would be created:\n")
-	fmt.Printf("  %s-%s-infra\n", company.Name, name)
-	fmt.Printf("  %s-%s-gitops\n", company.Name, name)
-	fmt.Printf("  %s-%s-apps\n", company.Name, name)
+	fmt.Printf("  %s-%s-infra\n", strings.ToLower(company.Name), name)
+	fmt.Printf("  %s-%s-gitops\n", strings.ToLower(company.Name), name)
+	fmt.Printf("  %s-%s-apps\n", strings.ToLower(company.Name), name)
 }
 
 func (c *CLI) resolveCompaniesFile() string {

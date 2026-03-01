@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -9,7 +10,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jaimegago/petri/pkg/config"
+	"github.com/jaimegago/petri/pkg/crypto"
 	"github.com/jaimegago/petri/pkg/logger"
+	"github.com/jaimegago/petri/pkg/state"
 )
 
 const version = "0.1.0"
@@ -23,6 +26,8 @@ type CLI struct {
 	logLevel      string
 	cfg           *config.Config
 	log           zerolog.Logger
+	stateMgr      state.Manager
+	cipher        crypto.Cipher
 }
 
 // NewCLI creates a CLI with zero-value dependencies.
@@ -77,7 +82,7 @@ func (c *CLI) initialize(cmdName string) error {
 	}
 
 	var err error
-	c.cfg, err = config.Load()
+	c.cfg, err = config.Load(c.cfgFile)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
@@ -88,4 +93,37 @@ func (c *CLI) initialize(cmdName string) error {
 
 	c.log = logger.NewConsole(c.cfg.Observability.LogLevel, os.Stdout)
 	return nil
+}
+
+// stateManager returns the shared state manager, initialising it on first call.
+// Commands that don't need state (health, init, version) never call this.
+func (c *CLI) stateManager() (state.Manager, error) {
+	if c.stateMgr != nil {
+		return c.stateMgr, nil
+	}
+	if c.cfg == nil {
+		return nil, fmt.Errorf("config not loaded; run 'petri init' first")
+	}
+	mgr, err := state.New(context.Background(), c.cfg.State)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to state backend (%s): %w", c.cfg.State.Backend, err)
+	}
+	c.stateMgr = mgr
+	return mgr, nil
+}
+
+// encryptionCipher returns the shared AES-256-GCM cipher, initialising it on first call.
+func (c *CLI) encryptionCipher() (crypto.Cipher, error) {
+	if c.cipher != nil {
+		return c.cipher, nil
+	}
+	if c.cfg == nil {
+		return nil, fmt.Errorf("config not loaded; run 'petri init' first")
+	}
+	ciph, err := crypto.NewAESCipher(c.cfg.Credentials.MasterKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading encryption key: %w", err)
+	}
+	c.cipher = ciph
+	return ciph, nil
 }
