@@ -2,7 +2,7 @@
 
 Phased implementation plan for building Petri. Each phase has clear deliverables, dependencies, and acceptance criteria.
 
-## Phase 1: Foundation (CLI Scaffold & Core Types)
+## Phase 1: Foundation (CLI Scaffold & Core Types) ✅ COMPLETE
 
 ### Deliverables
 
@@ -35,20 +35,22 @@ Logging:
 None - this is the foundation
 
 ### Acceptance Criteria
-- petri --version works
-- petri --help shows all commands
-- petri init creates ~/.petri directory and config
-- Company YAML files load without errors
-- Logging writes properly formatted JSON to stdout
-- All core types have proper validation methods
-- Code passes go fmt, go vet, golangci-lint
+
+- [x] petri --version works
+- [x] petri --help shows all commands
+- [x] petri init creates ~/.petri directory and config
+- [x] Company YAML files load without errors
+- [x] Logging writes properly formatted JSON to stdout
+- [x] All core types have proper validation methods
+- [x] Code passes go fmt, go vet, golangci-lint
 
 ### Estimated Duration
+
 2-3 days
 
 ---
 
-## Phase 2: State Management & Encryption
+## Phase 2: State Management & Encryption ✅ COMPLETE
 
 ### Deliverables
 
@@ -81,23 +83,54 @@ Lab lifecycle management:
 Phase 1 complete
 
 ### Acceptance Criteria
-- PostgreSQL schema creates successfully
-- Can create/read/update/delete lab records
-- Can store and retrieve encrypted credentials
-- Master key generation works with proper permissions (600)
-- Credentials prompt hides input
-- Can query expired labs
-- State transitions enforce valid paths
-- All state operations are transactional
-- Unit tests for all state operations
-- Unit tests for encryption/decryption
+
+- [x] PostgreSQL schema creates successfully
+- [x] SQLite schema creates successfully (default dev backend)
+- [x] Can create/read/update/delete lab records
+- [x] Can store and retrieve encrypted credentials
+- [x] Master key generation works with proper permissions (600)
+- [x] Credentials prompt hides input
+- [x] Can query expired labs
+- [x] State transitions enforce valid paths
+- [x] All state operations are transactional
+- [x] Unit tests for all state operations
+- [x] Unit tests for encryption/decryption
+- [x] petri create stores lab in state (CREATING → ACTIVE)
+- [x] petri list reads from state with table/JSON output
+- [x] petri info shows full lab details + resources
+- [x] petri destroy transitions ACTIVE → DESTROYING → DESTROYED
+- [x] petri extend updates TTL in state
+- [x] petri cleanup --expired destroys all past-TTL labs
 
 ### Estimated Duration
+
 3-4 days
 
 ---
 
-## Phase 3: Template System & Generators
+## Phase 3: Template System & Generators 🚧 IN PROGRESS
+
+### Progress
+
+Package stubs and directory structure created. No template content or generator logic implemented yet.
+
+**Done:**
+
+- Package stubs created: `pkg/generators/iac`, `pkg/generators/gitops`, `pkg/generators/apps`, `pkg/generators/commits`
+- Provisioner stubs created: `pkg/provisioners/git`, `pkg/provisioners/local`, `pkg/provisioners/terraform`, `pkg/provisioners/pulumi`, `pkg/provisioners/kubectl`
+- Orchestrator stub created: `pkg/orchestrator`
+- Company registry stub created: `pkg/companies`
+- Template directory structure created: `templates/terraform/`, `templates/pulumi/`, `templates/gitops/`, `templates/apps/`
+
+**Remaining:**
+
+- All template files (terraform, pulumi, gitops, apps)
+- embed.FS wiring and template loading/caching
+- IaC generator implementation
+- GitOps generator implementation
+- Apps generator implementation
+- Commits generator implementation
+- Unit tests for all generators
 
 ### Deliverables
 
@@ -137,22 +170,25 @@ Commits generator:
 - Evolution patterns (setup → stabilization → features → incidents)
 
 ### Dependencies
+
 Phase 2 complete
 
 ### Acceptance Criteria
-- Templates load from embedded filesystem
-- Can render Terraform templates for all clouds
-- Can render Pulumi templates
-- Can render ArgoCD/Flux manifests
-- Generated IaC is valid (terraform validate passes)
-- Generated K8s manifests are valid (kubectl dry-run)
-- Commit history looks realistic (proper timestamps, authors, messages)
-- Templates respect level conditionals
-- Company-specific customizations work
-- Unit tests for all generators
-- Template rendering has proper error handling
+
+- [ ] Templates load from embedded filesystem
+- [ ] Can render Terraform templates for all clouds
+- [ ] Can render Pulumi templates
+- [ ] Can render ArgoCD/Flux manifests
+- [ ] Generated IaC is valid (terraform validate passes)
+- [ ] Generated K8s manifests are valid (kubectl dry-run)
+- [ ] Commit history looks realistic (proper timestamps, authors, messages)
+- [ ] Templates respect level conditionals
+- [ ] Company-specific customizations work
+- [ ] Unit tests for all generators
+- [ ] Template rendering has proper error handling
 
 ### Estimated Duration
+
 4-5 days
 
 ---
