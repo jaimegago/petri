@@ -1,0 +1,41 @@
+variable "project_id" {
+  description = "GCP project ID"
+  type        = string
+}
+
+variable "region" {
+  description = "GCP region for resource deployment"
+  type        = string
+  default     = "us-central1"
+}
+
+variable "lab_name" {
+  description = "Unique lab identifier used in resource naming"
+  type        = string
+  default     = "{{ .Lab.Name }}"
+}
+
+variable "company" {
+  description = "Company name used in resource labelling"
+  type        = string
+  default     = "{{ .Company.Name }}"
+}
+
+variable "level" {
+  description = "Infrastructure complexity level (1-3)"
+  type        = number
+  default     = {{ .Level.Number }}
+}
+
+variable "kubernetes_version" {
+  description = "Target GKE release channel / version"
+  type        = string
+  default     = "REGULAR"
+}
+{{ range $i, $cluster := .Level.ClusterNames }}
+variable "{{ $cluster }}_node_count" {
+  description = "Initial node count per zone for the {{ $cluster }} cluster"
+  type        = number
+  default     = {{ index $.Level.NodeCounts $i }}
+}
+{{ end }}

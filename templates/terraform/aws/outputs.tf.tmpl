@@ -1,0 +1,31 @@
+output "vpc_id" {
+  description = "VPC ID"
+  value       = module.vpc.vpc_id
+}
+
+output "vpc_private_subnets" {
+  description = "Private subnet IDs"
+  value       = module.vpc.private_subnets
+}
+{{ range .Level.ClusterNames }}
+output "eks_{{ . }}_cluster_name" {
+  description = "EKS cluster name for {{ . }}"
+  value       = module.eks_{{ . }}.cluster_name
+}
+
+output "eks_{{ . }}_cluster_endpoint" {
+  description = "EKS API server endpoint for {{ . }}"
+  value       = module.eks_{{ . }}.cluster_endpoint
+}
+
+output "eks_{{ . }}_cluster_certificate" {
+  description = "Base64-encoded cluster CA certificate for {{ . }}"
+  value       = module.eks_{{ . }}.cluster_certificate_authority_data
+  sensitive   = true
+}
+
+output "eks_{{ . }}_kubeconfig_command" {
+  description = "aws CLI command to configure kubeconfig for {{ . }}"
+  value       = "aws eks update-kubeconfig --name ${module.eks_{{ . }}.cluster_name} --region ${var.aws_region}"
+}
+{{ end }}

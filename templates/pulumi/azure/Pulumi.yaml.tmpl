@@ -1,0 +1,13 @@
+name: {{ .Company.Name }}-{{ .Lab.Name }}
+runtime: nodejs
+description: |
+  {{ .Company.Name }} infrastructure for lab {{ .Lab.Name }}.
+  Managed by Petri — complexity level {{ .Level.Number }}.
+
+config:
+  azure-native:location:
+    value: eastus
+  {{ .Company.Name }}:labName:
+    value: {{ .Lab.Name }}
+  {{ .Company.Name }}:level:
+    value: "{{ .Level.Number }}"

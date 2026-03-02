@@ -1,0 +1,151 @@
+locals {
+  prefix = "{{ .Company.Name }}-{{ .Lab.Name }}"
+  labels = {
+    lab       = "{{ .Lab.Name }}"
+    company   = "{{ .Company.Name }}"
+    managedby = "petri"
+    level     = "{{ .Level.Number }}"
+  }
+}
+
+# ─── VPC Network ─────────────────────────────────────────────────────────────
+
+resource "google_compute_network" "main" {
+  name                    = local.prefix
+  auto_create_subnetworks = false
+  project                 = var.project_id
+}
+
+resource "google_compute_subnetwork" "main" {
+  name          = "${local.prefix}-subnet"
+  ip_cidr_range = "10.0.0.0/16"
+  region        = var.region
+  network       = google_compute_network.main.id
+  project       = var.project_id
+
+  secondary_ip_range {
+    range_name    = "pods"
+    ip_cidr_range = "10.1.0.0/16"
+  }
+
+  secondary_ip_range {
+    range_name    = "services"
+    ip_cidr_range = "10.2.0.0/20"
+  }
+}
+{{ range $i, $cluster := .Level.ClusterNames }}
+# ─── GKE: {{ $cluster }} ──────────────────────────────────────────────────────
+
+resource "google_container_cluster" "{{ $cluster }}" {
+  name     = "${local.prefix}-{{ $cluster }}"
+  location = var.region
+  project  = var.project_id
+
+  release_channel {
+    channel = var.kubernetes_version
+  }
+
+  network    = google_compute_network.main.name
+  subnetwork = google_compute_subnetwork.main.name
+
+  ip_allocation_policy {
+    cluster_secondary_range_name  = "pods"
+    services_secondary_range_name = "services"
+  }
+
+  # Use separately managed node pool
+  remove_default_node_pool = true
+  initial_node_count       = 1
+
+  workload_identity_config {
+    workload_pool = "${var.project_id}.svc.id.goog"
+  }
+
+  resource_labels = local.labels
+}
+
+resource "google_container_node_pool" "{{ $cluster }}_main" {
+  name       = "main"
+  location   = var.region
+  cluster    = google_container_cluster.{{ $cluster }}.name
+  project    = var.project_id
+
+  initial_node_count = var.{{ $cluster }}_node_count
+
+  autoscaling {
+    min_node_count = 1
+    max_node_count = {{ add (index $.Level.NodeCounts $i) 2 }}
+  }
+
+  node_config {
+    machine_type = "{{ index $.Level.InstanceTypes $i }}"
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/logging.write",
+      "https://www.googleapis.com/auth/monitoring",
+      "https://www.googleapis.com/auth/devstorage.read_only",
+    ]
+
+    labels = local.labels
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+  }
+}
+{{ end }}
+{{ range .Level.Databases }}
+{{ if eq .Type "postgresql" }}
+# ─── Cloud SQL PostgreSQL ─────────────────────────────────────────────────────
+
+resource "google_sql_database_instance" "postgres" {
+  name             = "${local.prefix}-pg"
+  database_version = "POSTGRES_{{ .EngineVersion }}"
+  region           = var.region
+  project          = var.project_id
+
+  settings {
+    tier = "{{ .InstanceClass }}"
+
+    ip_configuration {
+      ipv4_enabled    = false
+      private_network = google_compute_network.main.id
+    }
+
+    backup_configuration {
+      enabled = true
+    }
+
+    database_flags {
+      name  = "log_connections"
+      value = "on"
+    }
+  }
+
+  deletion_protection = false
+}
+
+resource "google_sql_database" "app" {
+  name     = "{{ $.Company.Name }}db"
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+}
+{{ end }}
+{{ if eq .Type "redis" }}
+# ─── Memorystore Redis ────────────────────────────────────────────────────────
+
+resource "google_redis_instance" "main" {
+  name           = "${local.prefix}-redis"
+  tier           = "BASIC"
+  memory_size_gb = 1
+  region         = var.region
+  project        = var.project_id
+
+  redis_version = "REDIS_{{ .EngineVersion | replace "." "_" }}"
+
+  authorized_network = google_compute_network.main.id
+
+  labels = local.labels
+}
+{{ end }}
+{{ end }}

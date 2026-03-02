@@ -1,0 +1,26 @@
+output "network_name" {
+  description = "VPC network name"
+  value       = google_compute_network.main.name
+}
+
+output "subnetwork_name" {
+  description = "VPC subnetwork name"
+  value       = google_compute_subnetwork.main.name
+}
+{{ range .Level.ClusterNames }}
+output "gke_{{ . }}_cluster_name" {
+  description = "GKE cluster name for {{ . }}"
+  value       = google_container_cluster.{{ . }}.name
+}
+
+output "gke_{{ . }}_endpoint" {
+  description = "GKE cluster endpoint for {{ . }}"
+  value       = google_container_cluster.{{ . }}.endpoint
+  sensitive   = true
+}
+
+output "gke_{{ . }}_kubeconfig_command" {
+  description = "gcloud command to configure kubeconfig for {{ . }}"
+  value       = "gcloud container clusters get-credentials ${google_container_cluster.{{ . }}.name} --region ${var.region} --project ${var.project_id}"
+}
+{{ end }}

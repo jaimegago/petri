@@ -1,0 +1,17 @@
+{
+  "name": "{{ .Company.Name }}-{{ .Lab.Name }}",
+  "version": "1.0.0",
+  "description": "{{ .Company.Name }} Pulumi infrastructure",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@pulumi/pulumi": "^3.0.0",
+    "@pulumi/azure-native": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
