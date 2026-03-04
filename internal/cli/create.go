@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jaimegago/petri/pkg/config"
+	"github.com/jaimegago/petri/pkg/orchestrator"
 	"github.com/jaimegago/petri/pkg/types"
 )
 
@@ -154,26 +155,33 @@ func (c *CLI) runCreate(opts *createOptions) error {
 		Str("company", lab.Company).
 		Int("level", opts.level).
 		Str("cloud_provider", string(provider)).
-		Msg("Lab record created in state")
+		Msg("Lab record created; starting provisioning")
 
-	// Mark ACTIVE immediately; actual provisioning will happen in Phase 8.
-	lab.Status = types.LabStatusActive
-	if err := mgr.UpdateLab(ctx, lab); err != nil {
-		return fmt.Errorf("updating lab status: %w", err)
+	// Resolve GitHub token for cloud labs.
+	token := ""
+	if provider != types.CloudProviderLocal {
+		token = githubToken()
+		if token == "" {
+			c.log.Warn().Msg("GITHUB_TOKEN not set; git repository creation will be skipped")
+		}
 	}
 
-	fmt.Printf("Lab created:\n")
-	fmt.Printf("  Name:     %s\n", lab.Name)
-	fmt.Printf("  ID:       %s\n", lab.ID)
-	fmt.Printf("  Company:  %s (%s)\n", company.Name, company.Description)
-	fmt.Printf("  Level:    %d\n", opts.level)
-	fmt.Printf("  Provider: %s\n", provider)
-	fmt.Printf("  Status:   %s\n", lab.Status)
-	fmt.Printf("  Expires:  %s\n", lab.ExpiresAt.Format(time.RFC3339))
-	fmt.Println()
-	fmt.Println("Note: Provisioning (clusters, apps, IaC) will be available in Phase 8.")
-	fmt.Printf("Run 'petri info %s' to view lab details.\n", name)
+	// Build and run orchestrator.
+	orch, err := c.buildOrchestrator(token)
+	if err != nil {
+		return fmt.Errorf("initializing orchestrator: %w", err)
+	}
 
+	if err := orch.Create(ctx, orchestrator.CreateOptions{
+		Lab:     lab,
+		Company: company,
+		Spec:    spec,
+		NoApps:  opts.noApps,
+	}); err != nil {
+		return fmt.Errorf("lab creation failed: %w", err)
+	}
+
+	fmt.Printf("\nRun 'petri info %s' to view lab details.\n", name)
 	return nil
 }
 

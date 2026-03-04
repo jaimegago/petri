@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jaimegago/petri/pkg/orchestrator"
 	"github.com/jaimegago/petri/pkg/types"
 )
 
@@ -55,21 +56,44 @@ func (c *CLI) runCleanup(expired bool) error {
 	}
 	fmt.Println()
 
+	orch, err := c.buildOrchestrator(githubToken())
+	if err != nil {
+		return fmt.Errorf("initializing orchestrator: %w", err)
+	}
+
 	var destroyed, failed int
 	for _, lab := range labs {
+		if !lab.CanTransitionTo(types.LabStatusDestroying) {
+			c.log.Warn().Str("name", lab.Name).Str("status", string(lab.Status)).Msg("Skipping lab; cannot transition to DESTROYING")
+			continue
+		}
+
 		lab.Status = types.LabStatusDestroying
 		if err := mgr.UpdateLab(ctx, lab); err != nil {
-			c.log.Warn().Err(err).Str("name", lab.Name).Msg("Failed to mark lab as destroying")
+			c.log.Warn().Err(err).Str("name", lab.Name).Msg("Failed to mark lab as DESTROYING")
 			failed++
 			continue
 		}
 
-		_ = mgr.DeleteResources(ctx, lab.ID)
-		_ = mgr.DeleteCredentials(ctx, lab.ID)
+		// Resolve company (best-effort).
+		company, spec, _ := c.resolveCompanyForLab(lab)
+		destroyOpts := orchestrator.DestroyOptions{
+			Lab:   lab,
+			Force: true, // auto-cleanup always uses force
+		}
+		if company != nil {
+			destroyOpts.Company = company
+			destroyOpts.Spec = spec
+		} else {
+			destroyOpts.Company = &types.Company{
+				Name:          lab.Company,
+				CloudProvider: lab.CloudProvider,
+				GitHubOrg:     extractGitHubOrgFromRepos(lab),
+			}
+		}
 
-		lab.Status = types.LabStatusDestroyed
-		if err := mgr.UpdateLab(ctx, lab); err != nil {
-			c.log.Warn().Err(err).Str("name", lab.Name).Msg("Failed to mark lab as destroyed")
+		if err := orch.Destroy(ctx, destroyOpts); err != nil {
+			c.log.Warn().Err(err).Str("name", lab.Name).Msg("Cleanup: destroy failed")
 			failed++
 			continue
 		}
@@ -83,7 +107,5 @@ func (c *CLI) runCleanup(expired bool) error {
 		fmt.Printf(", %d failed", failed)
 	}
 	fmt.Println()
-	fmt.Println("Note: Actual infrastructure teardown will be available in Phase 8.")
-
 	return nil
 }

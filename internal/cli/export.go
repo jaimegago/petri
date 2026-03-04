@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -23,7 +24,22 @@ func (c *CLI) newExportCredsCmd() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) runExportCreds(name, _ string) error {
-	fmt.Printf("Credential export for lab %q will be available in Phase 2 (state management).\n", name)
-	return nil
+func (c *CLI) runExportCreds(name, outputPath string) error {
+	mgr, err := c.stateManager()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	lab, err := mgr.GetLabByName(ctx, name)
+	if err != nil {
+		return fmt.Errorf("lab %q not found", name)
+	}
+
+	orch, err := c.buildOrchestrator("")
+	if err != nil {
+		return fmt.Errorf("initializing orchestrator: %w", err)
+	}
+
+	return orch.ExportCredentials(ctx, lab, outputPath)
 }

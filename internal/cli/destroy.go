@@ -3,9 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/jaimegago/petri/pkg/config"
+	"github.com/jaimegago/petri/pkg/orchestrator"
 	"github.com/jaimegago/petri/pkg/types"
 )
 
@@ -26,7 +29,7 @@ func (c *CLI) newDestroyCmd() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) runDestroy(name string, _ bool) error {
+func (c *CLI) runDestroy(name string, force bool) error {
 	mgr, err := c.stateManager()
 	if err != nil {
 		return err
@@ -51,24 +54,74 @@ func (c *CLI) runDestroy(name string, _ bool) error {
 	c.log.Info().
 		Str("lab_id", lab.ID.String()).
 		Str("name", name).
-		Msg("Lab marked for destruction")
+		Msg("Starting lab destruction")
 
-	// Full infrastructure teardown happens in Phase 8 (orchestrator).
-	// Remove tracked records and mark destroyed.
-	if err := mgr.DeleteResources(ctx, lab.ID); err != nil {
-		c.log.Warn().Err(err).Str("name", name).Msg("Failed to delete resource records")
-	}
-	if err := mgr.DeleteCredentials(ctx, lab.ID); err != nil {
-		c.log.Warn().Err(err).Str("name", name).Msg("Failed to delete credential records")
+	// Resolve company for cloud teardown (best-effort; non-fatal if missing).
+	company, spec, companyErr := c.resolveCompanyForLab(lab)
+	if companyErr != nil {
+		c.log.Warn().Err(companyErr).Msg("Could not resolve company profile; skipping IaC teardown")
 	}
 
-	lab.Status = types.LabStatusDestroyed
-	if err := mgr.UpdateLab(ctx, lab); err != nil {
-		return fmt.Errorf("marking lab destroyed: %w", err)
+	// Resolve GitHub token for cloud labs.
+	token := ""
+	if lab.CloudProvider != types.CloudProviderLocal {
+		token = githubToken()
 	}
 
-	fmt.Printf("Lab %q destroyed.\n", name)
-	fmt.Println("Note: Actual infrastructure teardown (clusters, repos, IaC) will be available in Phase 8.")
+	orch, orchErr := c.buildOrchestrator(token)
+	if orchErr != nil {
+		return fmt.Errorf("initializing orchestrator: %w", orchErr)
+	}
 
-	return nil
+	destroyOpts := orchestrator.DestroyOptions{
+		Lab:   lab,
+		Force: force,
+	}
+	if company != nil {
+		destroyOpts.Company = company
+		destroyOpts.Spec = spec
+	} else {
+		// Minimal stub so the orchestrator can still clean up metadata-tracked resources.
+		destroyOpts.Company = &types.Company{
+			Name:          lab.Company,
+			CloudProvider: lab.CloudProvider,
+			GitHubOrg:     extractGitHubOrgFromRepos(lab),
+		}
+	}
+
+	return orch.Destroy(ctx, destroyOpts)
+}
+
+// resolveCompanyForLab loads the company profile for a lab from the companies YAML.
+func (c *CLI) resolveCompanyForLab(lab *types.Lab) (*types.Company, types.LevelSpec, error) {
+	companies, err := config.LoadCompanies(c.resolveCompaniesFile())
+	if err != nil {
+		return nil, types.LevelSpec{}, fmt.Errorf("loading companies: %w", err)
+	}
+	for i := range companies {
+		if strings.EqualFold(companies[i].Name, lab.Company) {
+			spec, specErr := companies[i].GetLevel(lab.Level)
+			if specErr != nil {
+				return &companies[i], types.LevelSpec{}, specErr
+			}
+			return &companies[i], spec, nil
+		}
+	}
+	return nil, types.LevelSpec{}, fmt.Errorf("company %q not found", lab.Company)
+}
+
+// extractGitHubOrgFromRepos extracts the GitHub org from lab git repo URLs.
+func extractGitHubOrgFromRepos(lab *types.Lab) string {
+	for _, repo := range lab.Metadata.GitRepos {
+		const prefix = "https://github.com/"
+		if len(repo.URL) > len(prefix) {
+			rest := repo.URL[len(prefix):]
+			for i, ch := range rest {
+				if ch == '/' {
+					return rest[:i]
+				}
+			}
+		}
+	}
+	return ""
 }

@@ -11,7 +11,17 @@ import (
 
 	"github.com/jaimegago/petri/pkg/config"
 	"github.com/jaimegago/petri/pkg/crypto"
+	appsgen "github.com/jaimegago/petri/pkg/generators/apps"
+	commitsgen "github.com/jaimegago/petri/pkg/generators/commits"
+	gitopsgen "github.com/jaimegago/petri/pkg/generators/gitops"
+	iacgen "github.com/jaimegago/petri/pkg/generators/iac"
 	"github.com/jaimegago/petri/pkg/logger"
+	"github.com/jaimegago/petri/pkg/orchestrator"
+	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
+	"github.com/jaimegago/petri/pkg/provisioners/kubectl"
+	localprov "github.com/jaimegago/petri/pkg/provisioners/local"
+	tfprov "github.com/jaimegago/petri/pkg/provisioners/terraform"
+	pulumiprov "github.com/jaimegago/petri/pkg/provisioners/pulumi"
 	"github.com/jaimegago/petri/pkg/state"
 )
 
@@ -126,4 +136,58 @@ func (c *CLI) encryptionCipher() (crypto.Cipher, error) {
 	}
 	c.cipher = ciph
 	return ciph, nil
+}
+
+// buildOrchestrator constructs an Orchestrator wired with all real provisioners
+// and generators. gitHubToken may be empty for local-only labs.
+func (c *CLI) buildOrchestrator(gitHubToken string) (*orchestrator.Orchestrator, error) {
+	mgr, err := c.stateManager()
+	if err != nil {
+		return nil, err
+	}
+	ciph, err := c.encryptionCipher()
+	if err != nil {
+		return nil, err
+	}
+
+	deps := orchestrator.Deps{
+		State:  mgr,
+		Cipher: ciph,
+		Log:    c.log,
+
+		// Local provisioner (kind).
+		LocalProv: localprov.New(localprov.Config{}),
+
+		// Kubectl client factory.
+		KubectlFactory: func(kubeconfigPath string) orchestrator.KubectlClient {
+			return kubectl.New(kubectl.Config{KubeconfigPath: kubeconfigPath})
+		},
+
+		// Generators (always wired; they use embedded templates).
+		IaCGen:     iacgen.New(),
+		GitOpsGen:  gitopsgen.New(),
+		AppsGen:    appsgen.New(),
+		CommitsGen: commitsgen.New(),
+
+		// Terraform provisioner.
+		TFProv: tfprov.New(tfprov.Config{}),
+
+		// Pulumi provisioner.
+		PulumiProv: pulumiprov.New(pulumiprov.Config{}),
+	}
+
+	// Wire git provisioner only when a token is available.
+	if gitHubToken != "" {
+		deps.GitProv = gitprov.New(gitprov.Config{Token: gitHubToken})
+	}
+
+	return orchestrator.New(orchestrator.Config{}, deps), nil
+}
+
+// githubToken returns the GitHub PAT from the GITHUB_TOKEN environment variable.
+func githubToken() string {
+	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
+		return t
+	}
+	return os.Getenv("PETRI_GITHUB_TOKEN")
 }
