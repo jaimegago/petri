@@ -101,9 +101,9 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 	}
 
 	// Local cluster: 1 cluster, local provider — choose step count appropriately.
-	totalSteps := 4
+	totalSteps := 6
 	if opts.NoApps {
-		totalSteps = 3
+		totalSteps = 5
 	}
 	prog := newProgress(totalSteps, o.log)
 
@@ -149,7 +149,19 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 		return fmt.Errorf("waiting for nodes: %w", err)
 	}
 
-	// ── Step 4 (optional): Deploy application manifests ─────────────────────
+	// ── Step 4: Deploy platform components ──────────────────────────────────
+	prog.Step("Deploying platform components")
+	if err := o.applyPlatformManifests(ctx, opts, kctl); err != nil {
+		o.log.Warn().Err(err).Msg("Platform manifest deployment had errors; continuing")
+	}
+
+	// ── Step 5: Deploy observability stack ──────────────────────────────────
+	prog.Step("Deploying observability stack")
+	if err := o.applyObservabilityManifests(ctx, opts, kctl); err != nil {
+		o.log.Warn().Err(err).Msg("Observability manifest deployment had errors; continuing")
+	}
+
+	// ── Step 6 (optional): Deploy application manifests ─────────────────────
 	if !opts.NoApps {
 		prog.Step("Deploying application manifests")
 		if err := o.applyAppManifests(ctx, opts, kctl); err != nil {
@@ -175,6 +187,52 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 
 	prog.Done(fmt.Sprintf("Lab %q is ACTIVE", opts.Lab.Name))
 	printLocalConnectionInfo(opts.Lab, cluster)
+	return nil
+}
+
+// applyPlatformManifests generates and applies platform component manifests.
+func (o *Orchestrator) applyPlatformManifests(ctx context.Context, opts CreateOptions, kctl KubectlClient) error {
+	if o.deps.PlatformGen == nil {
+		o.log.Warn().Msg("Platform generator not configured; skipping platform deployment")
+		return nil
+	}
+	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
+	files, err := o.deps.PlatformGen.Generate(ctx, tmplCtx)
+	if err != nil {
+		return fmt.Errorf("generating platform manifests: %w", err)
+	}
+	var errs []string
+	for _, f := range files {
+		if err := kctl.ApplyManifest(ctx, f.Content); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", f.Path, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("applying platform manifests: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// applyObservabilityManifests generates and applies observability stack manifests.
+func (o *Orchestrator) applyObservabilityManifests(ctx context.Context, opts CreateOptions, kctl KubectlClient) error {
+	if o.deps.ObservabilityGen == nil {
+		o.log.Warn().Msg("Observability generator not configured; skipping observability deployment")
+		return nil
+	}
+	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
+	files, err := o.deps.ObservabilityGen.Generate(ctx, tmplCtx)
+	if err != nil {
+		return fmt.Errorf("generating observability manifests: %w", err)
+	}
+	var errs []string
+	for _, f := range files {
+		if err := kctl.ApplyManifest(ctx, f.Content); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", f.Path, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("applying observability manifests: %s", strings.Join(errs, "; "))
+	}
 	return nil
 }
 

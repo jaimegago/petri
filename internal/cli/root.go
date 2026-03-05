@@ -15,6 +15,8 @@ import (
 	commitsgen "github.com/jaimegago/petri/pkg/generators/commits"
 	gitopsgen "github.com/jaimegago/petri/pkg/generators/gitops"
 	iacgen "github.com/jaimegago/petri/pkg/generators/iac"
+	obsgen "github.com/jaimegago/petri/pkg/generators/observability"
+	platformgen "github.com/jaimegago/petri/pkg/generators/platform"
 	"github.com/jaimegago/petri/pkg/logger"
 	"github.com/jaimegago/petri/pkg/orchestrator"
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
@@ -164,10 +166,12 @@ func (c *CLI) buildOrchestrator(gitHubToken string) (*orchestrator.Orchestrator,
 		},
 
 		// Generators (always wired; they use embedded templates).
-		IaCGen:     iacgen.New(),
-		GitOpsGen:  gitopsgen.New(),
-		AppsGen:    appsgen.New(),
-		CommitsGen: commitsgen.New(),
+		IaCGen:           iacgen.New(),
+		GitOpsGen:        gitopsgen.New(),
+		AppsGen:          appsgen.New(),
+		ObservabilityGen: obsgen.New(),
+		PlatformGen:      platformgen.New(),
+		CommitsGen:       commitsgen.New(),
 
 		// Terraform provisioner.
 		TFProv: tfprov.New(tfprov.Config{}),

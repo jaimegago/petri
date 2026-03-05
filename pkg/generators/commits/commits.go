@@ -199,35 +199,44 @@ func messagesFor(rt RepoType, company *types.Company) phaseMessages {
 func infraMessages(company *types.Company) phaseMessages {
 	cloud := string(company.CloudProvider)
 	tool := string(company.IaCTool)
+
+	// Company-specific setup messages add flavour matching the org's tech stack.
+	setupExtra := companyInfraSetup(company)
+	featuresExtra := companyInfraFeatures(company)
+
+	setup := append([]string{
+		fmt.Sprintf("init: bootstrap %s %s configuration", cloud, tool),
+		"init: add provider config and backend",
+		"init: add VPC and networking modules",
+		"init: add initial cluster configuration",
+		fmt.Sprintf("init: configure %s state backend", cloud),
+		"docs: add README with setup instructions",
+	}, setupExtra...)
+
+	features := append([]string{
+		"feat: add cluster autoscaler configuration",
+		"feat: enable private endpoint access",
+		"feat: add managed database module",
+		"feat: configure node pools per environment",
+		"feat: add cache layer (Redis) configuration",
+		"feat: enable container insights monitoring",
+		"feat: add spot instance node group",
+		"chore: upgrade " + tool + " modules to latest",
+	}, featuresExtra...)
+
 	return phaseMessages{
-		setup: []string{
-			fmt.Sprintf("init: bootstrap %s %s configuration", cloud, tool),
-			"init: add provider config and backend",
-			"init: add VPC and networking modules",
-			"init: add initial cluster configuration",
-			fmt.Sprintf("init: configure %s state backend", cloud),
-			"docs: add README with setup instructions",
-		},
+		setup: setup,
 		stabilise: []string{
 			"fix: correct subnet CIDR ranges",
 			"fix: update IAM role permissions",
 			"fix: resolve provider version constraints",
 			"chore: pin module versions for stability",
 			"fix: add missing tags to resources",
-			"chore: run terraform fmt",
+			fmt.Sprintf("chore: run %s fmt", tool),
 			"fix: correct security group ingress rules",
 			"refactor: extract VPC config to module",
 		},
-		features: []string{
-			"feat: add cluster autoscaler configuration",
-			"feat: enable private endpoint access",
-			"feat: add managed database module",
-			"feat: configure node pools per environment",
-			"feat: add cache layer (Redis) configuration",
-			"feat: enable container insights monitoring",
-			"feat: add spot instance node group",
-			"chore: upgrade " + tool + " modules to latest",
-		},
+		features: features,
 		recent: []string{
 			"chore: rotate service account keys",
 			"fix: update node instance type for cost savings",
@@ -241,6 +250,61 @@ func infraMessages(company *types.Company) phaseMessages {
 			"post-incident: apply hardened config after review",
 			"hotfix: restore backup configuration after drift detected",
 		},
+	}
+}
+
+// companyInfraSetup returns company-specific init commit messages.
+func companyInfraSetup(company *types.Company) []string {
+	switch company.Name {
+	case "acme":
+		return []string{
+			"init: configure EKS managed node groups",
+			"init: add IAM roles for service accounts (IRSA)",
+			"init: set up S3 remote state with DynamoDB locking",
+		}
+	case "techflow":
+		return []string{
+			"init: configure AKS with managed identity",
+			"init: add Azure Monitor integration",
+			"init: set up Azure Storage Account for Pulumi state",
+		}
+	case "cloudnative":
+		return []string{
+			"init: configure GKE Autopilot workload identity",
+			"init: add Cloud Armor security policies",
+			"init: set up GCS bucket for Terraform state",
+		}
+	default:
+		return nil
+	}
+}
+
+// companyInfraFeatures returns company-specific feature commit messages.
+func companyInfraFeatures(company *types.Company) []string {
+	switch company.Name {
+	case "acme":
+		return []string{
+			"feat: enable EKS Pod Identity for workloads",
+			"feat: add Karpenter node provisioner",
+			"feat: configure AWS Load Balancer Controller",
+			"feat: add ElastiCache Redis cluster module",
+		}
+	case "techflow":
+		return []string{
+			"feat: enable Azure AD workload identity federation",
+			"feat: add KEDA HTTP scaler configuration",
+			"feat: configure Azure Application Gateway Ingress",
+			"feat: add Azure Cache for Redis module",
+		}
+	case "cloudnative":
+		return []string{
+			"feat: enable GKE Gateway API for traffic management",
+			"feat: add Cloud Spanner instance module",
+			"feat: configure Anthos Service Mesh (ASM)",
+			"feat: add Memorystore Redis instance",
+		}
+	default:
+		return nil
 	}
 }
 
@@ -289,6 +353,18 @@ func gitopsMessages(company *types.Company) phaseMessages {
 }
 
 func appsMessages(company *types.Company) phaseMessages {
+	langExtra := companyAppFeatures(company)
+
+	features := append([]string{
+		"feat: add retry logic with exponential backoff",
+		"feat: implement circuit breaker pattern",
+		"feat: add distributed tracing spans",
+		"feat: implement request validation middleware",
+		"feat: add Prometheus metrics endpoint",
+		"feat: implement graceful shutdown",
+		"feat: add request ID propagation",
+	}, langExtra...)
+
 	return phaseMessages{
 		setup: []string{
 			"init: scaffold " + company.Name + " microservices",
@@ -306,15 +382,7 @@ func appsMessages(company *types.Company) phaseMessages {
 			"chore: add integration test suite",
 			"fix: correct Content-Type header handling",
 		},
-		features: []string{
-			"feat: add retry logic with exponential backoff",
-			"feat: implement circuit breaker pattern",
-			"feat: add distributed tracing spans",
-			"feat: implement request validation middleware",
-			"feat: add Prometheus metrics endpoint",
-			"feat: implement graceful shutdown",
-			"feat: add request ID propagation",
-		},
+		features: features,
 		recent: []string{
 			"chore: update dependencies",
 			"fix: patch CVE in base image",
@@ -328,5 +396,34 @@ func appsMessages(company *types.Company) phaseMessages {
 			"post-incident: add rate limiting after DDoS attempt",
 			"hotfix: restore idempotent write after duplicate events",
 		},
+	}
+}
+
+// companyAppFeatures returns company-specific app feature commit messages.
+func companyAppFeatures(company *types.Company) []string {
+	switch company.Name {
+	case "acme":
+		return []string{
+			"feat: add gRPC service-to-service authentication",
+			"feat: implement Go slog structured logging",
+			"feat: add pprof endpoint for profiling",
+			"feat: migrate from net/http to chi router",
+		}
+	case "techflow":
+		return []string{
+			"feat: add ASP.NET Core middleware pipeline",
+			"feat: implement Polly resilience policies",
+			"feat: add MassTransit message bus integration",
+			"feat: configure OpenAPI (Swagger) docs",
+		}
+	case "cloudnative":
+		return []string{
+			"feat: add Spring Boot Actuator health endpoints",
+			"feat: implement Spring Cloud Circuit Breaker",
+			"feat: add Micrometer metrics with Prometheus registry",
+			"feat: configure Spring Boot tracing with Zipkin",
+		}
+	default:
+		return nil
 	}
 }

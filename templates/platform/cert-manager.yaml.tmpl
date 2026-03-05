@@ -1,0 +1,25 @@
+---
+# cert-manager namespace — managed by Petri
+# Full controller installation: https://github.com/cert-manager/cert-manager/releases
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app.kubernetes.io/managed-by: petri
+    petri.io/lab: {{.Lab.Name}}
+    petri.io/component: cert-manager
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cert-manager-petri-config
+  namespace: cert-manager
+data:
+  lab: {{.Lab.Name}}
+  company: {{.Company.Name}}
+  installed-by: petri
+  installation-note: |
+    cert-manager is provisioned in this namespace.
+    In cloud labs, the controller is installed via Terraform/Helm.
+    For local labs, this namespace acts as a placeholder.

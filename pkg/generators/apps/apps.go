@@ -12,6 +12,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/jaimegago/petri/pkg/companies"
 	"github.com/jaimegago/petri/pkg/generators"
 	petritemplates "github.com/jaimegago/petri/templates"
 )
@@ -23,17 +24,18 @@ type Generator interface {
 }
 
 type generator struct {
-	fs fs.FS
+	fs  fs.FS
+	reg *companies.Registry
 }
 
 // New returns a Generator backed by the embedded template filesystem.
 func New() Generator {
-	return &generator{fs: petritemplates.FS}
+	return &generator{fs: petritemplates.FS, reg: companies.New()}
 }
 
 // NewWithFS returns a Generator backed by a custom filesystem. Intended for tests.
 func NewWithFS(fsys fs.FS) Generator {
-	return &generator{fs: fsys}
+	return &generator{fs: fsys, reg: companies.New()}
 }
 
 // Generate renders namespace manifests and per-app Kubernetes resources.
@@ -74,13 +76,22 @@ func (g *generator) Generate(_ context.Context, tmplCtx generators.TemplateConte
 // generateApp renders all Kubernetes manifest templates for a single application.
 func (g *generator) generateApp(appName string, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error) {
 	ns := appNamespace(appName, tmplCtx)
+	profile := g.reg.AppProfile(tmplCtx.Company.Name, appName)
+	port := profile.Port
+	if port == 0 {
+		port = defaultPort(appName)
+	}
+	image := profile.Image
+	if image == "" {
+		image = defaultImage(appName, tmplCtx.Company.Name)
+	}
 	appCtx := generators.AppTemplateContext{
 		TemplateContext: tmplCtx,
 		AppName:         appName,
 		Namespace:       ns,
 		Replicas:        replicasForLevel(tmplCtx.Level.Number),
-		Port:            defaultPort(appName),
-		ImageRepository: defaultImage(appName, tmplCtx.Company.Name),
+		Port:            port,
+		ImageRepository: image,
 		CPURequest:      cpuRequest(tmplCtx.Level.Number),
 		MemoryRequest:   memRequest(tmplCtx.Level.Number),
 		CPULimit:        cpuLimit(tmplCtx.Level.Number),
@@ -96,8 +107,8 @@ func (g *generator) generateApp(appName string, tmplCtx generators.TemplateConte
 		{"apps/service.yaml.tmpl", "apps/" + appName + "/service.yaml"},
 	}
 
-	// Ingress for frontend/gateway apps or when explicitly named.
-	if isFrontendApp(appName) {
+	// Ingress for frontend/gateway apps — check registry first, then name heuristic.
+	if profile.IsFrontend || isFrontendApp(appName) {
 		coreTemplates = append(coreTemplates, struct {
 			tmpl string
 			path string
@@ -176,21 +187,33 @@ func isFrontendApp(name string) bool {
 }
 
 // defaultPort returns a sensible port for common app names, falling back to 8080.
+// The companies registry is the preferred source; this is a fallback for unknowns.
 func defaultPort(app string) int {
 	portMap := map[string]int{
-		"api-gateway":       8080,
-		"auth-service":      8081,
-		"user-service":      8082,
-		"order-service":     8083,
-		"product-service":   8084,
-		"boutique-frontend": 8080,
-		"boutique-cart":     8080,
-		"boutique-checkout": 8080,
-		"spring-frontend":   8080,
-		"spring-catalog":    8081,
-		"spring-cart":       8082,
-		"spring-orders":     8083,
-		"spring-payments":   8084,
+		// Acme (Google Online Boutique pattern)
+		"boutique-frontend":    8080,
+		"boutique-cart":        7070,
+		"boutique-checkout":    5050,
+		"online-boutique-full": 8080,
+		"payment-service-v2":   50051,
+		"inventory-service":    8080,
+		"notification-service": 8080,
+		// TechFlow (.NET microservices)
+		"api-gateway":      8080,
+		"auth-service":     8081,
+		"user-service":     8082,
+		"order-service":    8083,
+		"product-service":  8084,
+		"reporting-service": 8086,
+		"audit-service":    8087,
+		// CloudNative (Spring Boot)
+		"spring-frontend":      8080,
+		"spring-catalog":       8081,
+		"spring-cart":          8082,
+		"spring-orders":        8083,
+		"spring-payments":      8084,
+		"spring-shipping":      8085,
+		"spring-notifications": 8086,
 	}
 	if p, ok := portMap[app]; ok {
 		return p

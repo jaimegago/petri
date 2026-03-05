@@ -74,6 +74,16 @@ type AppsGenerator interface {
 	Generate(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
 }
 
+// ObservabilityGenerator renders observability stack manifests (Prometheus, Grafana).
+type ObservabilityGenerator interface {
+	Generate(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+}
+
+// PlatformGenerator renders platform component manifests (cert-manager, ingress-nginx).
+type PlatformGenerator interface {
+	Generate(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+}
+
 // CommitsGenerator generates realistic git commit history.
 type CommitsGenerator interface {
 	Generate(ctx context.Context, opts commits.GenerateOptions) ([]commits.CommitSpec, error)
@@ -100,10 +110,12 @@ type Deps struct {
 	TFProv        TerraformProvisioner
 	PulumiProv    PulumiProvisioner
 	KubectlFactory KubectlClientFactory
-	IaCGen        IaCGenerator
-	GitOpsGen     GitOpsGenerator
-	AppsGen       AppsGenerator
-	CommitsGen    CommitsGenerator
+	IaCGen         IaCGenerator
+	GitOpsGen      GitOpsGenerator
+	AppsGen        AppsGenerator
+	ObservabilityGen ObservabilityGenerator
+	PlatformGen    PlatformGenerator
+	CommitsGen     CommitsGenerator
 }
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
