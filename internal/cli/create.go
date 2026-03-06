@@ -166,6 +166,9 @@ func (c *CLI) runCreate(opts *createOptions) error {
 		}
 	}
 
+	// Start metrics server in background (no-op if metrics disabled in config).
+	c.startMetricsServer(ctx)
+
 	// Build and run orchestrator.
 	orch, err := c.buildOrchestrator(token)
 	if err != nil {

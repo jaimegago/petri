@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
 	pulumiprov "github.com/jaimegago/petri/pkg/provisioners/pulumi"
@@ -32,6 +33,7 @@ type DestroyOptions struct {
 // Destroy tears down all resources associated with a lab and marks it DESTROYED.
 func (o *Orchestrator) Destroy(ctx context.Context, opts DestroyOptions) error {
 	lab := opts.Lab
+	start := time.Now()
 
 	var errs []string
 	collectErr := func(step string, err error) {
@@ -73,6 +75,12 @@ func (o *Orchestrator) Destroy(ctx context.Context, opts DestroyOptions) error {
 	lab.Status = types.LabStatusDestroyed
 	if err := o.deps.State.UpdateLab(ctx, lab); err != nil {
 		return fmt.Errorf("marking lab destroyed: %w", err)
+	}
+
+	if o.deps.Metrics != nil && opts.Company != nil {
+		provider := string(lab.CloudProvider)
+		o.deps.Metrics.LabDestroyed(opts.Company.Name, lab.Level, provider, "manual")
+		o.deps.Metrics.ObserveDestroy(opts.Company.Name, lab.Level, provider, time.Since(start))
 	}
 
 	fmt.Printf("Lab %q destroyed.\n", lab.Name)

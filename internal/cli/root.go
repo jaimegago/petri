@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 
@@ -18,12 +19,13 @@ import (
 	obsgen "github.com/jaimegago/petri/pkg/generators/observability"
 	platformgen "github.com/jaimegago/petri/pkg/generators/platform"
 	"github.com/jaimegago/petri/pkg/logger"
+	"github.com/jaimegago/petri/pkg/metrics"
 	"github.com/jaimegago/petri/pkg/orchestrator"
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
 	"github.com/jaimegago/petri/pkg/provisioners/kubectl"
 	localprov "github.com/jaimegago/petri/pkg/provisioners/local"
-	tfprov "github.com/jaimegago/petri/pkg/provisioners/terraform"
 	pulumiprov "github.com/jaimegago/petri/pkg/provisioners/pulumi"
+	tfprov "github.com/jaimegago/petri/pkg/provisioners/terraform"
 	"github.com/jaimegago/petri/pkg/state"
 )
 
@@ -40,6 +42,8 @@ type CLI struct {
 	log           zerolog.Logger
 	stateMgr      state.Manager
 	cipher        crypto.Cipher
+	metricsReg    *prometheus.Registry
+	metricsRec    *metrics.Recorder
 }
 
 // NewCLI creates a CLI with zero-value dependencies.
@@ -80,6 +84,7 @@ applications, IaC repositories with realistic git history, and observability sta
 		c.newExportCredsCmd(),
 		c.newExtendCmd(),
 		c.newCleanupCmd(),
+		c.newCompletionCmd(),
 	)
 
 	return cmd
@@ -140,6 +145,36 @@ func (c *CLI) encryptionCipher() (crypto.Cipher, error) {
 	return ciph, nil
 }
 
+// metricsRecorder returns the shared metrics recorder, initialising it on first call.
+// Registers with a dedicated prometheus.Registry (not the global default)
+// to avoid conflicts across commands.
+func (c *CLI) metricsRecorder() *metrics.Recorder {
+	if c.metricsRec != nil {
+		return c.metricsRec
+	}
+	c.metricsReg = prometheus.NewRegistry()
+	c.metricsRec = metrics.New(c.metricsReg)
+	return c.metricsRec
+}
+
+// startMetricsServer starts the Prometheus HTTP server in the background if
+// metrics are enabled in config. The server stops when ctx is cancelled.
+func (c *CLI) startMetricsServer(ctx context.Context) {
+	if c.cfg == nil || !c.cfg.Observability.MetricsEnabled {
+		return
+	}
+	port := c.cfg.Observability.MetricsPort
+	if port == 0 {
+		port = 9090
+	}
+	addr := fmt.Sprintf(":%d", port)
+	go func() {
+		if err := metrics.StartServer(ctx, addr, c.metricsReg, c.log); err != nil {
+			c.log.Warn().Err(err).Msg("Metrics server stopped")
+		}
+	}()
+}
+
 // buildOrchestrator constructs an Orchestrator wired with all real provisioners
 // and generators. gitHubToken may be empty for local-only labs.
 func (c *CLI) buildOrchestrator(gitHubToken string) (*orchestrator.Orchestrator, error) {
@@ -153,9 +188,10 @@ func (c *CLI) buildOrchestrator(gitHubToken string) (*orchestrator.Orchestrator,
 	}
 
 	deps := orchestrator.Deps{
-		State:  mgr,
-		Cipher: ciph,
-		Log:    c.log,
+		State:   mgr,
+		Cipher:  ciph,
+		Log:     c.log,
+		Metrics: c.metricsRecorder(),
 
 		// Local provisioner (kind).
 		LocalProv: localprov.New(localprov.Config{}),

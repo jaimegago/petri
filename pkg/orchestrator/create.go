@@ -65,6 +65,7 @@ func (r *rollback) execute(ctx context.Context) {
 // Create runs the full lab creation workflow, routing to local or cloud paths.
 func (o *Orchestrator) Create(ctx context.Context, opts CreateOptions) error {
 	rb := newRollback(o.log)
+	start := time.Now()
 
 	var err error
 	switch opts.Lab.CloudProvider {
@@ -87,6 +88,12 @@ func (o *Orchestrator) Create(ctx context.Context, opts CreateOptions) error {
 			o.log.Error().Err(updateErr).Msg("Failed to mark lab as ERROR after rollback")
 		}
 		return err
+	}
+
+	if o.deps.Metrics != nil {
+		provider := string(opts.Lab.CloudProvider)
+		o.deps.Metrics.LabCreated(opts.Company.Name, opts.Lab.Level, provider)
+		o.deps.Metrics.ObserveCreate(opts.Company.Name, opts.Lab.Level, provider, time.Since(start))
 	}
 
 	return nil

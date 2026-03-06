@@ -13,7 +13,6 @@ import (
 	"github.com/jaimegago/petri/pkg/generators"
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
 	localprov "github.com/jaimegago/petri/pkg/provisioners/local"
-	pulumiprov "github.com/jaimegago/petri/pkg/provisioners/pulumi"
 	tfprov "github.com/jaimegago/petri/pkg/provisioners/terraform"
 	"github.com/jaimegago/petri/pkg/state"
 	"github.com/jaimegago/petri/pkg/types"
@@ -100,16 +99,6 @@ func (m *mockTFProv) Output(ctx context.Context, workDir string, env []string) (
 	return nil, nil
 }
 
-type mockPulumiProv struct{}
-
-func (m *mockPulumiProv) Init(_ context.Context, _ pulumiprov.InitOptions) error   { return nil }
-func (m *mockPulumiProv) Up(_ context.Context, _ pulumiprov.UpOptions) (*pulumiprov.UpResult, error) {
-	return &pulumiprov.UpResult{}, nil
-}
-func (m *mockPulumiProv) Destroy(_ context.Context, _ pulumiprov.DestroyOptions) error { return nil }
-func (m *mockPulumiProv) StackRemove(_ context.Context, _ pulumiprov.StackRemoveOptions) error {
-	return nil
-}
 
 type mockKubectl struct {
 	applyFn  func(ctx context.Context, manifest string) error

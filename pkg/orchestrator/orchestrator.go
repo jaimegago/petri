@@ -11,6 +11,7 @@ import (
 	"github.com/jaimegago/petri/pkg/crypto"
 	"github.com/jaimegago/petri/pkg/generators"
 	"github.com/jaimegago/petri/pkg/generators/commits"
+	"github.com/jaimegago/petri/pkg/metrics"
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
 	localprov "github.com/jaimegago/petri/pkg/provisioners/local"
 	pulumiprov "github.com/jaimegago/petri/pkg/provisioners/pulumi"
@@ -102,20 +103,21 @@ type Config struct {
 // Fields may be nil if the corresponding functionality is not needed
 // (e.g. GitProv is nil for local-only labs).
 type Deps struct {
-	State         state.Manager
-	Cipher        crypto.Cipher
-	Log           zerolog.Logger
-	LocalProv     LocalProvisioner
-	GitProv       GitProvisioner
-	TFProv        TerraformProvisioner
-	PulumiProv    PulumiProvisioner
-	KubectlFactory KubectlClientFactory
-	IaCGen         IaCGenerator
-	GitOpsGen      GitOpsGenerator
-	AppsGen        AppsGenerator
+	State            state.Manager
+	Cipher           crypto.Cipher
+	Log              zerolog.Logger
+	Metrics          *metrics.Recorder
+	LocalProv        LocalProvisioner
+	GitProv          GitProvisioner
+	TFProv           TerraformProvisioner
+	PulumiProv       PulumiProvisioner
+	KubectlFactory   KubectlClientFactory
+	IaCGen           IaCGenerator
+	GitOpsGen        GitOpsGenerator
+	AppsGen          AppsGenerator
 	ObservabilityGen ObservabilityGenerator
-	PlatformGen    PlatformGenerator
-	CommitsGen     CommitsGenerator
+	PlatformGen      PlatformGenerator
+	CommitsGen       CommitsGenerator
 }
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
