@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
+	"github.com/jaimegago/petri/pkg/logger"
 
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
 	pulumiprov "github.com/jaimegago/petri/pkg/provisioners/pulumi"
@@ -29,7 +29,7 @@ func TestDestroyExpiredLab_NonDestroyableStatus(t *testing.T) {
 
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State: mgr,
-		Log:   zerolog.Nop(),
+		Log:   logger.Nop(),
 	})
 
 	o.destroyExpiredLab(context.Background(), lab)
@@ -60,7 +60,7 @@ func TestDestroyCloud_TerraformPath(t *testing.T) {
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:   mgr,
 		Cipher:  &mockCipher{},
-		Log:     zerolog.Nop(),
+		Log:     logger.Nop(),
 		TFProv:  tfProv,
 		GitProv: gitProv,
 	})
@@ -97,7 +97,7 @@ func TestDestroyCloud_PulumiPath(t *testing.T) {
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:      mgr,
 		Cipher:     &mockCipher{},
-		Log:        zerolog.Nop(),
+		Log:        logger.Nop(),
 		PulumiProv: pulumiProv,
 		GitProv:    gitProv,
 	})
@@ -133,7 +133,7 @@ func TestDestroyCloud_TerraformError_Force(t *testing.T) {
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:  mgr,
 		Cipher: &mockCipher{},
-		Log:    zerolog.Nop(),
+		Log:    logger.Nop(),
 		TFProv: tfProv,
 	})
 
@@ -165,7 +165,7 @@ func TestExportCredentials_NoCredentials(t *testing.T) {
 	o := New(Config{}, Deps{
 		State:  mgr,
 		Cipher: &mockCipher{},
-		Log:    zerolog.Nop(),
+		Log:    logger.Nop(),
 	})
 
 	outputPath := t.TempDir() + "/bundle.enc"
@@ -198,7 +198,7 @@ func TestExportCredentials_WithGitToken(t *testing.T) {
 	o := New(Config{}, Deps{
 		State:  mgr,
 		Cipher: &mockCipher{},
-		Log:    zerolog.Nop(),
+		Log:    logger.Nop(),
 	})
 
 	outputPath := t.TempDir() + "/bundle.enc"
@@ -210,7 +210,7 @@ func TestExportCredentials_WithGitToken(t *testing.T) {
 // ── applyAppManifests ─────────────────────────────────────────────────────────
 
 func TestApplyAppManifests_NilGen(t *testing.T) {
-	o := New(Config{}, Deps{Log: zerolog.Nop()})
+	o := New(Config{}, Deps{Log: logger.Nop()})
 	kctl := &mockKubectl{}
 	err := o.applyAppManifests(context.Background(), CreateOptions{
 		Lab:     newTestLab(types.CloudProviderLocal),
@@ -236,7 +236,7 @@ func TestCreate_Cloud_UnsupportedIaCTool_ReturnsError(t *testing.T) {
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:   mgr,
 		Cipher:  &mockCipher{},
-		Log:     zerolog.Nop(),
+		Log:     logger.Nop(),
 		GitProv: gitProv,
 	})
 
@@ -267,7 +267,7 @@ func TestDestroy_Cloud_UnsupportedIaCTool_CollectsError(t *testing.T) {
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:  mgr,
 		Cipher: &mockCipher{},
-		Log:    zerolog.Nop(),
+		Log:    logger.Nop(),
 	})
 
 	company := newTestCompany()
@@ -294,7 +294,7 @@ func TestDestroyFromMetadata_EmptyClusterName_UsesLabName(t *testing.T) {
 	// Cluster with empty name → falls back to lab.Name.
 	lab.Metadata.Clusters = []types.Cluster{{Name: ""}}
 
-	o := New(Config{}, Deps{Log: zerolog.Nop(), LocalProv: localProv})
+	o := New(Config{}, Deps{Log: logger.Nop(), LocalProv: localProv})
 	if err := o.destroyFromMetadata(context.Background(), lab); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestDestroyFromMetadata_GitDeleteError_ReturnsError(t *testing.T) {
 		{Name: "infra", URL: "https://github.com/org/infra.git"},
 	}
 
-	o := New(Config{}, Deps{Log: zerolog.Nop(), GitProv: gitProv})
+	o := New(Config{}, Deps{Log: logger.Nop(), GitProv: gitProv})
 	err := o.destroyFromMetadata(context.Background(), lab)
 	if err == nil {
 		t.Error("expected error when git delete fails")
@@ -343,7 +343,7 @@ func TestDestroyCloud_PulumiDestroyError_Force(t *testing.T) {
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:      mgr,
 		Cipher:     &mockCipher{},
-		Log:        zerolog.Nop(),
+		Log:        logger.Nop(),
 		PulumiProv: pulumiProv,
 	})
 

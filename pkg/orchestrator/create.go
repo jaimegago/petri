@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"log/slog"
+
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
 
 	"github.com/jaimegago/petri/pkg/generators"
 	"github.com/jaimegago/petri/pkg/generators/commits"
@@ -41,10 +42,10 @@ type CreateOptions struct {
 // rollback accumulates cleanup functions executed in reverse on error.
 type rollback struct {
 	fns []func(context.Context) error
-	log zerolog.Logger //nolint:structcheck // used in execute
+	log *slog.Logger
 }
 
-func newRollback(log zerolog.Logger) *rollback {
+func newRollback(log *slog.Logger) *rollback {
 	return &rollback{log: log}
 }
 
@@ -57,7 +58,7 @@ func (r *rollback) push(fn func(context.Context) error) {
 func (r *rollback) execute(ctx context.Context) {
 	for i := len(r.fns) - 1; i >= 0; i-- {
 		if err := r.fns[i](ctx); err != nil {
-			r.log.Error().Err(err).Int("step", i).Msg("rollback step failed")
+			r.log.Error("rollback step failed", "error", err, "step", i)
 		}
 	}
 }
@@ -78,14 +79,14 @@ func (o *Orchestrator) Create(ctx context.Context, opts CreateOptions) error {
 	}
 
 	if err != nil {
-		o.log.Error().Err(err).Str("lab", opts.Lab.Name).Msg("Lab creation failed; rolling back")
+		o.log.Error("Lab creation failed; rolling back", "error", err, "lab", opts.Lab.Name)
 		rb.execute(ctx)
 
 		// Mark lab as ERROR in state (best-effort).
 		opts.Lab.Status = types.LabStatusError
 		opts.Lab.Metadata.ErrorMessage = err.Error()
 		if updateErr := o.deps.State.UpdateLab(ctx, opts.Lab); updateErr != nil {
-			o.log.Error().Err(updateErr).Msg("Failed to mark lab as ERROR after rollback")
+			o.log.Error("Failed to mark lab as ERROR after rollback", "error", updateErr)
 		}
 		return err
 	}
@@ -124,7 +125,7 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 		return fmt.Errorf("creating kind cluster: %w", err)
 	}
 	rb.push(func(ctx context.Context) error {
-		o.log.Info().Str("cluster", cluster.Name).Msg("Rollback: deleting kind cluster")
+		o.log.Info("Rollback: deleting kind cluster", "cluster", cluster.Name)
 		return o.deps.LocalProv.Delete(ctx, cluster.Name)
 	})
 
@@ -159,13 +160,13 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 	// ── Step 4: Deploy platform components ──────────────────────────────────
 	prog.Step("Deploying platform components")
 	if err := o.applyPlatformManifests(ctx, opts, kctl); err != nil {
-		o.log.Warn().Err(err).Msg("Platform manifest deployment had errors; continuing")
+		o.log.Warn("Platform manifest deployment had errors; continuing", "error", err)
 	}
 
 	// ── Step 5: Deploy observability stack ──────────────────────────────────
 	prog.Step("Deploying observability stack")
 	if err := o.applyObservabilityManifests(ctx, opts, kctl); err != nil {
-		o.log.Warn().Err(err).Msg("Observability manifest deployment had errors; continuing")
+		o.log.Warn("Observability manifest deployment had errors; continuing", "error", err)
 	}
 
 	// ── Step 6 (optional): Deploy application manifests ─────────────────────
@@ -173,7 +174,7 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 		prog.Step("Deploying application manifests")
 		if err := o.applyAppManifests(ctx, opts, kctl); err != nil {
 			// Non-fatal: log and continue so the lab is still marked ACTIVE.
-			o.log.Warn().Err(err).Msg("App manifest deployment had errors; lab will still be marked ACTIVE")
+			o.log.Warn("App manifest deployment had errors; lab will still be marked ACTIVE", "error", err)
 		}
 	}
 
@@ -200,7 +201,7 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 // applyPlatformManifests generates and applies platform component manifests.
 func (o *Orchestrator) applyPlatformManifests(ctx context.Context, opts CreateOptions, kctl KubectlClient) error {
 	if o.deps.PlatformGen == nil {
-		o.log.Warn().Msg("Platform generator not configured; skipping platform deployment")
+		o.log.Warn("Platform generator not configured; skipping platform deployment")
 		return nil
 	}
 	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
@@ -223,7 +224,7 @@ func (o *Orchestrator) applyPlatformManifests(ctx context.Context, opts CreateOp
 // applyObservabilityManifests generates and applies observability stack manifests.
 func (o *Orchestrator) applyObservabilityManifests(ctx context.Context, opts CreateOptions, kctl KubectlClient) error {
 	if o.deps.ObservabilityGen == nil {
-		o.log.Warn().Msg("Observability generator not configured; skipping observability deployment")
+		o.log.Warn("Observability generator not configured; skipping observability deployment")
 		return nil
 	}
 	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
@@ -246,7 +247,7 @@ func (o *Orchestrator) applyObservabilityManifests(ctx context.Context, opts Cre
 // applyAppManifests generates and applies Kubernetes manifests for all apps.
 func (o *Orchestrator) applyAppManifests(ctx context.Context, opts CreateOptions, kctl KubectlClient) error {
 	if o.deps.AppsGen == nil {
-		o.log.Warn().Msg("Apps generator not configured; skipping manifest deployment")
+		o.log.Warn("Apps generator not configured; skipping manifest deployment")
 		return nil
 	}
 
@@ -341,7 +342,7 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 	prog.Step("Generating GitOps manifests")
 	if err := o.generateAndCommitGitOps(ctx, opts); err != nil {
 		// Non-fatal for GitOps (cluster already exists).
-		o.log.Warn().Err(err).Msg("GitOps manifest generation failed; continuing")
+		o.log.Warn("GitOps manifest generation failed; continuing", "error", err)
 	}
 
 	// ── Step 5: Deploy application manifests ─────────────────────────────────
@@ -349,7 +350,7 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 	if !opts.NoApps && clusterKubeconfig != "" {
 		kctl := o.deps.KubectlFactory(clusterKubeconfig)
 		if err := o.applyAppManifests(ctx, opts, kctl); err != nil {
-			o.log.Warn().Err(err).Msg("App deployment errors; lab will still be marked ACTIVE")
+			o.log.Warn("App deployment errors; lab will still be marked ACTIVE", "error", err)
 		}
 	}
 
@@ -358,7 +359,7 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 	if clusterKubeconfig != "" {
 		kctl := o.deps.KubectlFactory(clusterKubeconfig)
 		if err := kctl.WaitForNodes(ctx, 10*time.Minute); err != nil {
-			o.log.Warn().Err(err).Msg("Node wait timed out; lab will still be marked ACTIVE")
+			o.log.Warn("Node wait timed out; lab will still be marked ACTIVE", "error", err)
 		}
 	}
 
@@ -404,7 +405,7 @@ func (o *Orchestrator) createGitRepos(ctx context.Context, opts CreateOptions, c
 				Level:    opts.Lab.Level,
 			})
 			if err != nil {
-				o.log.Warn().Err(err).Str("repo", repoName).Msg("Commit generation failed; using empty history")
+				o.log.Warn("Commit generation failed; using empty history", "error", err, "repo", repoName)
 			} else {
 				commitSpecs = specs
 			}
@@ -423,7 +424,7 @@ func (o *Orchestrator) createGitRepos(ctx context.Context, opts CreateOptions, c
 		}
 
 		rb.push(func(ctx context.Context) error {
-			o.log.Info().Str("repo", repoName).Msg("Rollback: deleting git repo")
+			o.log.Info("Rollback: deleting git repo", "repo", repoName)
 			return o.deps.GitProv.Delete(ctx, gitprov.DeleteOptions{Owner: owner, Name: repoName})
 		})
 
@@ -439,7 +440,7 @@ func (o *Orchestrator) createGitRepos(ctx context.Context, opts CreateOptions, c
 // generateAndCommitIaC renders IaC templates and writes them to the infra work directory.
 func (o *Orchestrator) generateAndCommitIaC(ctx context.Context, opts CreateOptions, _ *rollback) error {
 	if o.deps.IaCGen == nil {
-		o.log.Warn().Msg("IaC generator not configured; skipping")
+		o.log.Warn("IaC generator not configured; skipping")
 		return nil
 	}
 	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
@@ -461,7 +462,7 @@ func (o *Orchestrator) generateAndCommitIaC(ctx context.Context, opts CreateOpti
 			return fmt.Errorf("writing %s: %w", f.Path, err)
 		}
 	}
-	o.log.Info().Str("dir", workDir).Int("files", len(files)).Msg("IaC files written")
+	o.log.Info("IaC files written", "dir", workDir, "files", len(files))
 	return nil
 }
 
@@ -489,14 +490,14 @@ func (o *Orchestrator) generateAndCommitGitOps(ctx context.Context, opts CreateO
 			return fmt.Errorf("writing %s: %w", f.Path, err)
 		}
 	}
-	o.log.Info().Str("dir", workDir).Int("files", len(files)).Msg("GitOps files written")
+	o.log.Info("GitOps files written", "dir", workDir, "files", len(files))
 	return nil
 }
 
 // runTerraform runs terraform init+apply and returns the cluster kubeconfig path (if available).
 func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, workDir string) (string, error) {
 	if o.deps.TFProv == nil {
-		o.log.Warn().Msg("Terraform provisioner not configured; skipping IaC provisioning")
+		o.log.Warn("Terraform provisioner not configured; skipping IaC provisioning")
 		return "", nil
 	}
 
@@ -525,7 +526,7 @@ func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, wor
 			CloudResourceID: res.ResourceID,
 		}
 		if err := o.deps.State.CreateResource(ctx, r); err != nil {
-			o.log.Warn().Err(err).Str("resource", res.Address).Msg("Failed to track resource")
+			o.log.Warn("Failed to track resource", "error", err, "resource", res.Address)
 		}
 	}
 
@@ -533,7 +534,7 @@ func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, wor
 	if kc, ok := result.Outputs["kubeconfig"]; ok {
 		kubeconfigPath := filepath.Join(workDir, "kubeconfig")
 		if err := os.WriteFile(kubeconfigPath, kc.Value, 0o600); err != nil {
-			o.log.Warn().Err(err).Msg("Failed to write kubeconfig from Terraform output")
+			o.log.Warn("Failed to write kubeconfig from Terraform output", "error", err)
 		} else {
 			return kubeconfigPath, nil
 		}
@@ -555,7 +556,7 @@ func (o *Orchestrator) destroyTerraform(ctx context.Context, opts CreateOptions,
 // runPulumi runs pulumi login+init+up and returns the cluster kubeconfig path (if available).
 func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDir string) (string, error) {
 	if o.deps.PulumiProv == nil {
-		o.log.Warn().Msg("Pulumi provisioner not configured; skipping IaC provisioning")
+		o.log.Warn("Pulumi provisioner not configured; skipping IaC provisioning")
 		return "", nil
 	}
 
@@ -588,7 +589,7 @@ func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDi
 			CloudResourceID: res.ResourceID,
 		}
 		if err := o.deps.State.CreateResource(ctx, r); err != nil {
-			o.log.Warn().Err(err).Str("resource", res.URN).Msg("Failed to track resource")
+			o.log.Warn("Failed to track resource", "error", err, "resource", res.URN)
 		}
 	}
 
@@ -596,7 +597,7 @@ func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDi
 	if kc, ok := result.Outputs["kubeconfig"]; ok {
 		kubeconfigPath := filepath.Join(workDir, "kubeconfig")
 		if err := os.WriteFile(kubeconfigPath, kc.Value, 0o600); err != nil {
-			o.log.Warn().Err(err).Msg("Failed to write kubeconfig from Pulumi output")
+			o.log.Warn("Failed to write kubeconfig from Pulumi output", "error", err)
 		} else {
 			return kubeconfigPath, nil
 		}

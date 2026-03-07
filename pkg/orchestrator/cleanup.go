@@ -12,10 +12,7 @@ import (
 // StartCleanupLoop runs a background goroutine that periodically destroys labs
 // whose TTL has expired. It returns when ctx is cancelled.
 func (o *Orchestrator) StartCleanupLoop(ctx context.Context, interval, gracePeriod time.Duration) {
-	o.log.Info().
-		Dur("interval", interval).
-		Dur("grace_period", gracePeriod).
-		Msg("Starting cleanup loop")
+	o.log.Info("Starting cleanup loop", "interval", interval, "grace_period", gracePeriod)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -23,7 +20,7 @@ func (o *Orchestrator) StartCleanupLoop(ctx context.Context, interval, gracePeri
 	for {
 		select {
 		case <-ctx.Done():
-			o.log.Info().Msg("Cleanup loop stopped")
+			o.log.Info("Cleanup loop stopped")
 			return
 		case <-ticker.C:
 			o.runCleanup(ctx, gracePeriod)
@@ -35,7 +32,7 @@ func (o *Orchestrator) StartCleanupLoop(ctx context.Context, interval, gracePeri
 func (o *Orchestrator) runCleanup(ctx context.Context, gracePeriod time.Duration) {
 	labs, err := o.deps.State.FindExpiredLabs(ctx, gracePeriod)
 	if err != nil {
-		o.log.Error().Err(err).Msg("Cleanup: failed to find expired labs")
+		o.log.Error("Cleanup: failed to find expired labs", "error", err)
 		return
 	}
 
@@ -43,7 +40,7 @@ func (o *Orchestrator) runCleanup(ctx context.Context, gracePeriod time.Duration
 		return
 	}
 
-	o.log.Info().Int("count", len(labs)).Msg("Cleanup: found expired labs")
+	o.log.Info("Cleanup: found expired labs", "count", len(labs))
 
 	for _, lab := range labs {
 		o.destroyExpiredLab(ctx, lab)
@@ -52,23 +49,23 @@ func (o *Orchestrator) runCleanup(ctx context.Context, gracePeriod time.Duration
 
 // destroyExpiredLab transitions a single expired lab through DESTROYING → DESTROYED.
 func (o *Orchestrator) destroyExpiredLab(ctx context.Context, lab *types.Lab) {
-	log := o.log.With().Str("lab", lab.Name).Logger()
+	log := o.log.With("lab", lab.Name)
 
 	if !lab.CanTransitionTo(types.LabStatusDestroying) {
-		log.Warn().Str("status", string(lab.Status)).Msg("Cleanup: lab cannot be destroyed; skipping")
+		log.Warn("Cleanup: lab cannot be destroyed; skipping", "status", string(lab.Status))
 		return
 	}
 
 	lab.Status = types.LabStatusDestroying
 	if err := o.deps.State.UpdateLab(ctx, lab); err != nil {
-		log.Error().Err(err).Msg("Cleanup: failed to mark lab as DESTROYING")
+		log.Error("Cleanup: failed to mark lab as DESTROYING", "error", err)
 		return
 	}
 
 	// We don't have company/spec context here, so we can only clean up
 	// what we know from the lab metadata (cluster names, git repos).
 	if err := o.destroyFromMetadata(ctx, lab); err != nil {
-		log.Error().Err(err).Msg("Cleanup: infrastructure teardown failed")
+		log.Error("Cleanup: infrastructure teardown failed", "error", err)
 		lab.Status = types.LabStatusError
 		lab.Metadata.ErrorMessage = fmt.Sprintf("auto-cleanup failed: %v", err)
 		_ = o.deps.State.UpdateLab(ctx, lab)
@@ -81,11 +78,11 @@ func (o *Orchestrator) destroyExpiredLab(ctx context.Context, lab *types.Lab) {
 
 	lab.Status = types.LabStatusDestroyed
 	if err := o.deps.State.UpdateLab(ctx, lab); err != nil {
-		log.Error().Err(err).Msg("Cleanup: failed to mark lab as DESTROYED")
+		log.Error("Cleanup: failed to mark lab as DESTROYED", "error", err)
 		return
 	}
 
-	log.Info().Msg("Cleanup: lab destroyed")
+	log.Info("Cleanup: lab destroyed")
 }
 
 // destroyFromMetadata tears down resources using only lab metadata (no company profile needed).

@@ -58,11 +58,11 @@ func (c *CLI) runExtend(name, ttlStr string) error {
 		return fmt.Errorf("updating lab TTL: %w", err)
 	}
 
-	c.log.Info().
-		Str("name", name).
-		Str("old_expiry", oldExpiry.Format(time.RFC3339)).
-		Str("new_expiry", lab.ExpiresAt.Format(time.RFC3339)).
-		Msg("Lab TTL extended")
+	c.log.Info("Lab TTL extended",
+		"name", name,
+		"old_expiry", oldExpiry.Format(time.RFC3339),
+		"new_expiry", lab.ExpiresAt.Format(time.RFC3339),
+	)
 
 	fmt.Printf("Lab %q extended by %s.\n", name, d)
 	fmt.Printf("  Old expiry: %s\n", oldExpiry.Format(time.RFC3339))

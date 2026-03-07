@@ -8,9 +8,10 @@ import (
 	"strconv"
 	"time"
 
+	"log/slog"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/rs/zerolog"
 )
 
 // Recorder holds all Prometheus metric instances for Petri.
@@ -99,7 +100,7 @@ func (r *Recorder) ObserveDestroy(company string, level int, provider string, d 
 // It exposes /metrics (Prometheus) and /healthz (liveness probe).
 // The server shuts down gracefully when ctx is cancelled.
 // StartServer blocks until the server exits.
-func StartServer(ctx context.Context, addr string, gatherer prometheus.Gatherer, log zerolog.Logger) error {
+func StartServer(ctx context.Context, addr string, gatherer prometheus.Gatherer, log *slog.Logger) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -116,7 +117,7 @@ func StartServer(ctx context.Context, addr string, gatherer prometheus.Gatherer,
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info().Str("addr", addr).Msg("Metrics server listening")
+		log.Info("Metrics server listening", "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("metrics server: %w", err)
 		}

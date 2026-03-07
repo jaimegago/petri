@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/rs/zerolog"
+	"github.com/jaimegago/petri/pkg/logger"
 
 	"github.com/jaimegago/petri/pkg/generators"
 	"github.com/jaimegago/petri/pkg/metrics"
@@ -45,7 +45,7 @@ func (m *mockObsGen) Generate(ctx context.Context, tmplCtx generators.TemplateCo
 // ── applyPlatformManifests ───────────────────────────────────────────────────
 
 func TestApplyPlatformManifests_NilGen(t *testing.T) {
-	o := New(Config{}, Deps{Log: zerolog.Nop()})
+	o := New(Config{}, Deps{Log: logger.Nop()})
 	kctl := &mockKubectl{}
 	err := o.applyPlatformManifests(context.Background(), CreateOptions{
 		Lab:     newTestLab(types.CloudProviderLocal),
@@ -63,7 +63,7 @@ func TestApplyPlatformManifests_NilGen(t *testing.T) {
 func TestApplyPlatformManifests_Success(t *testing.T) {
 	kctl := &mockKubectl{}
 	o := New(Config{}, Deps{
-		Log:         zerolog.Nop(),
+		Log:         logger.Nop(),
 		PlatformGen: &mockPlatformGen{},
 	})
 	err := o.applyPlatformManifests(context.Background(), CreateOptions{
@@ -82,7 +82,7 @@ func TestApplyPlatformManifests_Success(t *testing.T) {
 func TestApplyPlatformManifests_GenerateError(t *testing.T) {
 	kctl := &mockKubectl{}
 	o := New(Config{}, Deps{
-		Log: zerolog.Nop(),
+		Log: logger.Nop(),
 		PlatformGen: &mockPlatformGen{
 			generateFn: func(_ context.Context, _ generators.TemplateContext) ([]generators.RenderedFile, error) {
 				return nil, errors.New("template error")
@@ -106,7 +106,7 @@ func TestApplyPlatformManifests_ApplyError(t *testing.T) {
 		},
 	}
 	o := New(Config{}, Deps{
-		Log:         zerolog.Nop(),
+		Log:         logger.Nop(),
 		PlatformGen: &mockPlatformGen{},
 	})
 	err := o.applyPlatformManifests(context.Background(), CreateOptions{
@@ -122,7 +122,7 @@ func TestApplyPlatformManifests_ApplyError(t *testing.T) {
 // ── applyObservabilityManifests ──────────────────────────────────────────────
 
 func TestApplyObservabilityManifests_NilGen(t *testing.T) {
-	o := New(Config{}, Deps{Log: zerolog.Nop()})
+	o := New(Config{}, Deps{Log: logger.Nop()})
 	kctl := &mockKubectl{}
 	err := o.applyObservabilityManifests(context.Background(), CreateOptions{
 		Lab:     newTestLab(types.CloudProviderLocal),
@@ -137,7 +137,7 @@ func TestApplyObservabilityManifests_NilGen(t *testing.T) {
 func TestApplyObservabilityManifests_Success(t *testing.T) {
 	kctl := &mockKubectl{}
 	o := New(Config{}, Deps{
-		Log:              zerolog.Nop(),
+		Log:              logger.Nop(),
 		ObservabilityGen: &mockObsGen{},
 	})
 	err := o.applyObservabilityManifests(context.Background(), CreateOptions{
@@ -160,7 +160,7 @@ func TestApplyObservabilityManifests_ApplyError(t *testing.T) {
 		},
 	}
 	o := New(Config{}, Deps{
-		Log:              zerolog.Nop(),
+		Log:              logger.Nop(),
 		ObservabilityGen: &mockObsGen{},
 	})
 	err := o.applyObservabilityManifests(context.Background(), CreateOptions{
@@ -209,7 +209,7 @@ func TestDestroyFromMetadata_CloudWithGitRepos(t *testing.T) {
 
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:   mgr,
-		Log:     zerolog.Nop(),
+		Log:     logger.Nop(),
 		GitProv: gitProv,
 	})
 
@@ -230,7 +230,7 @@ func TestDestroyFromMetadata_CloudNoOwnerSkipped(t *testing.T) {
 		{Name: "repo", URL: "", Type: "infra"}, // no URL → owner can't be resolved
 	}
 
-	o := New(Config{}, Deps{Log: zerolog.Nop(), GitProv: gitProv})
+	o := New(Config{}, Deps{Log: logger.Nop(), GitProv: gitProv})
 	err := o.destroyFromMetadata(context.Background(), lab)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -246,7 +246,7 @@ func TestDestroyFromMetadata_LocalClusters(t *testing.T) {
 	lab := newTestLab(types.CloudProviderLocal)
 	lab.Metadata.Clusters = []types.Cluster{{Name: "my-cluster"}}
 
-	o := New(Config{}, Deps{Log: zerolog.Nop(), LocalProv: localProv})
+	o := New(Config{}, Deps{Log: logger.Nop(), LocalProv: localProv})
 	err := o.destroyFromMetadata(context.Background(), lab)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -265,7 +265,7 @@ func TestDestroyFromMetadata_DeleteError(t *testing.T) {
 	lab := newTestLab(types.CloudProviderLocal)
 	lab.Metadata.Clusters = []types.Cluster{{Name: "my-cluster"}}
 
-	o := New(Config{}, Deps{Log: zerolog.Nop(), LocalProv: localProv})
+	o := New(Config{}, Deps{Log: logger.Nop(), LocalProv: localProv})
 	err := o.destroyFromMetadata(context.Background(), lab)
 	if err == nil {
 		t.Error("expected error when delete fails")
@@ -278,7 +278,7 @@ func TestStartCleanupLoop_StopsOnCancel(t *testing.T) {
 	mgr := state.NewMockManager()
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State: mgr,
-		Log:   zerolog.Nop(),
+		Log:   logger.Nop(),
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -319,7 +319,7 @@ func TestStartCleanupLoop_CleansExpiredLab(t *testing.T) {
 
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:     mgr,
-		Log:       zerolog.Nop(),
+		Log:       logger.Nop(),
 		LocalProv: localProv,
 	})
 
@@ -350,7 +350,7 @@ func TestCreate_Cloud_NoGitProv_ReturnsError(t *testing.T) {
 
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:   mgr,
-		Log:     zerolog.Nop(),
+		Log:     logger.Nop(),
 		GitProv: nil,
 	})
 
@@ -392,7 +392,7 @@ func TestCreate_Local_RecordsMetrics(t *testing.T) {
 	o := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:          mgr,
 		Cipher:         &mockCipher{},
-		Log:            zerolog.Nop(),
+		Log:            logger.Nop(),
 		Metrics:        rec,
 		LocalProv:      localProv,
 		KubectlFactory: factory,

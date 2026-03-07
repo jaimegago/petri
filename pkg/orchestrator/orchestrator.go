@@ -4,9 +4,8 @@ package orchestrator
 
 import (
 	"context"
+	"log/slog"
 	"time"
-
-	"github.com/rs/zerolog"
 
 	"github.com/jaimegago/petri/pkg/crypto"
 	"github.com/jaimegago/petri/pkg/generators"
@@ -105,7 +104,7 @@ type Config struct {
 type Deps struct {
 	State            state.Manager
 	Cipher           crypto.Cipher
-	Log              zerolog.Logger
+	Log              *slog.Logger
 	Metrics          *metrics.Recorder
 	LocalProv        LocalProvisioner
 	GitProv          GitProvisioner
@@ -126,7 +125,7 @@ type Deps struct {
 type Orchestrator struct {
 	cfg  Config
 	deps Deps
-	log  zerolog.Logger
+	log  *slog.Logger
 }
 
 // New returns an Orchestrator with the given configuration and dependencies.

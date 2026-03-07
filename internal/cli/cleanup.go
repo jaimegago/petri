@@ -64,13 +64,13 @@ func (c *CLI) runCleanup(expired bool) error {
 	var destroyed, failed int
 	for _, lab := range labs {
 		if !lab.CanTransitionTo(types.LabStatusDestroying) {
-			c.log.Warn().Str("name", lab.Name).Str("status", string(lab.Status)).Msg("Skipping lab; cannot transition to DESTROYING")
+			c.log.Warn("Skipping lab; cannot transition to DESTROYING", "name", lab.Name, "status", string(lab.Status))
 			continue
 		}
 
 		lab.Status = types.LabStatusDestroying
 		if err := mgr.UpdateLab(ctx, lab); err != nil {
-			c.log.Warn().Err(err).Str("name", lab.Name).Msg("Failed to mark lab as DESTROYING")
+			c.log.Warn("Failed to mark lab as DESTROYING", "error", err, "name", lab.Name)
 			failed++
 			continue
 		}
@@ -93,12 +93,12 @@ func (c *CLI) runCleanup(expired bool) error {
 		}
 
 		if err := orch.Destroy(ctx, destroyOpts); err != nil {
-			c.log.Warn().Err(err).Str("name", lab.Name).Msg("Cleanup: destroy failed")
+			c.log.Warn("Cleanup: destroy failed", "error", err, "name", lab.Name)
 			failed++
 			continue
 		}
 
-		c.log.Info().Str("name", lab.Name).Msg("Expired lab destroyed")
+		c.log.Info("Expired lab destroyed", "name", lab.Name)
 		destroyed++
 	}
 

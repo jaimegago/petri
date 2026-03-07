@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"os"
 
+	"log/slog"
+
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 
 	"github.com/jaimegago/petri/pkg/config"
@@ -39,7 +40,7 @@ type CLI struct {
 	companiesFile string
 	logLevel      string
 	cfg           *config.Config
-	log           zerolog.Logger
+	log           *slog.Logger
 	stateMgr      state.Manager
 	cipher        crypto.Cipher
 	metricsReg    *prometheus.Registry
@@ -170,7 +171,7 @@ func (c *CLI) startMetricsServer(ctx context.Context) {
 	addr := fmt.Sprintf(":%d", port)
 	go func() {
 		if err := metrics.StartServer(ctx, addr, c.metricsReg, c.log); err != nil {
-			c.log.Warn().Err(err).Msg("Metrics server stopped")
+			c.log.Warn("Metrics server stopped", "error", err)
 		}
 	}()
 }

@@ -51,15 +51,12 @@ func (c *CLI) runDestroy(name string, force bool) error {
 		return fmt.Errorf("updating lab status: %w", err)
 	}
 
-	c.log.Info().
-		Str("lab_id", lab.ID.String()).
-		Str("name", name).
-		Msg("Starting lab destruction")
+	c.log.Info("Starting lab destruction", "lab_id", lab.ID.String(), "name", name)
 
 	// Resolve company for cloud teardown (best-effort; non-fatal if missing).
 	company, spec, companyErr := c.resolveCompanyForLab(lab)
 	if companyErr != nil {
-		c.log.Warn().Err(companyErr).Msg("Could not resolve company profile; skipping IaC teardown")
+		c.log.Warn("Could not resolve company profile; skipping IaC teardown", "error", companyErr)
 	}
 
 	// Resolve GitHub token for cloud labs.

@@ -41,7 +41,7 @@ func (o *Orchestrator) Destroy(ctx context.Context, opts DestroyOptions) error {
 			return
 		}
 		errs = append(errs, fmt.Sprintf("%s: %v", step, err))
-		o.log.Error().Err(err).Str("step", step).Str("lab", lab.Name).Msg("Destroy step failed")
+		o.log.Error("Destroy step failed", "error", err, "step", step, "lab", lab.Name)
 	}
 
 	switch lab.CloudProvider {
@@ -55,10 +55,10 @@ func (o *Orchestrator) Destroy(ctx context.Context, opts DestroyOptions) error {
 
 	// Always clean up state records.
 	if err := o.deps.State.DeleteResources(ctx, lab.ID); err != nil {
-		o.log.Warn().Err(err).Msg("Failed to delete resource records")
+		o.log.Warn("Failed to delete resource records", "error", err)
 	}
 	if err := o.deps.State.DeleteCredentials(ctx, lab.ID); err != nil {
-		o.log.Warn().Err(err).Msg("Failed to delete credential records")
+		o.log.Warn("Failed to delete credential records", "error", err)
 	}
 
 	// Remove lab working directory (best-effort).
@@ -91,7 +91,7 @@ func (o *Orchestrator) Destroy(ctx context.Context, opts DestroyOptions) error {
 func (o *Orchestrator) destroyLocal(ctx context.Context, opts DestroyOptions, collectErr func(string, error)) {
 	lab := opts.Lab
 	if o.deps.LocalProv == nil {
-		o.log.Warn().Msg("Local provisioner not configured; skipping cluster deletion")
+		o.log.Warn("Local provisioner not configured; skipping cluster deletion")
 		return
 	}
 
@@ -157,6 +157,6 @@ func (o *Orchestrator) removeLabWorkDir(labID string) {
 	}
 	labDir := filepath.Join(base, labID)
 	if err := os.RemoveAll(labDir); err != nil {
-		o.log.Warn().Err(err).Str("dir", labDir).Msg("Failed to remove lab work dir")
+		o.log.Warn("Failed to remove lab work dir", "error", err, "dir", labDir)
 	}
 }

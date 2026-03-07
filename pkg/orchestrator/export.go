@@ -50,7 +50,7 @@ func (o *Orchestrator) ExportCredentials(ctx context.Context, lab *types.Lab, ou
 	if err == nil {
 		decrypted, decErr := o.deps.Cipher.Decrypt(kc.EncryptedValue)
 		if decErr != nil {
-			o.log.Warn().Err(decErr).Msg("Failed to decrypt kubeconfig credential")
+			o.log.Warn("Failed to decrypt kubeconfig credential", "error", decErr)
 		} else {
 			bundle.Kubeconfig = string(decrypted)
 		}
@@ -61,7 +61,7 @@ func (o *Orchestrator) ExportCredentials(ctx context.Context, lab *types.Lab, ou
 	if err == nil {
 		decrypted, decErr := o.deps.Cipher.Decrypt(gt.EncryptedValue)
 		if decErr != nil {
-			o.log.Warn().Err(decErr).Msg("Failed to decrypt github_token credential")
+			o.log.Warn("Failed to decrypt github_token credential", "error", decErr)
 		} else {
 			bundle.GitToken = string(decrypted)
 		}

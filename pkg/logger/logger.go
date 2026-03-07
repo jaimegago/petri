@@ -1,73 +1,60 @@
-// Package logger provides structured JSON and console logging via zerolog.
+// Package logger provides structured logging helpers built on log/slog.
 package logger
 
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
-	"time"
-
-	"github.com/rs/zerolog"
 )
 
 type contextKey struct{}
 
-// New creates a new structured JSON logger at the given log level.
-func New(level string) zerolog.Logger {
-	lvl := parseLevel(level)
-	return zerolog.New(os.Stdout).
-		Level(lvl).
-		With().
-		Timestamp().
-		Logger()
+// New creates a structured JSON logger at the given log level writing to stdout.
+func New(level string) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: parseLevel(level),
+	}))
 }
 
-// NewConsole creates a human-readable logger for CLI output.
-func NewConsole(level string, out io.Writer) zerolog.Logger {
+// NewConsole creates a human-readable text logger for CLI output.
+func NewConsole(level string, out io.Writer) *slog.Logger {
 	if out == nil {
 		out = os.Stdout
 	}
-	lvl := parseLevel(level)
-	return zerolog.New(zerolog.ConsoleWriter{
-		Out:        out,
-		TimeFormat: time.RFC3339,
-		NoColor:    false,
-	}).
-		Level(lvl).
-		With().
-		Timestamp().
-		Logger()
+	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{
+		Level: parseLevel(level),
+	}))
+}
+
+// Nop returns a logger that discards all output. Useful in tests.
+func Nop() *slog.Logger {
+	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
 // WithContext attaches a logger to a context.
-func WithContext(ctx context.Context, log zerolog.Logger) context.Context {
-	return log.WithContext(ctx)
+func WithContext(ctx context.Context, log *slog.Logger) context.Context {
+	return context.WithValue(ctx, contextKey{}, log)
 }
 
-// FromContext retrieves the logger from a context, falling back to a default.
-func FromContext(ctx context.Context) *zerolog.Logger {
-	l := zerolog.Ctx(ctx)
-	if l.GetLevel() == zerolog.Disabled {
-		def := New("info")
-		return &def
+// FromContext retrieves the logger from a context, falling back to a default info logger.
+func FromContext(ctx context.Context) *slog.Logger {
+	if l, ok := ctx.Value(contextKey{}).(*slog.Logger); ok && l != nil {
+		return l
 	}
-	return l
+	return New("info")
 }
 
-// WithLab returns a child logger with lab-scoped fields.
-func WithLab(log zerolog.Logger, labID, company string, level int) zerolog.Logger {
-	return log.With().
-		Str("lab_id", labID).
-		Str("company", company).
-		Int("level", level).
-		Logger()
+// WithLab returns a child logger with lab-scoped fields attached.
+func WithLab(log *slog.Logger, labID, company string, level int) *slog.Logger {
+	return log.With("lab_id", labID, "company", company, "level", level)
 }
 
 // RedactedValue is a sentinel used to replace sensitive values in logs.
 const RedactedValue = "[REDACTED]"
 
-// Sensitive types that should never appear in logs.
+// sensitiveKeys lists substrings that identify credential-bearing log field names.
 var sensitiveKeys = []string{
 	"token", "password", "secret", "key", "credential",
 	"access_key", "aws_secret", "kubeconfig",
@@ -84,17 +71,15 @@ func IsSensitiveKey(key string) bool {
 	return false
 }
 
-func parseLevel(level string) zerolog.Level {
+func parseLevel(level string) slog.Level {
 	switch strings.ToLower(level) {
 	case "debug":
-		return zerolog.DebugLevel
+		return slog.LevelDebug
 	case "warn", "warning":
-		return zerolog.WarnLevel
+		return slog.LevelWarn
 	case "error":
-		return zerolog.ErrorLevel
-	case "fatal":
-		return zerolog.FatalLevel
+		return slog.LevelError
 	default:
-		return zerolog.InfoLevel
+		return slog.LevelInfo
 	}
 }

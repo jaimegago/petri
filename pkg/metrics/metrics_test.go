@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/rs/zerolog"
+	"github.com/jaimegago/petri/pkg/logger"
 )
 
 func newTestRecorder(t *testing.T) (*Recorder, *prometheus.Registry) {
@@ -174,7 +174,7 @@ func TestStartServer_HealthzAndMetrics(t *testing.T) {
 	addr := "127.0.0.1:19091"
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- StartServer(ctx, addr, reg, zerolog.Nop())
+		errCh <- StartServer(ctx, addr, reg, logger.Nop())
 	}()
 
 	// Wait for server to start.

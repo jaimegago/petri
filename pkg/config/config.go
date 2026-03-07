@@ -7,58 +7,86 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
 	"github.com/jaimegago/petri/pkg/types"
 )
 
+// State backend identifiers.
+const (
+	BackendSQLite     = "sqlite"
+	BackendPostgres   = "postgresql"
+)
+
+// Git provider identifiers.
+const (
+	ProviderGitHub = "github"
+	ProviderGitLab = "gitlab"
+)
+
+// Default tool versions.
+const (
+	DefaultTerraformVersion = "1.7.0"
+	DefaultPulumiVersion    = "3.100.0"
+)
+
+// Default observability settings.
+const (
+	DefaultMetricsPort = 9090
+)
+
+// Default cleanup durations.
+const (
+	DefaultCheckInterval = 5 * time.Minute
+	DefaultGracePeriod   = 30 * time.Minute
+)
+
 // Config holds the full Petri configuration.
 type Config struct {
-	State         StateConfig         `mapstructure:"state"`
-	Credentials   CredentialsConfig   `mapstructure:"credentials"`
-	Observability ObservabilityConfig `mapstructure:"observability"`
-	Git           GitConfig           `mapstructure:"git"`
-	Cloud         CloudConfig         `mapstructure:"cloud"`
-	Cleanup       CleanupConfig       `mapstructure:"cleanup"`
+	State         StateConfig         `yaml:"state"`
+	Credentials   CredentialsConfig   `yaml:"credentials"`
+	Observability ObservabilityConfig `yaml:"observability"`
+	Git           GitConfig           `yaml:"git"`
+	Cloud         CloudConfig         `yaml:"cloud"`
+	Cleanup       CleanupConfig       `yaml:"cleanup"`
 }
 
 // StateConfig configures the state backend.
 type StateConfig struct {
-	Backend          string `mapstructure:"backend"`
-	ConnectionString string `mapstructure:"connection_string"`
-	SQLitePath       string `mapstructure:"sqlite_path"`
+	Backend          string `yaml:"backend"`
+	ConnectionString string `yaml:"connection_string"`
+	SQLitePath       string `yaml:"sqlite_path"`
 }
 
 // CredentialsConfig configures credential storage.
 type CredentialsConfig struct {
-	MasterKeyPath string `mapstructure:"master_key_path"`
+	MasterKeyPath string `yaml:"master_key_path"`
 }
 
 // ObservabilityConfig configures logging, metrics, and tracing.
 type ObservabilityConfig struct {
-	MetricsEnabled  bool   `mapstructure:"metrics_enabled"`
-	MetricsPort     int    `mapstructure:"metrics_port"`
-	TracingEnabled  bool   `mapstructure:"tracing_enabled"`
-	TracingEndpoint string `mapstructure:"tracing_endpoint"`
-	LogLevel        string `mapstructure:"log_level"`
+	MetricsEnabled  bool   `yaml:"metrics_enabled"`
+	MetricsPort     int    `yaml:"metrics_port"`
+	TracingEnabled  bool   `yaml:"tracing_enabled"`
+	TracingEndpoint string `yaml:"tracing_endpoint"`
+	LogLevel        string `yaml:"log_level"`
 }
 
 // GitConfig configures git provider defaults.
 type GitConfig struct {
-	DefaultProvider string `mapstructure:"default_provider"`
+	DefaultProvider string `yaml:"default_provider"`
 }
 
 // CloudConfig configures cloud tool versions.
 type CloudConfig struct {
-	TerraformVersion string `mapstructure:"terraform_version"`
-	PulumiVersion    string `mapstructure:"pulumi_version"`
+	TerraformVersion string `yaml:"terraform_version"`
+	PulumiVersion    string `yaml:"pulumi_version"`
 }
 
 // CleanupConfig configures TTL-based cleanup behavior.
 type CleanupConfig struct {
-	CheckInterval time.Duration `mapstructure:"check_interval"`
-	GracePeriod   time.Duration `mapstructure:"grace_period"`
+	CheckInterval time.Duration `yaml:"check_interval"`
+	GracePeriod   time.Duration `yaml:"grace_period"`
 }
 
 // CompaniesFile is the top-level structure of companies.yaml.
@@ -71,28 +99,27 @@ func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
 		State: StateConfig{
-			Backend:          "postgresql",
-			ConnectionString: "postgres://localhost/petri?sslmode=disable",
-			SQLitePath:       filepath.Join(home, ".petri", "petri.db"),
+			Backend:    BackendSQLite,
+			SQLitePath: filepath.Join(home, ".petri", "petri.db"),
 		},
 		Credentials: CredentialsConfig{
 			MasterKeyPath: filepath.Join(home, ".petri", "master.key"),
 		},
 		Observability: ObservabilityConfig{
 			MetricsEnabled: true,
-			MetricsPort:    9090,
+			MetricsPort:    DefaultMetricsPort,
 			LogLevel:       "info",
 		},
 		Git: GitConfig{
-			DefaultProvider: "github",
+			DefaultProvider: ProviderGitHub,
 		},
 		Cloud: CloudConfig{
-			TerraformVersion: "1.7.0",
-			PulumiVersion:    "3.100.0",
+			TerraformVersion: DefaultTerraformVersion,
+			PulumiVersion:    DefaultPulumiVersion,
 		},
 		Cleanup: CleanupConfig{
-			CheckInterval: 5 * time.Minute,
-			GracePeriod:   30 * time.Minute,
+			CheckInterval: DefaultCheckInterval,
+			GracePeriod:   DefaultGracePeriod,
 		},
 	}
 }
@@ -100,53 +127,66 @@ func DefaultConfig() *Config {
 // Load reads Petri configuration from ~/.petri/config.yaml and environment variables.
 // If cfgFile is non-empty it is used as the config path instead of the default location.
 func Load(cfgFile ...string) (*Config, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("resolving home directory: %w", err)
-	}
-
-	v := viper.New()
-	v.SetEnvPrefix("PETRI")
-	v.AutomaticEnv()
-
-	if len(cfgFile) > 0 && cfgFile[0] != "" {
-		v.SetConfigFile(cfgFile[0])
-	} else {
-		v.SetConfigName("config")
-		v.SetConfigType("yaml")
-		v.AddConfigPath(filepath.Join(home, ".petri"))
-	}
-
-	// Set defaults.
 	cfg := DefaultConfig()
-	v.SetDefault("state.backend", cfg.State.Backend)
-	v.SetDefault("state.connection_string", cfg.State.ConnectionString)
-	v.SetDefault("credentials.master_key_path", cfg.Credentials.MasterKeyPath)
-	v.SetDefault("observability.metrics_enabled", cfg.Observability.MetricsEnabled)
-	v.SetDefault("observability.metrics_port", cfg.Observability.MetricsPort)
-	v.SetDefault("observability.log_level", cfg.Observability.LogLevel)
-	v.SetDefault("git.default_provider", cfg.Git.DefaultProvider)
-	v.SetDefault("cloud.terraform_version", cfg.Cloud.TerraformVersion)
-	v.SetDefault("cloud.pulumi_version", cfg.Cloud.PulumiVersion)
-	v.SetDefault("cleanup.check_interval", "5m")
-	v.SetDefault("cleanup.grace_period", "30m")
 
-	if err := v.ReadInConfig(); err != nil {
-		// Config file is optional.
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, fmt.Errorf("reading config: %w", err)
+	path, err := resolveConfigPath(cfgFile...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Config file is optional at the default path, but required when explicitly provided.
+	explicitPath := len(cfgFile) > 0 && cfgFile[0] != ""
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) || explicitPath {
+			return nil, fmt.Errorf("reading config %s: %w", path, err)
+		}
+	}
+	if err == nil {
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("parsing config %s: %w", path, err)
 		}
 	}
 
-	if err := v.Unmarshal(cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
+	applyEnvOverrides(cfg)
 
 	// Expand ~ in file paths so users can write ~/.petri/... in config.yaml.
 	cfg.State.SQLitePath = expandHome(cfg.State.SQLitePath)
 	cfg.Credentials.MasterKeyPath = expandHome(cfg.Credentials.MasterKeyPath)
 
 	return cfg, nil
+}
+
+// resolveConfigPath returns the config file path to load.
+func resolveConfigPath(cfgFile ...string) (string, error) {
+	if len(cfgFile) > 0 && cfgFile[0] != "" {
+		return cfgFile[0], nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory: %w", err)
+	}
+	return filepath.Join(home, ".petri", "config.yaml"), nil
+}
+
+// applyEnvOverrides applies PETRI_* environment variables over the loaded config.
+// Only operationally useful fields are exposed; add entries here as needed.
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("PETRI_STATE_BACKEND"); v != "" {
+		cfg.State.Backend = v
+	}
+	if v := os.Getenv("PETRI_STATE_CONNECTION_STRING"); v != "" {
+		cfg.State.ConnectionString = v
+	}
+	if v := os.Getenv("PETRI_STATE_SQLITE_PATH"); v != "" {
+		cfg.State.SQLitePath = v
+	}
+	if v := os.Getenv("PETRI_CREDENTIALS_MASTER_KEY_PATH"); v != "" {
+		cfg.Credentials.MasterKeyPath = v
+	}
+	if v := os.Getenv("PETRI_LOG_LEVEL"); v != "" {
+		cfg.Observability.LogLevel = v
+	}
 }
 
 // expandHome replaces a leading ~ with the current user's home directory.

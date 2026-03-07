@@ -149,20 +149,20 @@ func (c *CLI) runCreate(opts *createOptions) error {
 		return fmt.Errorf("recording lab in state: %w", err)
 	}
 
-	c.log.Info().
-		Str("lab_id", lab.ID.String()).
-		Str("name", name).
-		Str("company", lab.Company).
-		Int("level", opts.level).
-		Str("cloud_provider", string(provider)).
-		Msg("Lab record created; starting provisioning")
+	c.log.Info("Lab record created; starting provisioning",
+		"lab_id", lab.ID.String(),
+		"name", name,
+		"company", lab.Company,
+		"level", opts.level,
+		"cloud_provider", string(provider),
+	)
 
 	// Resolve GitHub token for cloud labs.
 	token := ""
 	if provider != types.CloudProviderLocal {
 		token = githubToken()
 		if token == "" {
-			c.log.Warn().Msg("GITHUB_TOKEN not set; git repository creation will be skipped")
+			c.log.Warn("GITHUB_TOKEN not set; git repository creation will be skipped")
 		}
 	}
 

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
+	"github.com/jaimegago/petri/pkg/logger"
 
 	"github.com/jaimegago/petri/pkg/generators"
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
@@ -198,7 +198,7 @@ func newTestOrchestrator(t *testing.T, mgr state.Manager, localProv LocalProvisi
 	return New(Config{WorkDir: t.TempDir()}, Deps{
 		State:          mgr,
 		Cipher:         &mockCipher{},
-		Log:            zerolog.Nop(),
+		Log:            logger.Nop(),
 		LocalProv:      localProv,
 		KubectlFactory: factory,
 		AppsGen:        &mockAppsGen{},
@@ -372,7 +372,7 @@ func TestCreate_UnsupportedProvider(t *testing.T) {
 	orch := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:  mgr,
 		Cipher: &mockCipher{},
-		Log:    zerolog.Nop(),
+		Log:    logger.Nop(),
 	})
 
 	err := orch.Create(context.Background(), CreateOptions{
@@ -399,7 +399,7 @@ func TestDestroy_Local_Success(t *testing.T) {
 	orch := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:     mgr,
 		Cipher:    &mockCipher{},
-		Log:       zerolog.Nop(),
+		Log:       logger.Nop(),
 		LocalProv: localProv,
 	})
 
@@ -441,7 +441,7 @@ func TestDestroy_Local_Force_OnError(t *testing.T) {
 	orch := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:     mgr,
 		Cipher:    &mockCipher{},
-		Log:       zerolog.Nop(),
+		Log:       logger.Nop(),
 		LocalProv: localProv,
 	})
 
@@ -478,7 +478,7 @@ func TestDestroy_Local_NonForce_OnError(t *testing.T) {
 	orch := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:     mgr,
 		Cipher:    &mockCipher{},
-		Log:       zerolog.Nop(),
+		Log:       logger.Nop(),
 		LocalProv: localProv,
 	})
 
@@ -522,7 +522,7 @@ func TestExportCredentials(t *testing.T) {
 	orch := New(Config{}, Deps{
 		State:  mgr,
 		Cipher: &mockCipher{},
-		Log:    zerolog.Nop(),
+		Log:    logger.Nop(),
 	})
 
 	outputPath := t.TempDir() + "/bundle.enc"
@@ -553,7 +553,7 @@ func TestCleanup_RunCleanup(t *testing.T) {
 	orch := New(Config{WorkDir: t.TempDir()}, Deps{
 		State:     mgr,
 		Cipher:    &mockCipher{},
-		Log:       zerolog.Nop(),
+		Log:       logger.Nop(),
 		LocalProv: localProv,
 	})
 
