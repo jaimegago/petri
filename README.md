@@ -1,8 +1,10 @@
 # Petri
 
-Infrastructure lab framework for testing Joe, an LLM-based infrastructure copilot.
+![Petri Logo](assets/logo.png)
 
-Petri spawns complete, realistic company infrastructures including Kubernetes clusters, applications, IaC repositories, and observability stacks. Each lab mimics a real production environment for testing Joe's diagnostic and operational capabilities.
+Infrastructure lab framework for spawning complete, realistic company infrastructures.
+
+Petri creates ephemeral infrastructure labs including Kubernetes clusters, applications, IaC repositories, and observability stacks. Each lab mimics a real production environment for testing and development purposes.
 
 ## Features
 
@@ -123,7 +125,7 @@ petri create --company=acme --level=2 --name=aws-test --ttl=4h
 - Basic platform + observability
 - Single namespace
 - **Bootstrap**: <5m local, <10m cloud
-- **Use Case**: Quick Joe iteration, basic functionality testing
+- **Use Case**: Quick iteration, basic functionality testing
 
 ### Level 2 - Integration
 - 2 clusters (prod, staging)
@@ -141,7 +143,7 @@ petri create --company=acme --level=2 --name=aws-test --ttl=4h
 - Full observability stack
 - Multi-tenancy (5 namespaces)
 - **Bootstrap**: 10m local, 15m cloud
-- **Use Case**: Complex failure scenarios, Joe stress testing
+- **Use Case**: Complex failure scenarios, stress testing
 
 ## Commands
 
@@ -153,7 +155,7 @@ petri create --company=<company> --level=<1|2|3> [options]
 Options:
   --name=<name>         Custom lab name (default: auto-generated)
   --local               Use local kind/k3s instead of cloud
-  --ttl=<duration>      Time-to-live (e.g., 4h, 30m, default: level-specific)
+  --ttl=<duration>      Time-to-live (e.g., 4h, 30m, defaults: level 1=4h, level 2=6h, level 3=8h)
   --no-apps             Skip application deployment (platform only)
   --dry-run             Show what would be created
 ```
@@ -166,7 +168,7 @@ petri list [options]
 Options:
   --company=<company>   Filter by company
   --level=<level>       Filter by level
-  --expired             Show expired labs
+  --alive               Show only non-expired labs (default: all labs shown)
   --format=<table|json> Output format
 ```
 
@@ -192,10 +194,10 @@ petri extend <lab-name> --ttl=+2h
 # Extends lab lifetime by 2 hours
 ```
 
-### Export Credentials for Joe
+### Export Credentials
 
 ```bash
-petri export-creds <lab-name> --output=joe-bundle.enc
+petri export-creds <lab-name> --output=creds-bundle.enc
 
 # Creates encrypted bundle with:
 # - Kubeconfigs for all clusters
@@ -203,7 +205,7 @@ petri export-creds <lab-name> --output=joe-bundle.enc
 # - Cloud provider read-only credentials
 # - Observability URLs and tokens
 #
-# Joe can decrypt with same master key
+# Decrypt with the same master key
 ```
 
 ### Destroy Lab

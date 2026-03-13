@@ -115,18 +115,30 @@ spec:
           - "--storage.tsdb.path=/prometheus"
           - "--storage.tsdb.retention.time=24h"
           - "--web.enable-lifecycle"
+{{- if eq (print .Lab.LabType) "local" }}
+          - "--web.external-url=http://localhost:30080/prometheus"
+          - "--web.route-prefix=/prometheus"
+{{- end }}
         ports:
         - containerPort: 9090
           name: http
         readinessProbe:
           httpGet:
+{{- if eq (print .Lab.LabType) "local" }}
+            path: /prometheus/-/ready
+{{- else }}
             path: /-/ready
+{{- end }}
             port: 9090
           initialDelaySeconds: 5
           periodSeconds: 10
         livenessProbe:
           httpGet:
+{{- if eq (print .Lab.LabType) "local" }}
+            path: /prometheus/-/healthy
+{{- else }}
             path: /-/healthy
+{{- end }}
             port: 9090
           initialDelaySeconds: 10
           periodSeconds: 30
@@ -164,3 +176,25 @@ spec:
     port: 9090
     targetPort: 9090
   type: ClusterIP
+{{- if eq (print .Lab.LabType) "local" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus
+  namespace: monitoring
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+  - http:
+      paths:
+      - path: /prometheus
+        pathType: Prefix
+        backend:
+          service:
+            name: prometheus
+            port:
+              number: 9090
+{{- end }}

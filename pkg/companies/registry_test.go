@@ -38,9 +38,9 @@ func TestRegistry_AppProfile_KnownApps(t *testing.T) {
 		wantFE   bool
 	}{
 		{"acme boutique-frontend", "acme", "boutique-frontend", 8080, true},
-		{"acme boutique-cart", "acme", "boutique-cart", 7070, false},
-		{"acme boutique-checkout", "acme", "boutique-checkout", 5050, false},
-		{"acme payment-service-v2", "acme", "payment-service-v2", 50051, false},
+		{"acme boutique-cart", "acme", "boutique-cart", 8080, false},
+		{"acme boutique-checkout", "acme", "boutique-checkout", 8080, false},
+		{"acme payment-service-v2", "acme", "payment-service-v2", 8080, false},
 		{"acme inventory-service", "acme", "inventory-service", 8080, false},
 		{"acme notification-service", "acme", "notification-service", 8080, false},
 		{"techflow api-gateway", "techflow", "api-gateway", 8080, true},

@@ -19,7 +19,7 @@ func (c *CLI) newListCmd() *cobra.Command {
 		filterCompany string
 		filterLevel   int
 		filterStatus  string
-		showExpired   bool
+		aliveOnly     bool
 		format        string
 	)
 
@@ -27,20 +27,20 @@ func (c *CLI) newListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List labs",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return c.runList(filterCompany, filterLevel, filterStatus, showExpired, format)
+			return c.runList(filterCompany, filterLevel, filterStatus, aliveOnly, format)
 		},
 	}
 
 	cmd.Flags().StringVar(&filterCompany, "company", "", "Filter by company")
 	cmd.Flags().IntVar(&filterLevel, "level", 0, "Filter by level (1-3)")
 	cmd.Flags().StringVar(&filterStatus, "status", "", "Filter by status (CREATING, ACTIVE, EXPIRING, DESTROYING, DESTROYED, ERROR)")
-	cmd.Flags().BoolVar(&showExpired, "expired", false, "Include expired labs")
+	cmd.Flags().BoolVar(&aliveOnly, "alive", false, "Show only non-expired labs")
 	cmd.Flags().StringVar(&format, "format", "table", "Output format: table or json")
 
 	return cmd
 }
 
-func (c *CLI) runList(company string, level int, status string, showExpired bool, format string) error {
+func (c *CLI) runList(company string, level int, status string, aliveOnly bool, format string) error {
 	mgr, err := c.stateManager()
 	if err != nil {
 		return err
@@ -50,7 +50,7 @@ func (c *CLI) runList(company string, level int, status string, showExpired bool
 		Company:        company,
 		Level:          level,
 		Status:         types.LabStatus(status),
-		IncludeExpired: showExpired,
+		IncludeExpired: !aliveOnly,
 	}
 
 	labs, err := mgr.ListLabs(context.Background(), filter)

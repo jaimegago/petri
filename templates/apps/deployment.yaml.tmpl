@@ -28,13 +28,9 @@ spec:
         prometheus.io/port: "{{ .Port }}"
     spec:
       serviceAccountName: {{ .AppName }}
-      securityContext:
-        runAsNonRoot: true
-        seccompProfile:
-          type: RuntimeDefault
       containers:
         - name: {{ .AppName }}
-          image: {{ .ImageRepository }}:latest
+          image: {{ .ImageRepository }}:{{ .ImageTag }}
           ports:
             - containerPort: {{ .Port }}
               protocol: TCP
@@ -53,28 +49,21 @@ spec:
               cpu: {{ .CPULimit }}
               memory: {{ .MemoryLimit }}
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: {{ .Port }}
-            initialDelaySeconds: 10
-            periodSeconds: 15
+            initialDelaySeconds: 15
+            periodSeconds: 20
             failureThreshold: 3
           readinessProbe:
-            httpGet:
-              path: /ready
+            tcpSocket:
               port: {{ .Port }}
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            readOnlyRootFilesystem: true
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
+          whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
               app: {{ .AppName }}

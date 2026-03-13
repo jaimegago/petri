@@ -14,15 +14,32 @@ metadata:
     managed-by: petri
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /
+{{- if eq (print .Lab.LabType) "local" }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+{{- else }}
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     cert-manager.io/cluster-issuer: letsencrypt-prod
+{{- end }}
 spec:
   ingressClassName: nginx
+{{- if ne (print .Lab.LabType) "local" }}
   tls:
     - hosts:
         - {{ .AppName }}.{{ .Lab.Name }}.{{ .Company.Name }}.internal
       secretName: {{ .AppName }}-tls
+{{- end }}
   rules:
+{{- if eq (print .Lab.LabType) "local" }}
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .AppName }}
+                port:
+                  number: 80
+{{- else }}
     - host: {{ .AppName }}.{{ .Lab.Name }}.{{ .Company.Name }}.internal
       http:
         paths:
@@ -33,3 +50,4 @@ spec:
                 name: {{ .AppName }}
                 port:
                   number: 80
+{{- end }}

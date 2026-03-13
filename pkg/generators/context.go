@@ -73,6 +73,7 @@ type AppTemplateContext struct {
 	Replicas        int
 	Port            int
 	ImageRepository string
+	ImageTag        string
 	CPURequest      string
 	MemoryRequest   string
 	CPULimit        string

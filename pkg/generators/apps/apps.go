@@ -85,6 +85,10 @@ func (g *generator) generateApp(appName string, tmplCtx generators.TemplateConte
 	if image == "" {
 		image = defaultImage(appName, tmplCtx.Company.Name)
 	}
+	imageTag := profile.ImageTag
+	if imageTag == "" {
+		imageTag = "latest"
+	}
 	appCtx := generators.AppTemplateContext{
 		TemplateContext: tmplCtx,
 		AppName:         appName,
@@ -92,6 +96,7 @@ func (g *generator) generateApp(appName string, tmplCtx generators.TemplateConte
 		Replicas:        replicasForLevel(tmplCtx.Level.Number),
 		Port:            port,
 		ImageRepository: image,
+		ImageTag:        imageTag,
 		CPURequest:      cpuRequest(tmplCtx.Level.Number),
 		MemoryRequest:   memRequest(tmplCtx.Level.Number),
 		CPULimit:        cpuLimit(tmplCtx.Level.Number),

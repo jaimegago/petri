@@ -140,9 +140,15 @@ func (c *CLI) runCreate(opts *createOptions) error {
 
 	ctx := context.Background()
 
-	// Guard against duplicate lab names.
+	// Guard against duplicate lab names, but allow re-creation of terminal labs.
 	if existing, _ := mgr.GetLabByName(ctx, name); existing != nil {
-		return fmt.Errorf("lab %q already exists (status: %s)", name, existing.Status)
+		if existing.Status != types.LabStatusDestroyed && existing.Status != types.LabStatusError {
+			return fmt.Errorf("lab %q already exists (status: %s)", name, existing.Status)
+		}
+		// Remove the terminal record so CreateLab (INSERT) doesn't hit the UNIQUE constraint.
+		if err := mgr.DeleteLab(ctx, existing.ID); err != nil {
+			return fmt.Errorf("removing previous terminal lab record: %w", err)
+		}
 	}
 
 	if err := mgr.CreateLab(ctx, lab); err != nil {
