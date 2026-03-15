@@ -34,8 +34,6 @@ func (m *mockRunner) output(ctx context.Context, args []string) (string, error) 
 	return "", nil
 }
 
-func okRunner() *mockRunner { return &mockRunner{} }
-
 // ─── ApplyManifest tests ──────────────────────────────────────────────────────
 
 func TestApplyManifest(t *testing.T) {

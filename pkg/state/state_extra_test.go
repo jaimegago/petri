@@ -25,7 +25,7 @@ func TestNew_SQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state.New(sqlite): %v", err)
 	}
-	defer mgr.Close()
+	defer func() { _ = mgr.Close() }()
 
 	// Basic smoke test: create a lab and retrieve it.
 	lab := &types.Lab{
@@ -61,7 +61,7 @@ func TestNew_DefaultBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state.New(default backend): %v", err)
 	}
-	defer mgr.Close()
+	defer func() { _ = mgr.Close() }()
 }
 
 // TestNew_SQLite_MissingPath verifies that state.New returns an error when

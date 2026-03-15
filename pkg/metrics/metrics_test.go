@@ -191,7 +191,7 @@ func TestStartServer_HealthzAndMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("healthz not reachable: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("healthz status: got %d, want 200", resp.StatusCode)
 	}
@@ -201,7 +201,7 @@ func TestStartServer_HealthzAndMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("metrics not reachable: %v", err)
 	}
-	defer metricsResp.Body.Close()
+	defer func() { _ = metricsResp.Body.Close() }()
 	body, _ := io.ReadAll(metricsResp.Body)
 	if !strings.Contains(string(body), "petri_labs_active") {
 		t.Error("metrics response missing petri_labs_active")

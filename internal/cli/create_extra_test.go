@@ -119,7 +119,7 @@ func TestRandomSuffix_LengthAndCharset(t *testing.T) {
 			t.Errorf("randomSuffix(6) length = %d, want 6", len(s))
 		}
 		for _, ch := range s {
-			if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') {
 				t.Errorf("unexpected character %q in suffix", ch)
 			}
 		}

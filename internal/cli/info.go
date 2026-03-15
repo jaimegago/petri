@@ -95,7 +95,13 @@ func (c *CLI) runInfo(name string) error {
 	if len(lab.Metadata.GitRepos) > 0 {
 		fmt.Println("\nGit Repos:")
 		for _, repo := range lab.Metadata.GitRepos {
-			fmt.Printf("  [%s] %s — %s\n", repo.Type, repo.Name, repo.URL)
+			if strings.HasPrefix(repo.URL, "file://") {
+				localPath := strings.TrimPrefix(repo.URL, "file://")
+				fmt.Printf("  [%s] %s (local)\n", repo.Type, localPath)
+				fmt.Printf("    git -C %s log --oneline\n", localPath)
+			} else {
+				fmt.Printf("  [%s] %s — %s\n", repo.Type, repo.Name, repo.URL)
+			}
 		}
 	}
 

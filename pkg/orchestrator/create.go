@@ -102,16 +102,16 @@ func (o *Orchestrator) Create(ctx context.Context, opts CreateOptions) error {
 
 // ── Local workflow ─────────────────────────────────────────────────────────────
 
-// createLocal provisions a kind cluster and deploys application manifests.
+// createLocal provisions a kind cluster, creates git repositories with app manifests,
+// and deploys application manifests to the cluster.
 func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *rollback) error {
 	if o.deps.LocalProv == nil {
 		return fmt.Errorf("local provisioner not configured")
 	}
 
-	// Local cluster: 1 cluster, local provider — choose step count appropriately.
-	totalSteps := 6
+	totalSteps := 7
 	if opts.NoApps {
-		totalSteps = 5
+		totalSteps = 6
 	}
 	prog := newProgress(totalSteps, o.log)
 
@@ -150,26 +150,39 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 		return fmt.Errorf("storing kubeconfig credential: %w", err)
 	}
 
-	// ── Step 3: Wait for nodes ready ────────────────────────────────────────
+	// ── Step 3: Create git repositories with app/gitops manifests ───────────
+	prog.Step("Creating git repositories")
+	gitProv := o.resolveLocalGitProvisioner(opts.Lab.ID.String())
+	appFiles, gitopsFiles := o.generateLocalManifests(ctx, opts)
+	repos, err := o.createLocalGitRepos(ctx, opts, appFiles, gitopsFiles, gitProv, rb)
+	if err != nil {
+		return fmt.Errorf("creating git repositories: %w", err)
+	}
+	opts.Lab.Metadata.GitRepos = repos
+	if err := o.deps.State.UpdateLab(ctx, opts.Lab); err != nil {
+		o.log.Warn("Failed to save git repos to lab metadata", "error", err)
+	}
+
+	// ── Step 4: Wait for nodes ready ────────────────────────────────────────
 	prog.Step("Waiting for cluster nodes to be ready")
 	kctl := o.deps.KubectlFactory(cluster.KubeconfigPath)
 	if err := kctl.WaitForNodes(ctx, 5*time.Minute); err != nil {
 		return fmt.Errorf("waiting for nodes: %w", err)
 	}
 
-	// ── Step 4: Deploy platform components ──────────────────────────────────
+	// ── Step 5: Deploy platform components ──────────────────────────────────
 	prog.Step("Deploying platform components")
 	if err := o.applyPlatformManifests(ctx, opts, kctl); err != nil {
 		o.log.Warn("Platform manifest deployment had errors; continuing", "error", err)
 	}
 
-	// ── Step 5: Deploy observability stack ──────────────────────────────────
+	// ── Step 6: Deploy observability stack ──────────────────────────────────
 	prog.Step("Deploying observability stack")
 	if err := o.applyObservabilityManifests(ctx, opts, kctl); err != nil {
 		o.log.Warn("Observability manifest deployment had errors; continuing", "error", err)
 	}
 
-	// ── Step 6 (optional): Deploy application manifests ─────────────────────
+	// ── Step 7 (optional): Deploy application manifests ─────────────────────
 	if !opts.NoApps {
 		prog.Step("Deploying application manifests")
 		if err := o.applyAppManifests(ctx, opts, kctl); err != nil {
@@ -196,6 +209,121 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 	prog.Done(fmt.Sprintf("Lab %q is ACTIVE", opts.Lab.Name))
 	printLocalConnectionInfo(opts.Lab, cluster)
 	return nil
+}
+
+// resolveLocalGitProvisioner returns a filesystem git provisioner for local labs.
+// Local labs always use on-disk repos under the lab's work directory — GitHub
+// is only used for cloud labs.
+func (o *Orchestrator) resolveLocalGitProvisioner(labID string) GitProvisioner {
+	return gitprov.NewLocalFS(o.labWorkDir(labID, "repos"))
+}
+
+// generateLocalManifests pre-renders app and gitops manifests so they can be
+// committed to git repos and applied to the cluster in a single generation pass.
+func (o *Orchestrator) generateLocalManifests(ctx context.Context, opts CreateOptions) (appFiles, gitopsFiles []generators.RenderedFile) {
+	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
+
+	if o.deps.AppsGen != nil {
+		files, err := o.deps.AppsGen.Generate(ctx, tmplCtx)
+		if err != nil {
+			o.log.Warn("App manifest generation failed for git commit", "error", err)
+		} else {
+			appFiles = files
+		}
+	}
+
+	if o.deps.GitOpsGen != nil {
+		files, err := o.deps.GitOpsGen.Generate(ctx, tmplCtx)
+		if err != nil {
+			o.log.Warn("GitOps manifest generation failed for git commit", "error", err)
+		} else {
+			gitopsFiles = files
+		}
+	}
+
+	return appFiles, gitopsFiles
+}
+
+// createLocalGitRepos creates apps and (optionally) gitops git repositories for a
+// local lab and populates them with generated manifests appended after realistic
+// commit history.
+func (o *Orchestrator) createLocalGitRepos(
+	ctx context.Context,
+	opts CreateOptions,
+	appFiles []generators.RenderedFile,
+	gitopsFiles []generators.RenderedFile,
+	gitProv GitProvisioner,
+	rb *rollback,
+) ([]types.GitRepo, error) {
+	companyLower := strings.ToLower(opts.Company.Name)
+
+	type repoSpec struct {
+		suffix string
+		kind   string
+		files  []generators.RenderedFile
+	}
+
+	specs := []repoSpec{
+		{"apps", "apps", appFiles},
+	}
+	if len(gitopsFiles) > 0 {
+		specs = append(specs, repoSpec{"gitops", "gitops", gitopsFiles})
+	}
+
+	var gitRepos []types.GitRepo
+	for _, rs := range specs {
+		repoName := fmt.Sprintf("%s-%s-%s", companyLower, opts.Lab.Name, rs.suffix)
+
+		var commitSpecs []commits.CommitSpec
+		if o.deps.CommitsGen != nil {
+			generated, err := o.deps.CommitsGen.Generate(ctx, commits.GenerateOptions{
+				RepoType: commits.RepoType(rs.kind),
+				Company:  opts.Company,
+				Level:    opts.Lab.Level,
+			})
+			if err != nil {
+				o.log.Warn("Commit generation failed; using empty history", "error", err, "repo", repoName)
+			} else {
+				commitSpecs = generated
+			}
+		}
+
+		// Append a final commit containing the actual rendered manifest files.
+		if len(rs.files) > 0 {
+			fileMap := make(map[string]string, len(rs.files))
+			for _, f := range rs.files {
+				fileMap[f.Path] = f.Content
+			}
+			commitSpecs = append(commitSpecs, commits.CommitSpec{
+				Message:   fmt.Sprintf("deploy: add %s manifests", rs.kind),
+				Author:    types.Author{Name: "Petri Automation", Email: "petri@internal"},
+				Timestamp: time.Now().UTC().Add(-30 * time.Minute),
+				Files:     fileMap,
+			})
+		}
+
+		info, err := gitProv.Create(ctx, gitprov.CreateOptions{
+			Name:    repoName,
+			Commits: commitSpecs,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("creating %s repo: %w", rs.kind, err)
+		}
+
+		capturedName := repoName
+		rb.push(func(ctx context.Context) error {
+			o.log.Info("Rollback: deleting git repo", "repo", capturedName)
+			return gitProv.Delete(ctx, gitprov.DeleteOptions{Name: capturedName})
+		})
+
+		gitRepos = append(gitRepos, types.GitRepo{
+			Name: repoName,
+			URL:  info.CloneURL,
+			Type: rs.kind,
+		})
+	}
+
+	return gitRepos, nil
 }
 
 // applyPlatformManifests generates and applies platform component manifests.

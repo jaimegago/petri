@@ -87,7 +87,7 @@ func (o *Orchestrator) Destroy(ctx context.Context, opts DestroyOptions) error {
 	return nil
 }
 
-// destroyLocal deletes the kind cluster for a local lab.
+// destroyLocal deletes the kind cluster and any git repositories for a local lab.
 func (o *Orchestrator) destroyLocal(ctx context.Context, opts DestroyOptions, collectErr func(string, error)) {
 	lab := opts.Lab
 	if o.deps.LocalProv == nil {
@@ -101,6 +101,29 @@ func (o *Orchestrator) destroyLocal(ctx context.Context, opts DestroyOptions, co
 	}
 
 	collectErr("delete kind cluster", o.deps.LocalProv.Delete(ctx, clusterName))
+
+	// Delete any git repositories created for this local lab.
+	if o.deps.GitProv == nil || len(lab.Metadata.GitRepos) == 0 {
+		return
+	}
+	for _, repo := range lab.Metadata.GitRepos {
+		if strings.HasPrefix(repo.URL, "file://") {
+			// Local repos live under the lab work dir; removeLabWorkDir handles cleanup.
+			continue
+		}
+		owner := extractOwnerFromURL(repo.URL)
+		if owner == "" && opts.Company != nil {
+			owner = opts.Company.GitHubOrg
+		}
+		if owner == "" {
+			o.log.Warn("Cannot determine repo owner; skipping deletion", "repo", repo.Name)
+			continue
+		}
+		collectErr(
+			fmt.Sprintf("delete repo %s", repo.Name),
+			o.deps.GitProv.Delete(ctx, gitprov.DeleteOptions{Owner: owner, Name: repo.Name}),
+		)
+	}
 }
 
 // destroyCloud tears down cloud infrastructure and deletes git repositories.

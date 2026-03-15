@@ -171,7 +171,7 @@ func clampToWorkHours(t time.Time) time.Time {
 // placeholderFiles returns a single README-style change to make the commit non-empty.
 func placeholderFiles(_ string, _ int) map[string]string {
 	return map[string]string{
-		".petri-meta": fmt.Sprintf("generated-by: petri\n"),
+		".petri-meta": "generated-by: petri\n",
 	}
 }
 

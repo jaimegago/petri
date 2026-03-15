@@ -209,11 +209,7 @@ func (p *provisioner) Up(ctx context.Context, opts UpOptions) (*UpResult, error)
 	}
 
 	// Fetch outputs — non-fatal on error.
-	outputs, err := p.Output(ctx, OutputOptions{
-		WorkDir:   opts.WorkDir,
-		StackName: opts.StackName,
-		Env:       opts.Env,
-	})
+	outputs, err := p.Output(ctx, OutputOptions(opts))
 	if err != nil {
 		outputs = map[string]OutputValue{}
 	}

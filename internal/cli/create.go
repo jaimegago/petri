@@ -47,7 +47,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.company, "company", "", "Company profile (acme, techflow, cloudnative) [required]")
 	cmd.Flags().IntVar(&opts.level, "level", 0, "Complexity level 1-3 [required]")
 	cmd.Flags().StringVar(&opts.name, "name", "", "Lab name (auto-generated if not set)")
-	cmd.Flags().BoolVar(&opts.local, "local", false, "Use local kind/k3s instead of cloud")
+	cmd.Flags().BoolVar(&opts.local, "local", false, "Use local kind cluster instead of cloud. Git repositories are always created on the local filesystem under ~/.petri/labs/<id>/repos/.")
 	cmd.Flags().StringVar(&opts.cloud, "cloud", "", "Cloud provider override (aws, azure, gcp)")
 	cmd.Flags().StringVar(&opts.ttl, "ttl", "", "Time-to-live (e.g. 4h, 30m; default: level-specific)")
 	cmd.Flags().BoolVar(&opts.noApps, "no-apps", false, "Skip application deployment (platform only)")
@@ -163,7 +163,7 @@ func (c *CLI) runCreate(opts *createOptions) error {
 		"cloud_provider", string(provider),
 	)
 
-	// Resolve GitHub token for cloud labs.
+	// Resolve GitHub token for cloud labs. Local labs always use on-disk repos.
 	token := ""
 	if provider != types.CloudProviderLocal {
 		token = githubToken()

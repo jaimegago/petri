@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
@@ -103,12 +104,12 @@ func (o *Orchestrator) destroyFromMetadata(ctx context.Context, lab *types.Lab) 
 		}
 	}
 
-	// Delete git repositories for cloud labs.
-	if lab.CloudProvider != types.CloudProviderLocal && o.deps.GitProv != nil {
+	// Delete git repositories. Local file:// repos are removed by removeLabWorkDir.
+	if o.deps.GitProv != nil {
 		for _, repo := range lab.Metadata.GitRepos {
-			// Extract owner from the clone URL or repo name is enough.
-			// Repos are named {company}-{lab}-{type}, owner is in the URL.
-			// Best-effort: skip if we can't determine the owner.
+			if strings.HasPrefix(repo.URL, "file://") {
+				continue
+			}
 			owner := extractOwnerFromURL(repo.URL)
 			if owner == "" {
 				continue

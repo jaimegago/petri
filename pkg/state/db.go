@@ -188,7 +188,7 @@ func (m *dbManager) ListLabs(ctx context.Context, filter ListFilter) ([]*types.L
 	if err != nil {
 		return nil, fmt.Errorf("listing labs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var labs []*types.Lab
 	for rows.Next() {
@@ -214,7 +214,7 @@ func (m *dbManager) FindExpiredLabs(ctx context.Context, gracePeriod time.Durati
 	if err != nil {
 		return nil, fmt.Errorf("querying expired labs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var labs []*types.Lab
 	for rows.Next() {
@@ -257,7 +257,7 @@ func (m *dbManager) ListResources(ctx context.Context, labID uuid.UUID) ([]*type
 	if err != nil {
 		return nil, fmt.Errorf("listing resources for lab %s: %w", labID, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var resources []*types.LabResource
 	for rows.Next() {

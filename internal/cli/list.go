@@ -75,13 +75,13 @@ func (c *CLI) runList(company string, level int, status string, aliveOnly bool, 
 
 func printLabsTable(labs []*types.Lab) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tCOMPANY\tLEVEL\tPROVIDER\tSTATUS\tEXPIRES")
+	_, _ = fmt.Fprintln(w, "NAME\tCOMPANY\tLEVEL\tPROVIDER\tSTATUS\tEXPIRES")
 	for _, lab := range labs {
 		expires := lab.ExpiresAt.Format(time.RFC3339)
 		if lab.IsExpired() {
 			expires += " (expired)"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n",
 			lab.Name, lab.Company, lab.Level,
 			lab.CloudProvider, lab.Status, expires,
 		)

@@ -80,7 +80,7 @@ func newWithDeps(cfg Config, k kindOps, d dockerOps) Provisioner {
 func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterInfo, error) {
 	// Verify Docker is reachable before attempting anything.
 	if err := p.docker.ping(ctx); err != nil {
-		return nil, fmt.Errorf("Docker daemon not reachable (is Docker running?): %w", err)
+		return nil, fmt.Errorf("docker daemon not reachable (is Docker running?): %w", err)
 	}
 
 	// Idempotency: refuse to create if a cluster with this name already exists.

@@ -32,8 +32,6 @@ func (m *mockRunner) capture(ctx context.Context, workDir string, env []string, 
 	return "", nil
 }
 
-func okRunner() *mockRunner { return &mockRunner{} }
-
 // firstArg returns the first element of the nth recorded call (0-indexed).
 func (m *mockRunner) firstArg(n int) string {
 	if n < len(m.calls) && len(m.calls[n]) > 0 {

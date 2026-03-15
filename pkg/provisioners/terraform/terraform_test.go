@@ -38,8 +38,6 @@ func (m *mockRunner) capture(ctx context.Context, workDir string, env []string, 
 	return "", nil
 }
 
-func okRunner() *mockRunner { return &mockRunner{} }
-
 // ─── Init tests ───────────────────────────────────────────────────────────────
 
 func TestInit(t *testing.T) {
