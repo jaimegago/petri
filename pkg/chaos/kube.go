@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -33,6 +34,20 @@ type KubeClient interface {
 	DeleteSecret(ctx context.Context, namespace, name string) error
 	// ExecInPod runs command in the first container of pod and returns combined output.
 	ExecInPod(ctx context.Context, namespace, pod string, command []string) (string, error)
+	// CreateNamespace creates or idempotently applies a namespace with optional labels.
+	CreateNamespace(ctx context.Context, name string, labels map[string]string) error
+	// DeleteNamespace deletes a namespace and all resources within it.
+	DeleteNamespace(ctx context.Context, name string) error
+	// GetResource retrieves a Kubernetes resource as a JSON string.
+	GetResource(ctx context.Context, kind, namespace, name string) (string, error)
+	// ListResources retrieves all resources of a given kind in a namespace as a JSON list.
+	ListResources(ctx context.Context, kind, namespace string) (string, error)
+	// ApplyYAML applies a YAML manifest string via kubectl apply.
+	ApplyYAML(ctx context.Context, manifest string) error
+	// GetClusterConfig returns the API server URL and base64-encoded CA for the current cluster context.
+	GetClusterConfig(ctx context.Context) (serverURL, caData string, err error)
+	// TokenForServiceAccount creates a short-lived bearer token for a ServiceAccount.
+	TokenForServiceAccount(ctx context.Context, namespace, name string) (string, error)
 }
 
 // kubeRunner abstracts kubectl command execution so tests can inject a fake.
@@ -207,4 +222,98 @@ func (c *cliKubeClient) ExecInPod(ctx context.Context, namespace, pod string, co
 		return "", fmt.Errorf("exec in pod %s/%s: %w", namespace, pod, err)
 	}
 	return out, nil
+}
+
+func (c *cliKubeClient) CreateNamespace(ctx context.Context, name string, labels map[string]string) error {
+	manifest := buildNamespaceManifest(name, labels)
+	return c.ApplyYAML(ctx, manifest)
+}
+
+func buildNamespaceManifest(name string, labels map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ")
+	sb.WriteString(name)
+	if len(labels) > 0 {
+		sb.WriteString("\n  labels:")
+		for k, v := range labels {
+			sb.WriteString("\n    ")
+			sb.WriteString(k)
+			sb.WriteString(": ")
+			sb.WriteString(v)
+		}
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func (c *cliKubeClient) DeleteNamespace(ctx context.Context, name string) error {
+	if err := c.runner.run(ctx, []string{"delete", "namespace", name, "--ignore-not-found"}); err != nil {
+		return fmt.Errorf("deleting namespace %s: %w", name, err)
+	}
+	return nil
+}
+
+func (c *cliKubeClient) GetResource(ctx context.Context, kind, namespace, name string) (string, error) {
+	args := []string{"get", kind, name, "-o", "json"}
+	if namespace != "" {
+		args = append(args, "-n", namespace)
+	}
+	out, err := c.runner.output(ctx, args)
+	if err != nil {
+		return "", fmt.Errorf("getting %s %s in %s: %w", kind, name, namespace, err)
+	}
+	return out, nil
+}
+
+func (c *cliKubeClient) ListResources(ctx context.Context, kind, namespace string) (string, error) {
+	args := []string{"get", kind, "-o", "json"}
+	if namespace != "" {
+		args = append(args, "-n", namespace)
+	}
+	out, err := c.runner.output(ctx, args)
+	if err != nil {
+		return "", fmt.Errorf("listing %s in %s: %w", kind, namespace, err)
+	}
+	return out, nil
+}
+
+func (c *cliKubeClient) ApplyYAML(ctx context.Context, manifest string) error {
+	f, err := os.CreateTemp("", "petri-manifest-*.yaml")
+	if err != nil {
+		return fmt.Errorf("creating temp manifest file: %w", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(manifest); err != nil {
+		f.Close()
+		return fmt.Errorf("writing manifest: %w", err)
+	}
+	f.Close()
+	if err := c.runner.run(ctx, []string{"apply", "-f", f.Name()}); err != nil {
+		return fmt.Errorf("applying manifest: %w", err)
+	}
+	return nil
+}
+
+func (c *cliKubeClient) GetClusterConfig(ctx context.Context) (string, string, error) {
+	server, err := c.runner.output(ctx, []string{
+		"config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}",
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("getting cluster server URL: %w", err)
+	}
+	ca, err := c.runner.output(ctx, []string{
+		"config", "view", "--minify", "--raw", "-o", "jsonpath={.clusters[0].cluster.certificate-authority-data}",
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("getting cluster CA: %w", err)
+	}
+	return strings.TrimSpace(server), strings.TrimSpace(ca), nil
+}
+
+func (c *cliKubeClient) TokenForServiceAccount(ctx context.Context, namespace, name string) (string, error) {
+	out, err := c.runner.output(ctx, []string{"create", "token", name, "-n", namespace})
+	if err != nil {
+		return "", fmt.Errorf("creating token for serviceaccount %s/%s: %w", namespace, name, err)
+	}
+	return strings.TrimSpace(out), nil
 }

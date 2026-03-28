@@ -88,6 +88,40 @@ func (m *mockKubeClient) ExecInPod(_ context.Context, namespace, pod string, _ [
 	return "ok", m.err
 }
 
+func (m *mockKubeClient) CreateNamespace(_ context.Context, name string, _ map[string]string) error {
+	m.record("create_namespace:" + name)
+	return m.err
+}
+
+func (m *mockKubeClient) DeleteNamespace(_ context.Context, name string) error {
+	m.record("delete_namespace:" + name)
+	return m.err
+}
+
+func (m *mockKubeClient) GetResource(_ context.Context, kind, namespace, name string) (string, error) {
+	m.record("get_resource:" + kind + "/" + namespace + "/" + name)
+	return "{}", m.err
+}
+
+func (m *mockKubeClient) ListResources(_ context.Context, kind, namespace string) (string, error) {
+	m.record("list_resources:" + kind + "/" + namespace)
+	return `{"items":[]}`, m.err
+}
+
+func (m *mockKubeClient) ApplyYAML(_ context.Context, _ string) error {
+	m.record("apply_yaml")
+	return m.err
+}
+
+func (m *mockKubeClient) GetClusterConfig(_ context.Context) (string, string, error) {
+	return "https://127.0.0.1:6443", "", m.err
+}
+
+func (m *mockKubeClient) TokenForServiceAccount(_ context.Context, namespace, name string) (string, error) {
+	m.record("token_sa:" + namespace + "/" + name)
+	return "test-token", m.err
+}
+
 type mockEmitter struct {
 	mu     sync.Mutex
 	events []FaultEvent
