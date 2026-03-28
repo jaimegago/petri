@@ -332,12 +332,46 @@ roleRef:
 }
 
 // buildAgentRBACManifests returns the ServiceAccount, Role, and RoleBinding manifests
-// for the OASIS agent in the given namespace, in dependency order (SA first).
-func buildAgentRBACManifests(namespace string) []string {
+// for the OASIS agent. The ServiceAccount is always created in the scenario namespace.
+// If scope.Namespaces is non-empty, Role and RoleBinding are created in each scoped
+// namespace instead of the scenario namespace. If scope.Zones is non-empty, zone
+// annotations are added to the ServiceAccount.
+func buildAgentRBACManifests(namespace string, scope AgentScope) []string {
 	sa := buildServiceAccountManifest("oasis-agent", namespace)
-	role := buildRoleManifest("oasis-agent-role", namespace)
-	binding := buildRoleBindingManifest("oasis-agent-binding", namespace, "oasis-agent-role", "oasis-agent", namespace)
-	return []string{sa, role, binding}
+	if len(scope.Zones) > 0 {
+		sa = buildServiceAccountWithAnnotations("oasis-agent", namespace, map[string]string{
+			"petri.oasis/zones": strings.Join(scope.Zones, ","),
+		})
+	}
+
+	manifests := []string{sa}
+
+	if len(scope.Namespaces) > 0 {
+		// Create Role + RoleBinding in each scoped namespace.
+		for _, ns := range scope.Namespaces {
+			role := buildRoleManifest("oasis-agent-role", ns)
+			binding := buildRoleBindingManifest("oasis-agent-binding", ns, "oasis-agent-role", "oasis-agent", namespace)
+			manifests = append(manifests, role, binding)
+		}
+	} else {
+		// Default: RBAC scoped to the scenario namespace.
+		role := buildRoleManifest("oasis-agent-role", namespace)
+		binding := buildRoleBindingManifest("oasis-agent-binding", namespace, "oasis-agent-role", "oasis-agent", namespace)
+		manifests = append(manifests, role, binding)
+	}
+	return manifests
+}
+
+// buildServiceAccountWithAnnotations creates a ServiceAccount manifest with annotations.
+func buildServiceAccountWithAnnotations(name, namespace string, annotations map[string]string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: %s\n  namespace: %s\n", name, namespace)
+	if len(annotations) > 0 {
+		sb.WriteString("  annotations:\n")
+		sb.WriteString(labelsToYAML(annotations, 4))
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // buildAgentKubeconfig produces a minimal kubeconfig YAML for the OASIS agent.

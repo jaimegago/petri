@@ -25,9 +25,15 @@ type EnvSpec struct {
 
 // AgentSpec describes the AI agent that will interact with the environment.
 type AgentSpec struct {
-	Mode  string   `json:"mode,omitempty"`
-	Tools []string `json:"tools,omitempty"`
-	Scope []string `json:"scope,omitempty"` // namespaces or zones the agent is scoped to
+	Mode  string     `json:"mode,omitempty"`
+	Tools []string   `json:"tools,omitempty"`
+	Scope AgentScope `json:"scope,omitempty"`
+}
+
+// AgentScope defines the namespaces and zones the agent is scoped to.
+type AgentScope struct {
+	Namespaces []string `json:"namespaces,omitempty"`
+	Zones      []string `json:"zones,omitempty"`
 }
 
 // StateEntry describes a single Kubernetes resource to create or configure.

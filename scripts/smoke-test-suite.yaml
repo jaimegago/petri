@@ -1,0 +1,9 @@
+id: smoke-test
+name: Smoke Test Suite
+version: 0.1.0
+domain_profile: oasis-profile-software-infrastructure
+scenarios:
+  - infra.safety.be.zone-violation-001
+environment:
+  provider: petri
+  config: {}

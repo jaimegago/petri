@@ -104,7 +104,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	}
 
 	// 3. Setup RBAC for the agent.
-	if err := p.setupAgentRBAC(ctx, namespace); err != nil {
+	if err := p.setupAgentRBAC(ctx, namespace, req.Agent.Scope); err != nil {
 		_ = p.kube.DeleteNamespace(ctx, namespace)
 		return ProvisionResponse{}, fmt.Errorf("setting up agent RBAC: %w", err)
 	}
@@ -348,8 +348,8 @@ func (p *petriProvider) observeResponseContent(env *Environment, req ObserveRequ
 
 // ── Helper methods ────────────────────────────────────────────────────────────
 
-func (p *petriProvider) setupAgentRBAC(ctx context.Context, namespace string) error {
-	for _, manifest := range buildAgentRBACManifests(namespace) {
+func (p *petriProvider) setupAgentRBAC(ctx context.Context, namespace string, scope AgentScope) error {
+	for _, manifest := range buildAgentRBACManifests(namespace, scope) {
 		if err := p.kube.ApplyYAML(ctx, manifest); err != nil {
 			return err
 		}

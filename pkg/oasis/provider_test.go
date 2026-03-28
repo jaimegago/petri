@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,99 @@ func TestProvision(t *testing.T) {
 		}
 		if resp.AgentCredentials.Namespace == "" {
 			t.Error("credentials namespace should not be empty")
+		}
+	})
+
+	t.Run("deserializes structured scope and creates scoped RBAC", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		p := newTestProvider(mock)
+
+		req := ProvisionRequest{
+			ScenarioID: "scope-sc",
+			Agent: AgentSpec{
+				Mode:  "autonomous",
+				Tools: []string{"container-orchestration"},
+				Scope: AgentScope{
+					Namespaces: []string{"ns-a", "ns-b"},
+					Zones:      []string{"zone-a"},
+				},
+			},
+		}
+		resp, err := p.Provision(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Provision() error: %v", err)
+		}
+		if resp.Status != "ready" {
+			t.Errorf("status = %q, want %q", resp.Status, "ready")
+		}
+
+		// ServiceAccount should be created in the scenario namespace.
+		// Role + RoleBinding should be created in each scoped namespace (ns-a, ns-b).
+		// Expected manifests: SA(1) + Role+Binding for ns-a(2) + Role+Binding for ns-b(2) = 5 RBAC manifests.
+		var saCount, roleCount, bindingCount int
+		for _, m := range mock.appliedManifests {
+			// Match manifests by their top-level "kind:" field.
+			if strings.HasPrefix(m, "apiVersion: v1\nkind: ServiceAccount\n") {
+				saCount++
+				if !containsStr(m, "petri.oasis/zones: zone-a") {
+					t.Error("ServiceAccount missing zone annotation")
+				}
+			}
+			if strings.Contains(m, "kind: Role\n") && !strings.Contains(m, "kind: RoleBinding") {
+				roleCount++
+			}
+			if strings.Contains(m, "kind: RoleBinding\n") {
+				bindingCount++
+			}
+		}
+		if saCount != 1 {
+			t.Errorf("expected 1 ServiceAccount, got %d", saCount)
+		}
+		if roleCount != 2 {
+			t.Errorf("expected 2 Roles (one per scoped namespace), got %d", roleCount)
+		}
+		if bindingCount != 2 {
+			t.Errorf("expected 2 RoleBindings (one per scoped namespace), got %d", bindingCount)
+		}
+
+		// Verify roles are in the scoped namespaces, not the scenario namespace.
+		env, _ := p.store.get(resp.EnvironmentID)
+		var roleInNsA, roleInNsB bool
+		for _, m := range mock.appliedManifests {
+			isRole := containsStr(m, "kind: Role\n") && !containsStr(m, "kind: RoleBinding")
+			if isRole && containsStr(m, "namespace: ns-a") {
+				roleInNsA = true
+			}
+			if isRole && containsStr(m, "namespace: ns-b") {
+				roleInNsB = true
+			}
+		}
+		if !roleInNsA {
+			t.Error("expected Role in namespace ns-a")
+		}
+		if !roleInNsB {
+			t.Error("expected Role in namespace ns-b")
+		}
+		_ = env
+	})
+
+	t.Run("falls back to scenario namespace RBAC when scope is empty", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		p := newTestProvider(mock)
+
+		resp, err := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "no-scope"})
+		if err != nil {
+			t.Fatalf("Provision() error: %v", err)
+		}
+		env, _ := p.store.get(resp.EnvironmentID)
+
+		// All RBAC should be in the scenario namespace.
+		for _, m := range mock.appliedManifests {
+			if containsStr(m, "kind: Role\n") && !containsStr(m, "namespace: "+env.Namespace) {
+				t.Errorf("Role should be in scenario namespace %s", env.Namespace)
+			}
 		}
 	})
 
@@ -444,6 +538,32 @@ func TestObserve_UnknownType(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown observation type")
+	}
+}
+
+func TestAgentScopeDeserialization(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+		"mode": "autonomous",
+		"tools": ["container-orchestration"],
+		"scope": {
+			"namespaces": ["default"],
+			"zones": ["zone-a"]
+		}
+	}`
+	var spec AgentSpec
+	if err := json.Unmarshal([]byte(input), &spec); err != nil {
+		t.Fatalf("failed to unmarshal AgentSpec with structured scope: %v", err)
+	}
+	if spec.Mode != "autonomous" {
+		t.Errorf("Mode = %q, want %q", spec.Mode, "autonomous")
+	}
+	if len(spec.Scope.Namespaces) != 1 || spec.Scope.Namespaces[0] != "default" {
+		t.Errorf("Scope.Namespaces = %v, want [default]", spec.Scope.Namespaces)
+	}
+	if len(spec.Scope.Zones) != 1 || spec.Scope.Zones[0] != "zone-a" {
+		t.Errorf("Scope.Zones = %v, want [zone-a]", spec.Scope.Zones)
 	}
 }
 
