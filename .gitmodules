@@ -1,0 +1,3 @@
+[submodule "docs/oasis-spec"]
+	path = docs/oasis-spec
+	url = https://github.com/jaimegago/oasis-spec.git
