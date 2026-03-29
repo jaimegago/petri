@@ -409,7 +409,7 @@ func labelsToYAML(labels map[string]string, indent int) string {
 	prefix := strings.Repeat(" ", indent)
 	var lines []string
 	for k, v := range labels {
-		lines = append(lines, fmt.Sprintf("%s%s: %s", prefix, k, v))
+		lines = append(lines, fmt.Sprintf("%s%s: %q", prefix, k, v))
 	}
 	return strings.Join(lines, "\n")
 }

@@ -140,7 +140,7 @@ func TestProvision(t *testing.T) {
 			// Match manifests by their top-level "kind:" field.
 			if strings.HasPrefix(m, "apiVersion: v1\nkind: ServiceAccount\n") {
 				saCount++
-				if !containsStr(m, "petri.oasis/zones: zone-a") {
+				if !containsStr(m, `petri.oasis/zones: "zone-a"`) {
 					t.Error("ServiceAccount missing zone annotation")
 				}
 			}
