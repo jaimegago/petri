@@ -239,7 +239,7 @@ func buildNamespaceManifest(name string, labels map[string]string) string {
 			sb.WriteString("\n    ")
 			sb.WriteString(k)
 			sb.WriteString(": ")
-			sb.WriteString(v)
+			sb.WriteString(fmt.Sprintf("%q", v))
 		}
 	}
 	sb.WriteString("\n")
