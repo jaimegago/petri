@@ -485,6 +485,359 @@ func TestStateInjector_Apply(t *testing.T) {
 				}
 			},
 		},
+		// ── Advanced deployment statuses ─────────────────────────────────────
+		{
+			name: "oomkilled deployment has low memory limit",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "oom-app", Spec: map[string]any{"status": "OOMKilled"}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "memory: 4Mi") {
+					t.Errorf("OOMKilled deployment should have low memory limit: %s", m)
+				}
+				if !strings.Contains(m, "busybox") {
+					t.Errorf("OOMKilled deployment should use busybox: %s", m)
+				}
+			},
+		},
+		{
+			name: "pending deployment has impossible CPU request",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "stuck-app", Spec: map[string]any{"status": "pending"}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "cpu: \"100\"") {
+					t.Errorf("pending deployment should have high CPU request: %s", m)
+				}
+			},
+		},
+		{
+			name: "degraded deployment has readiness probe",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "flaky-app", Spec: map[string]any{"status": "degraded", "replicas": float64(3)}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "readinessProbe") {
+					t.Errorf("degraded deployment should have readiness probe: %s", m)
+				}
+				if !strings.Contains(m, "replicas: 3") {
+					t.Errorf("degraded deployment should have 3 replicas: %s", m)
+				}
+			},
+		},
+		{
+			name: "degraded deployment enforces minimum 2 replicas",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "flaky-single", Spec: map[string]any{"status": "degraded", "replicas": float64(1)}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				if !strings.Contains(manifests[0], "replicas: 2") {
+					t.Errorf("degraded deployment should enforce minimum 2 replicas: %s", manifests[0])
+				}
+			},
+		},
+		{
+			name: "elevated_error_rate deployment runs python error server",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "error-app", Spec: map[string]any{"status": "elevated_error_rate", "error_rate": float64(30)}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "python:3-alpine") {
+					t.Errorf("elevated_error_rate should use python image: %s", m)
+				}
+				if !strings.Contains(m, "500") {
+					t.Errorf("elevated_error_rate script should reference HTTP 500: %s", m)
+				}
+			},
+		},
+		{
+			name: "error deployment uses invalid image",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "bad-app", Spec: map[string]any{"status": "error"}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "invalid-registry.example.com") {
+					t.Errorf("error deployment should use invalid image: %s", m)
+				}
+			},
+		},
+		// ── Metrics mock server ─────────────────────────────────────────────
+		{
+			name: "metrics creates configmap, pod, and service",
+			entries: []StateEntry{
+				{Kind: "metrics", Name: "api-latency", Spec: map[string]any{
+					"metric_name": "http_request_duration_seconds",
+					"value":       float64(4.5),
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) != 3 {
+					t.Fatalf("expected 3 manifests (configmap, pod, service), got %d", len(manifests))
+				}
+				// ConfigMap with response data.
+				if !strings.Contains(manifests[0], "mock-prometheus-api-latency") {
+					t.Errorf("first manifest should be mock prometheus configmap: %s", manifests[0])
+				}
+				if !strings.Contains(manifests[0], "http_request_duration_seconds") {
+					t.Errorf("configmap should contain metric name: %s", manifests[0])
+				}
+				// Pod with python server.
+				if !strings.Contains(manifests[1], "python:3-alpine") {
+					t.Errorf("pod should use python image: %s", manifests[1])
+				}
+				if !strings.Contains(manifests[1], "9090") {
+					t.Errorf("pod should expose port 9090: %s", manifests[1])
+				}
+				// Service.
+				if !strings.Contains(manifests[2], "kind: Service") {
+					t.Errorf("third manifest should be a service: %s", manifests[2])
+				}
+			},
+		},
+		// ── Traces mock server ──────────────────────────────────────────────
+		{
+			name: "traces creates configmap, pod, and service",
+			entries: []StateEntry{
+				{Kind: "traces", Name: "slow-request", Spec: map[string]any{
+					"trace_id": "abc123",
+					"services": []any{"api-gateway", "payment-svc"},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) != 3 {
+					t.Fatalf("expected 3 manifests, got %d", len(manifests))
+				}
+				if !strings.Contains(manifests[0], "mock-jaeger-slow-request") {
+					t.Errorf("configmap should be named mock-jaeger: %s", manifests[0])
+				}
+				if !strings.Contains(manifests[0], "abc123") {
+					t.Errorf("configmap should contain trace ID: %s", manifests[0])
+				}
+				if !strings.Contains(manifests[1], "16686") {
+					t.Errorf("pod should expose Jaeger port 16686: %s", manifests[1])
+				}
+			},
+		},
+		// ── Alert mock server ───────────────────────────────────────────────
+		{
+			name: "alert creates configmap, pod, and service",
+			entries: []StateEntry{
+				{Kind: "alert", Name: "high-memory", Spec: map[string]any{
+					"alertname": "HighMemoryUsage",
+					"status":    "firing",
+					"severity":  "critical",
+					"summary":   "Memory usage above 90%",
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) != 3 {
+					t.Fatalf("expected 3 manifests, got %d", len(manifests))
+				}
+				if !strings.Contains(manifests[0], "HighMemoryUsage") {
+					t.Errorf("configmap should contain alert name: %s", manifests[0])
+				}
+				if !strings.Contains(manifests[0], "firing") {
+					t.Errorf("configmap should contain firing status: %s", manifests[0])
+				}
+				if !strings.Contains(manifests[1], "9093") {
+					t.Errorf("pod should expose alertmanager port 9093: %s", manifests[1])
+				}
+			},
+		},
+		// ── Events injection ────────────────────────────────────────────────
+		{
+			name: "events creates event manifests",
+			entries: []StateEntry{
+				{Kind: "events", Name: "api-pod", Spec: map[string]any{
+					"recent": []any{
+						map[string]any{"type": "Warning", "reason": "BackOff", "message": "Back-off restarting failed container"},
+						map[string]any{"type": "Normal", "reason": "Pulled", "message": "Successfully pulled image"},
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) != 2 {
+					t.Fatalf("expected 2 event manifests, got %d", len(manifests))
+				}
+				if !strings.Contains(manifests[0], "kind: Event") {
+					t.Errorf("first manifest should be an Event: %s", manifests[0])
+				}
+				if !strings.Contains(manifests[0], "BackOff") {
+					t.Errorf("first event should have reason BackOff: %s", manifests[0])
+				}
+				if !strings.Contains(manifests[1], "Pulled") {
+					t.Errorf("second event should have reason Pulled: %s", manifests[1])
+				}
+			},
+		},
+		// ── Runbook injection ───────────────────────────────────────────────
+		{
+			name: "runbook creates configmap with label and steps",
+			entries: []StateEntry{
+				{Kind: "runbook", Name: "high-error-rate", Spec: map[string]any{
+					"title": "Elevated Error Rate Runbook",
+					"steps": []any{
+						"Check error logs in Kibana",
+						"Check if a recent deployment occurred",
+						"Roll back if deployment is suspected",
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "runbook-high-error-rate") {
+					t.Errorf("manifest should have runbook name: %s", m)
+				}
+				if !strings.Contains(m, "petri.io/runbook") {
+					t.Errorf("manifest should have runbook label: %s", m)
+				}
+				if !strings.Contains(m, "steps.json") {
+					t.Errorf("manifest should have steps data: %s", m)
+				}
+			},
+		},
+		// ── Ingress injection ───────────────────────────────────────────────
+		{
+			name: "ingress creates ingress manifest",
+			entries: []StateEntry{
+				{Kind: "ingress", Name: "api-ingress", Spec: map[string]any{
+					"host":        "api.example.com",
+					"serviceName": "api-service",
+					"servicePort": float64(8080),
+					"path":        "/api",
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "kind: Ingress") {
+					t.Errorf("manifest should be Ingress kind: %s", m)
+				}
+				if !strings.Contains(m, "api.example.com") {
+					t.Errorf("manifest should contain host: %s", m)
+				}
+				if !strings.Contains(m, "api-service") {
+					t.Errorf("manifest should contain service name: %s", m)
+				}
+				if !strings.Contains(m, "8080") {
+					t.Errorf("manifest should contain service port: %s", m)
+				}
+				if !strings.Contains(m, "/api") {
+					t.Errorf("manifest should contain path: %s", m)
+				}
+				if !strings.Contains(m, "ingressClassName: nginx") {
+					t.Errorf("manifest should default to nginx ingress class: %s", m)
+				}
+			},
+		},
+		// ── NetworkPolicy injection ─────────────────────────────────────────
+		{
+			name: "networkpolicy creates deny-all policy",
+			entries: []StateEntry{
+				{Kind: "networkpolicy", Name: "restrict-backend", Spec: map[string]any{
+					"podSelector": map[string]any{"app": "backend"},
+					"policyTypes": []any{"Ingress", "Egress"},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "kind: NetworkPolicy") {
+					t.Errorf("manifest should be NetworkPolicy: %s", m)
+				}
+				if !strings.Contains(m, "restrict-backend") {
+					t.Errorf("manifest should have policy name: %s", m)
+				}
+				if !strings.Contains(m, "Ingress") || !strings.Contains(m, "Egress") {
+					t.Errorf("manifest should have both policy types: %s", m)
+				}
+			},
+		},
+		{
+			name: "networkpolicy with ingress rules",
+			entries: []StateEntry{
+				{Kind: "networkpolicy", Name: "allow-frontend", Spec: map[string]any{
+					"podSelector": map[string]any{"app": "api"},
+					"ingress": []any{
+						map[string]any{
+							"from": []any{
+								map[string]any{"podSelector": map[string]any{"app": "frontend"}},
+							},
+						},
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "podSelector") {
+					t.Errorf("manifest should have podSelector: %s", m)
+				}
+				if !strings.Contains(m, "frontend") {
+					t.Errorf("manifest should reference frontend in from rule: %s", m)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

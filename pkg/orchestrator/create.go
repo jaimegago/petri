@@ -31,6 +31,9 @@ type CreateOptions struct {
 	Spec types.LevelSpec
 	// NoApps skips application manifest deployment.
 	NoApps bool
+	// OASISMode enables audit logging and Calico CNI (for NetworkPolicy support)
+	// on the kind cluster. Use this when the lab will be used with petri serve.
+	OASISMode bool
 	// GitHubToken is the PAT used to create GitHub repositories.
 	// Required for cloud labs; ignored for local labs.
 	GitHubToken string
@@ -118,8 +121,9 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 	// ── Step 1: Create kind cluster ──────────────────────────────────────────
 	prog.Step("Creating kind cluster")
 	cluster, err := o.deps.LocalProv.Create(ctx, localprov.CreateOptions{
-		Name:  opts.Lab.Name,
-		Level: opts.Lab.Level,
+		Name:      opts.Lab.Name,
+		Level:     opts.Lab.Level,
+		OASISMode: opts.OASISMode,
 	})
 	if err != nil {
 		return fmt.Errorf("creating kind cluster: %w", err)

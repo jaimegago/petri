@@ -144,6 +144,18 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		return nil, fmt.Errorf("creating kind cluster %q: %w", opts.Name, err)
 	}
 
+	// In OASIS mode the default CNI is disabled in favour of Calico which
+	// supports NetworkPolicy enforcement. Apply the Calico manifest now.
+	if opts.OASISMode {
+		if _, statErr := os.Stat(kubeconfigPath); statErr == nil {
+			if err := runCmd(ctx, "kubectl", "--kubeconfig", kubeconfigPath,
+				"apply", "-f", CalicoCNIManifestURL); err != nil {
+				// Best-effort: cluster is still usable, but NetworkPolicies won't be enforced.
+				_, _ = fmt.Fprintf(os.Stderr, "petri: warning: failed to install Calico CNI: %v\n", err)
+			}
+		}
+	}
+
 	return &ClusterInfo{
 		Name:           opts.Name,
 		KubeconfigPath: kubeconfigPath,

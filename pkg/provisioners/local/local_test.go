@@ -306,6 +306,25 @@ func TestKindClusterConfigWithAudit(t *testing.T) {
 	}
 }
 
+func TestKindClusterConfigWithAudit_DisablesDefaultCNI(t *testing.T) {
+	cfg := kindClusterConfigWithAudit(2, "/tmp/audit-policy.yaml", "/tmp/audit/audit.log")
+	if !strings.Contains(cfg, "disableDefaultCNI: true") {
+		t.Error("OASIS audit config should disable default CNI for Calico")
+	}
+	if !strings.Contains(cfg, "podSubnet: 192.168.0.0/16") {
+		t.Error("OASIS audit config should set Calico pod subnet")
+	}
+}
+
+func TestCalicoCNIManifestURL(t *testing.T) {
+	if CalicoCNIManifestURL == "" {
+		t.Error("CalicoCNIManifestURL should not be empty")
+	}
+	if !strings.Contains(CalicoCNIManifestURL, "calico") {
+		t.Error("CalicoCNIManifestURL should reference calico")
+	}
+}
+
 func TestOASISAuditPolicy(t *testing.T) {
 	policy := oasisAuditPolicy()
 	if !strings.Contains(policy, "audit.k8s.io/v1") {

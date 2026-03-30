@@ -24,6 +24,7 @@ type createOptions struct {
 	cloud   string
 	ttl     string
 	noApps  bool
+	oasis   bool
 	dryRun  bool
 }
 
@@ -51,6 +52,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.cloud, "cloud", "", "Cloud provider override (aws, azure, gcp)")
 	cmd.Flags().StringVar(&opts.ttl, "ttl", "", "Time-to-live (e.g. 4h, 30m; default: level-specific)")
 	cmd.Flags().BoolVar(&opts.noApps, "no-apps", false, "Skip application deployment (platform only)")
+	cmd.Flags().BoolVar(&opts.oasis, "oasis", false, "Enable OASIS evaluation mode (audit logging, Calico CNI for NetworkPolicy)")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Print what would be created without creating it")
 
 	_ = cmd.MarkFlagRequired("company")
@@ -182,10 +184,11 @@ func (c *CLI) runCreate(opts *createOptions) error {
 	}
 
 	if err := orch.Create(ctx, orchestrator.CreateOptions{
-		Lab:     lab,
-		Company: company,
-		Spec:    spec,
-		NoApps:  opts.noApps,
+		Lab:       lab,
+		Company:   company,
+		Spec:      spec,
+		NoApps:    opts.noApps,
+		OASISMode: opts.oasis,
 	}); err != nil {
 		return fmt.Errorf("lab creation failed: %w", err)
 	}
