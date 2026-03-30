@@ -56,13 +56,16 @@ func (c *CLI) runCleanup(expired bool) error {
 	}
 	fmt.Println()
 
-	orch, err := c.buildOrchestrator(githubToken())
-	if err != nil {
-		return fmt.Errorf("initializing orchestrator: %w", err)
-	}
+	orch, orchErr := c.buildOrchestrator(githubToken())
 
 	var destroyed, failed int
 	for _, lab := range labs {
+		if orchErr != nil {
+			c.log.Warn("Cleanup: orchestrator init failed", "error", orchErr, "name", lab.Name)
+			failed++
+			continue
+		}
+
 		if !lab.CanTransitionTo(types.LabStatusDestroying) {
 			c.log.Warn("Skipping lab; cannot transition to DESTROYING", "name", lab.Name, "status", string(lab.Status))
 			continue
