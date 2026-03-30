@@ -232,9 +232,242 @@ func TestStateInjector_Apply(t *testing.T) {
 		{
 			name: "unsupported kind returns error",
 			entries: []StateEntry{
-				{Kind: "PersistentVolumeClaim", Name: "data-pvc"},
+				{Kind: "UnknownKind", Name: "foo"},
 			},
 			wantErr: true,
+		},
+		{
+			name: "HPA with defaults",
+			entries: []StateEntry{
+				{Kind: "hpa", Name: "api-hpa", Spec: map[string]any{"targetRef": "api-server"}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "HorizontalPodAutoscaler") {
+					t.Errorf("manifest missing kind HPA: %s", m)
+				}
+				if !strings.Contains(m, "api-server") {
+					t.Errorf("manifest missing targetRef: %s", m)
+				}
+				if !strings.Contains(m, "minReplicas: 1") {
+					t.Errorf("manifest missing default minReplicas: %s", m)
+				}
+				if !strings.Contains(m, "maxReplicas: 10") {
+					t.Errorf("manifest missing default maxReplicas: %s", m)
+				}
+			},
+		},
+		{
+			name: "HPA with custom values",
+			entries: []StateEntry{
+				{Kind: "HorizontalPodAutoscaler", Name: "web-hpa", Spec: map[string]any{
+					"targetRef":                      "web",
+					"minReplicas":                    float64(2),
+					"maxReplicas":                    float64(20),
+					"targetCPUUtilizationPercentage": float64(50),
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "minReplicas: 2") {
+					t.Errorf("manifest missing minReplicas 2: %s", m)
+				}
+				if !strings.Contains(m, "maxReplicas: 20") {
+					t.Errorf("manifest missing maxReplicas 20: %s", m)
+				}
+				if !strings.Contains(m, "averageUtilization: 50") {
+					t.Errorf("manifest missing cpu target 50: %s", m)
+				}
+			},
+		},
+		{
+			name: "PVC with defaults",
+			entries: []StateEntry{
+				{Kind: "pvc", Name: "data-vol"},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "PersistentVolumeClaim") {
+					t.Errorf("manifest missing kind PVC: %s", m)
+				}
+				if !strings.Contains(m, "ReadWriteOnce") {
+					t.Errorf("manifest missing default access mode: %s", m)
+				}
+				if !strings.Contains(m, "storage: 1Gi") {
+					t.Errorf("manifest missing default storage: %s", m)
+				}
+			},
+		},
+		{
+			name: "PVC with custom storage and class",
+			entries: []StateEntry{
+				{Kind: "PersistentVolumeClaim", Name: "big-vol", Spec: map[string]any{
+					"storage":          "10Gi",
+					"accessMode":       "ReadWriteMany",
+					"storageClassName": "fast-ssd",
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "storage: 10Gi") {
+					t.Errorf("manifest missing 10Gi: %s", m)
+				}
+				if !strings.Contains(m, "ReadWriteMany") {
+					t.Errorf("manifest missing ReadWriteMany: %s", m)
+				}
+				if !strings.Contains(m, "storageClassName: fast-ssd") {
+					t.Errorf("manifest missing storageClassName: %s", m)
+				}
+			},
+		},
+		{
+			name: "pod with secretKeyRef env",
+			entries: []StateEntry{
+				{Kind: "Pod", Name: "worker", Spec: map[string]any{
+					"image": "myapp:v1",
+					"env": []any{
+						map[string]any{
+							"name": "DB_PASSWORD",
+							"secretKeyRef": map[string]any{
+								"name": "db-secret",
+								"key":  "password",
+							},
+						},
+						map[string]any{
+							"name":  "APP_ENV",
+							"value": "production",
+						},
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "kind: Pod") {
+					t.Errorf("manifest missing kind Pod: %s", m)
+				}
+				if !strings.Contains(m, "myapp:v1") {
+					t.Errorf("manifest missing image: %s", m)
+				}
+				if !strings.Contains(m, "secretKeyRef") {
+					t.Errorf("manifest missing secretKeyRef: %s", m)
+				}
+				if !strings.Contains(m, "db-secret") {
+					t.Errorf("manifest missing secret name: %s", m)
+				}
+				if !strings.Contains(m, "key: password") {
+					t.Errorf("manifest missing secret key: %s", m)
+				}
+				if !strings.Contains(m, "APP_ENV") {
+					t.Errorf("manifest missing direct env var: %s", m)
+				}
+			},
+		},
+		{
+			name: "deployment with custom matchLabels",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api-v2", Spec: map[string]any{
+					"matchLabels": map[string]any{"app": "api", "version": "v2"},
+					"replicas":    float64(3),
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "replicas: 3") {
+					t.Errorf("manifest missing replicas: %s", m)
+				}
+				if !strings.Contains(m, "version") {
+					t.Errorf("manifest missing custom matchLabel 'version': %s", m)
+				}
+			},
+		},
+		{
+			name: "dashboard creates configmap with labels",
+			entries: []StateEntry{
+				{Kind: "dashboard", Name: "system-health", Spec: map[string]any{
+					"title": "System Health Overview",
+					"uid":   "sys-health-01",
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "dashboard-system-health") {
+					t.Errorf("manifest missing dashboard name: %s", m)
+				}
+				if !strings.Contains(m, "petri.io/dashboard") {
+					t.Errorf("manifest missing dashboard label: %s", m)
+				}
+				if !strings.Contains(m, "dashboard.json") {
+					t.Errorf("manifest missing dashboard.json data key: %s", m)
+				}
+				if !strings.Contains(m, "System Health Overview") {
+					t.Errorf("manifest missing dashboard title: %s", m)
+				}
+			},
+		},
+		{
+			name: "gitops-application creates configmap",
+			entries: []StateEntry{
+				{Kind: "gitops-application", Name: "api-service", Spec: map[string]any{
+					"sync_status": "OutOfSync",
+					"source_repo": "https://github.com/org/infra.git",
+					"source_path": "k8s/api",
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "gitops-app-api-service") {
+					t.Errorf("manifest missing gitops app name: %s", m)
+				}
+				if !strings.Contains(m, "petri.io/gitops-application") {
+					t.Errorf("manifest missing gitops label: %s", m)
+				}
+				if !strings.Contains(m, "OutOfSync") {
+					t.Errorf("manifest missing sync status: %s", m)
+				}
+				if !strings.Contains(m, "github.com/org/infra.git") {
+					t.Errorf("manifest missing source repo: %s", m)
+				}
+			},
 		},
 		{
 			name: "namespace uses default when entry namespace is empty",

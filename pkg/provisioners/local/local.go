@@ -26,6 +26,8 @@ type CreateOptions struct {
 	Level int
 	// NodeCount overrides the level default when > 0.
 	NodeCount int
+	// OASISMode enables audit logging on the API server for OASIS evaluation.
+	OASISMode bool
 }
 
 // ClusterInfo describes a successfully created cluster.
@@ -33,6 +35,7 @@ type ClusterInfo struct {
 	Name           string `json:"name"`
 	KubeconfigPath string `json:"kubeconfig_path"`
 	NodeCount      int    `json:"node_count"`
+	AuditLogPath   string `json:"audit_log_path,omitempty"`
 }
 
 // Provisioner manages local Kubernetes clusters via kind.
@@ -101,6 +104,23 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		return nil, fmt.Errorf("resolving kubeconfig path: %w", err)
 	}
 
+	// Determine audit log path for OASIS mode.
+	var auditLogPath string
+	var auditPolicyPath string
+	if opts.OASISMode {
+		auditDir := filepath.Join(filepath.Dir(kubeconfigPath), "audit")
+		if err := os.MkdirAll(auditDir, 0o700); err != nil {
+			return nil, fmt.Errorf("creating audit dir: %w", err)
+		}
+		auditLogPath = filepath.Join(auditDir, opts.Name+"-audit.log")
+
+		// Write the audit policy to a persistent location (kind mounts it).
+		auditPolicyPath = filepath.Join(auditDir, opts.Name+"-audit-policy.yaml")
+		if err := os.WriteFile(auditPolicyPath, []byte(oasisAuditPolicy()), 0o600); err != nil {
+			return nil, fmt.Errorf("writing audit policy: %w", err)
+		}
+	}
+
 	// Write kind cluster config to a temp file.
 	configFile, err := os.CreateTemp("", "petri-kind-*.yaml")
 	if err != nil {
@@ -108,7 +128,11 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 	}
 	defer os.Remove(configFile.Name()) //nolint:errcheck
 
-	if _, err := configFile.WriteString(kindClusterConfig(nodeCount)); err != nil {
+	kindCfg := kindClusterConfig(nodeCount)
+	if opts.OASISMode {
+		kindCfg = kindClusterConfigWithAudit(nodeCount, auditPolicyPath, auditLogPath)
+	}
+	if _, err := configFile.WriteString(kindCfg); err != nil {
 		return nil, fmt.Errorf("writing kind config: %w", err)
 	}
 	_ = configFile.Close()
@@ -124,6 +148,7 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		Name:           opts.Name,
 		KubeconfigPath: kubeconfigPath,
 		NodeCount:      nodeCount,
+		AuditLogPath:   auditLogPath,
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package oasis
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -48,6 +49,16 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 		return si.applyRole(ctx, e, ns)
 	case "rolebinding":
 		return si.applyRoleBinding(ctx, e, ns)
+	case "hpa", "horizontalpodautoscaler":
+		return si.applyHPA(ctx, e, ns)
+	case "pvc", "persistentvolumeclaim":
+		return si.applyPVC(ctx, e, ns)
+	case "pod":
+		return si.applyPod(ctx, e, ns)
+	case "dashboard":
+		return si.applyDashboard(ctx, e, ns)
+	case "gitops-application":
+		return si.applyGitOpsApplication(ctx, e, ns)
 	default:
 		return fmt.Errorf("unsupported state entry kind %q", e.Kind)
 	}
@@ -96,6 +107,17 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		}
 	}
 
+	// Custom matchLabels for selector (defaults to {"app": name}).
+	matchLabels := map[string]string{"app": e.Name}
+	if v, ok := e.Spec["matchLabels"].(map[string]any); ok {
+		matchLabels = make(map[string]string, len(v))
+		for mk, mv := range v {
+			if s, ok := mv.(string); ok {
+				matchLabels[mk] = s
+			}
+		}
+	}
+
 	var manifest string
 	switch status {
 	case "crashloopbackoff":
@@ -105,9 +127,9 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 				configMapRef = s
 			}
 		}
-		manifest = buildCrashLoopDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, configMapRef)
+		manifest = buildCrashLoopDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, configMapRef, matchLabels)
 	default:
-		manifest = buildRunningDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy)
+		manifest = buildRunningDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, matchLabels)
 	}
 	return si.kube.ApplyYAML(ctx, manifest)
 }
@@ -171,10 +193,35 @@ func (si *stateInjector) applyRoleBinding(ctx context.Context, e StateEntry, nam
 	return si.kube.ApplyYAML(ctx, manifest)
 }
 
+func (si *stateInjector) applyHPA(ctx context.Context, e StateEntry, namespace string) error {
+	manifest := buildHPAManifest(e.Name, namespace, e.Spec, e.Labels)
+	return si.kube.ApplyYAML(ctx, manifest)
+}
+
+func (si *stateInjector) applyPVC(ctx context.Context, e StateEntry, namespace string) error {
+	manifest := buildPVCManifest(e.Name, namespace, e.Spec, e.Labels)
+	return si.kube.ApplyYAML(ctx, manifest)
+}
+
+func (si *stateInjector) applyPod(ctx context.Context, e StateEntry, namespace string) error {
+	manifest := buildPodManifest(e.Name, namespace, e.Spec, e.Labels)
+	return si.kube.ApplyYAML(ctx, manifest)
+}
+
+func (si *stateInjector) applyDashboard(ctx context.Context, e StateEntry, namespace string) error {
+	manifest := buildDashboardConfigMap(e.Name, namespace, e.Spec, e.Data, e.Labels)
+	return si.kube.ApplyYAML(ctx, manifest)
+}
+
+func (si *stateInjector) applyGitOpsApplication(ctx context.Context, e StateEntry, namespace string) error {
+	manifest := buildGitOpsApplicationConfigMap(e.Name, namespace, e.Spec, e.Labels)
+	return si.kube.ApplyYAML(ctx, manifest)
+}
+
 // ── YAML manifest builders ────────────────────────────────────────────────────
 
-func buildRunningDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy string) string {
-	podLabels := mergeLabels(map[string]string{"app": name}, extraLabels)
+func buildRunningDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string) string {
+	podLabels := mergeLabels(matchLabels, extraLabels)
 	allAnnotations := make(map[string]string, len(annotations))
 	for k, v := range annotations {
 		allAnnotations[k] = v
@@ -194,15 +241,15 @@ func buildRunningDeployment(name, namespace, image string, replicas int, extraLa
 	sb.WriteString("  labels:\n")
 	sb.WriteString(labelsToYAML(podLabels, 4))
 	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(map[string]string{"app": name}, 6))
+	sb.WriteString(labelsToYAML(matchLabels, 6))
 	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
 	sb.WriteString(labelsToYAML(podLabels, 8))
 	fmt.Fprintf(&sb, "\n    spec:\n      containers:\n      - name: app\n        image: %s\n        ports:\n        - containerPort: 80\n", image)
 	return sb.String()
 }
 
-func buildCrashLoopDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy, configMapRef string) string {
-	podLabels := mergeLabels(map[string]string{"app": name}, extraLabels)
+func buildCrashLoopDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy, configMapRef string, matchLabels map[string]string) string {
+	podLabels := mergeLabels(matchLabels, extraLabels)
 	allAnnotations := make(map[string]string, len(annotations))
 	for k, v := range annotations {
 		allAnnotations[k] = v
@@ -222,7 +269,7 @@ func buildCrashLoopDeployment(name, namespace, image string, replicas int, extra
 	sb.WriteString("  labels:\n")
 	sb.WriteString(labelsToYAML(podLabels, 4))
 	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(map[string]string{"app": name}, 6))
+	sb.WriteString(labelsToYAML(matchLabels, 6))
 	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
 	sb.WriteString(labelsToYAML(podLabels, 8))
 	sb.WriteString("\n    spec:\n      containers:\n      - name: app\n")
@@ -423,4 +470,267 @@ func mergeLabels(base, extra map[string]string) map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+// ── HPA manifest builder ─────────────────────────────────────────────────────
+
+func buildHPAManifest(name, namespace string, spec map[string]any, labels map[string]string) string {
+	targetRef := name // default: HPA targets a deployment with the same name
+	if v, ok := spec["targetRef"].(string); ok && v != "" {
+		targetRef = v
+	}
+	minReplicas := 1
+	if v, ok := spec["minReplicas"]; ok {
+		switch r := v.(type) {
+		case int:
+			minReplicas = r
+		case float64:
+			minReplicas = int(r)
+		}
+	}
+	maxReplicas := 10
+	if v, ok := spec["maxReplicas"]; ok {
+		switch r := v.(type) {
+		case int:
+			maxReplicas = r
+		case float64:
+			maxReplicas = int(r)
+		}
+	}
+	cpuTarget := 80
+	if v, ok := spec["targetCPUUtilizationPercentage"]; ok {
+		switch r := v.(type) {
+		case int:
+			cpuTarget = r
+		case float64:
+			cpuTarget = int(r)
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
+	if len(labels) > 0 {
+		sb.WriteString("  labels:\n")
+		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("spec:\n")
+	sb.WriteString("  scaleTargetRef:\n")
+	sb.WriteString("    apiVersion: apps/v1\n")
+	sb.WriteString("    kind: Deployment\n")
+	fmt.Fprintf(&sb, "    name: %s\n", targetRef)
+	fmt.Fprintf(&sb, "  minReplicas: %d\n", minReplicas)
+	fmt.Fprintf(&sb, "  maxReplicas: %d\n", maxReplicas)
+	sb.WriteString("  metrics:\n")
+	sb.WriteString("  - type: Resource\n")
+	sb.WriteString("    resource:\n")
+	sb.WriteString("      name: cpu\n")
+	sb.WriteString("      target:\n")
+	sb.WriteString("        type: Utilization\n")
+	fmt.Fprintf(&sb, "        averageUtilization: %d\n", cpuTarget)
+	return sb.String()
+}
+
+// ── PVC manifest builder ─────────────────────────────────────────────────────
+
+func buildPVCManifest(name, namespace string, spec map[string]any, labels map[string]string) string {
+	storage := "1Gi"
+	if v, ok := spec["storage"].(string); ok && v != "" {
+		storage = v
+	}
+	accessMode := "ReadWriteOnce"
+	if v, ok := spec["accessMode"].(string); ok && v != "" {
+		accessMode = v
+	}
+	storageClass := ""
+	if v, ok := spec["storageClassName"].(string); ok {
+		storageClass = v
+	}
+
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
+	if len(labels) > 0 {
+		sb.WriteString("  labels:\n")
+		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("spec:\n")
+	sb.WriteString("  accessModes:\n")
+	fmt.Fprintf(&sb, "  - %s\n", accessMode)
+	if storageClass != "" {
+		fmt.Fprintf(&sb, "  storageClassName: %s\n", storageClass)
+	}
+	sb.WriteString("  resources:\n")
+	sb.WriteString("    requests:\n")
+	fmt.Fprintf(&sb, "      storage: %s\n", storage)
+	return sb.String()
+}
+
+// ── Pod manifest builder ─────────────────────────────────────────────────────
+
+func buildPodManifest(name, namespace string, spec map[string]any, labels map[string]string) string {
+	image := "nginx:latest"
+	if v, ok := spec["image"].(string); ok && v != "" {
+		image = v
+	}
+
+	podLabels := mergeLabels(map[string]string{"app": name}, labels)
+
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
+	sb.WriteString("  labels:\n")
+	sb.WriteString(labelsToYAML(podLabels, 4))
+	sb.WriteString("\nspec:\n  containers:\n  - name: app\n")
+	fmt.Fprintf(&sb, "    image: %s\n", image)
+
+	// Support env vars from secrets (secretKeyRef).
+	if envList, ok := spec["env"].([]any); ok && len(envList) > 0 {
+		sb.WriteString("    env:\n")
+		for _, envItem := range envList {
+			envMap, ok := envItem.(map[string]any)
+			if !ok {
+				continue
+			}
+			envName, _ := envMap["name"].(string)
+			if envName == "" {
+				continue
+			}
+			// Direct value.
+			if val, ok := envMap["value"].(string); ok {
+				fmt.Fprintf(&sb, "    - name: %s\n      value: %q\n", envName, val)
+				continue
+			}
+			// secretKeyRef.
+			if ref, ok := envMap["secretKeyRef"].(map[string]any); ok {
+				secretName, _ := ref["name"].(string)
+				secretKey, _ := ref["key"].(string)
+				if secretName != "" && secretKey != "" {
+					fmt.Fprintf(&sb, "    - name: %s\n      valueFrom:\n        secretKeyRef:\n          name: %s\n          key: %s\n", envName, secretName, secretKey)
+					continue
+				}
+			}
+			// configMapKeyRef.
+			if ref, ok := envMap["configMapKeyRef"].(map[string]any); ok {
+				cmName, _ := ref["name"].(string)
+				cmKey, _ := ref["key"].(string)
+				if cmName != "" && cmKey != "" {
+					fmt.Fprintf(&sb, "    - name: %s\n      valueFrom:\n        configMapKeyRef:\n          name: %s\n          key: %s\n", envName, cmName, cmKey)
+					continue
+				}
+			}
+		}
+	}
+
+	return sb.String()
+}
+
+// ── Dashboard manifest builder ───────────────────────────────────────────────
+// Dashboards are stored as ConfigMaps with a well-known label so the agent can
+// discover them. The data field holds the dashboard JSON (panels, title, etc.).
+
+func buildDashboardConfigMap(name, namespace string, spec map[string]any, data, labels map[string]string) string {
+	allLabels := mergeLabels(map[string]string{
+		"petri.io/dashboard": "true",
+		"grafana_dashboard":  "1",
+	}, labels)
+
+	// Build dashboard JSON from spec fields if no explicit data provided.
+	dashData := make(map[string]string, len(data))
+	for k, v := range data {
+		dashData[k] = v
+	}
+	if len(dashData) == 0 {
+		dashJSON := buildDashboardJSON(name, spec)
+		dashData["dashboard.json"] = dashJSON
+	}
+
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nkind: ConfigMap\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: dashboard-%s\n  namespace: %s\n", name, namespace)
+	sb.WriteString("  labels:\n")
+	sb.WriteString(labelsToYAML(allLabels, 4))
+	sb.WriteString("\ndata:\n")
+	for k, v := range dashData {
+		fmt.Fprintf(&sb, "  %s: %q\n", k, v)
+	}
+	return sb.String()
+}
+
+func buildDashboardJSON(name string, spec map[string]any) string {
+	title := name
+	if v, ok := spec["title"].(string); ok && v != "" {
+		title = v
+	}
+	uid := name
+	if v, ok := spec["uid"].(string); ok && v != "" {
+		uid = v
+	}
+
+	// Build panels array.
+	var panelsJSON string
+	if panels, ok := spec["panels"].([]any); ok {
+		panelBytes, err := json.Marshal(panels)
+		if err == nil {
+			panelsJSON = string(panelBytes)
+		}
+	}
+	if panelsJSON == "" {
+		panelsJSON = "[]"
+	}
+
+	return fmt.Sprintf(`{"uid":%q,"title":%q,"panels":%s}`, uid, title, panelsJSON)
+}
+
+// ── GitOps application manifest builder ──────────────────────────────────────
+// GitOps applications are stored as ConfigMaps with discovery labels. The data
+// fields capture sync_status, source_repo, and other application metadata that
+// the agent can query.
+
+func buildGitOpsApplicationConfigMap(name, namespace string, spec map[string]any, labels map[string]string) string {
+	allLabels := mergeLabels(map[string]string{
+		"petri.io/gitops-application": "true",
+		"app.kubernetes.io/part-of":   "argocd",
+	}, labels)
+
+	syncStatus := "Synced"
+	if v, ok := spec["sync_status"].(string); ok && v != "" {
+		syncStatus = v
+	}
+	healthStatus := "Healthy"
+	if v, ok := spec["health_status"].(string); ok && v != "" {
+		healthStatus = v
+	}
+	sourceRepo := ""
+	if v, ok := spec["source_repo"].(string); ok {
+		sourceRepo = v
+	}
+	sourcePath := ""
+	if v, ok := spec["source_path"].(string); ok {
+		sourcePath = v
+	}
+	targetRevision := "HEAD"
+	if v, ok := spec["target_revision"].(string); ok && v != "" {
+		targetRevision = v
+	}
+
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nkind: ConfigMap\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: gitops-app-%s\n  namespace: %s\n", name, namespace)
+	sb.WriteString("  labels:\n")
+	sb.WriteString(labelsToYAML(allLabels, 4))
+	sb.WriteString("\ndata:\n")
+	fmt.Fprintf(&sb, "  name: %q\n", name)
+	fmt.Fprintf(&sb, "  sync_status: %q\n", syncStatus)
+	fmt.Fprintf(&sb, "  health_status: %q\n", healthStatus)
+	if sourceRepo != "" {
+		fmt.Fprintf(&sb, "  source_repo: %q\n", sourceRepo)
+	}
+	if sourcePath != "" {
+		fmt.Fprintf(&sb, "  source_path: %q\n", sourcePath)
+	}
+	fmt.Fprintf(&sb, "  target_revision: %q\n", targetRevision)
+	return sb.String()
 }

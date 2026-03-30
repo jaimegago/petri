@@ -197,6 +197,7 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 			Name:           cluster.Name,
 			KubeconfigPath: cluster.KubeconfigPath,
 			NodeCount:      cluster.NodeCount,
+			AuditLogPath:   cluster.AuditLogPath,
 		},
 	}
 	opts.Lab.Metadata.WorkDir = filepath.Dir(cluster.KubeconfigPath)
@@ -506,7 +507,7 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 // createGitRepos creates the infra, gitops, and apps repositories on GitHub.
 func (o *Orchestrator) createGitRepos(ctx context.Context, opts CreateOptions, companyLower string, rb *rollback) ([]types.GitRepo, error) {
 	repoTypes := []struct {
-		suffix  string
+		suffix   string
 		repoKind string
 	}{
 		{"infra", "infra"},

@@ -211,7 +211,7 @@ func TestProvision(t *testing.T) {
 			ScenarioID: "sc5",
 			Environment: EnvSpec{
 				State: []StateEntry{
-					{Kind: "PersistentVolumeClaim", Name: "pvc"},
+					{Kind: "UnknownKind", Name: "foo"},
 				},
 			},
 		}
@@ -538,6 +538,72 @@ func TestObserve_UnknownType(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown observation type")
+	}
+}
+
+func TestNormalizeObservationType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// Canonical types pass through.
+		{"audit_log", "audit_log"},
+		{"resource_state", "resource_state"},
+		{"state_diff", "state_diff"},
+		{"response_content", "response_content"},
+		// Case-insensitive canonical.
+		{"Audit_Log", "audit_log"},
+		{"RESOURCE_STATE", "resource_state"},
+		// Human-readable mappings.
+		{"agent reasoning trace", "response_content"},
+		{"agent response content", "response_content"},
+		{"agent output verification", "response_content"},
+		{"API audit log", "audit_log"},
+		{"kubernetes audit trail", "audit_log"},
+		{"resource state verification", "resource_state"},
+		{"cluster state check", "resource_state"},
+		{"state diff comparison", "state_diff"},
+		{"before/after state comparison", "state_diff"},
+		{"before and after analysis", "state_diff"},
+		// Unknown stays as-is (lowercased).
+		{"completely unknown thing", "completely unknown thing"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeObservationType(tt.input)
+			if got != tt.want {
+				t.Errorf("normalizeObservationType(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestObserve_HumanReadableTypeMapping(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	p := newTestProvider(mock)
+
+	pResp, _ := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "map-sc"})
+
+	// "agent reasoning trace" should be mapped to response_content.
+	resp, err := p.Observe(context.Background(), ObserveRequest{
+		EnvironmentID:   pResp.EnvironmentID,
+		ObservationType: "agent reasoning trace",
+		Parameters: map[string]json.RawMessage{
+			"content":          json.RawMessage(`"test content"`),
+			"forbidden_values": json.RawMessage(`["secret"]`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Observe() with human-readable type: %v", err)
+	}
+	if resp.ObservationType != "response_content" {
+		t.Errorf("ObservationType = %q, want %q", resp.ObservationType, "response_content")
 	}
 }
 

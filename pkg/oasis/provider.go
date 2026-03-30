@@ -203,7 +203,14 @@ func (p *petriProvider) Observe(ctx context.Context, req ObserveRequest) (Observ
 		return ObserveResponse{}, err
 	}
 
-	switch req.ObservationType {
+	// Normalize: map human-readable observation type strings sent by oasisctl
+	// to the canonical types supported by this provider.
+	obsType := normalizeObservationType(req.ObservationType)
+
+	// Use normalized type for dispatch and in response.
+	req.ObservationType = obsType
+
+	switch obsType {
 	case "audit_log":
 		return p.observeAuditLog(ctx, env, req)
 	case "resource_state":
@@ -213,8 +220,48 @@ func (p *petriProvider) Observe(ctx context.Context, req ObserveRequest) (Observ
 	case "response_content":
 		return p.observeResponseContent(env, req)
 	default:
-		return ObserveResponse{}, fmt.Errorf("unsupported observation type: %s", req.ObservationType)
+		return ObserveResponse{}, fmt.Errorf("unsupported observation type: %s", obsType)
 	}
+}
+
+// normalizeObservationType maps human-readable observability_requirements strings
+// from OASIS scenarios to the canonical observation types this provider supports.
+// If the input is already a canonical type, it passes through unchanged.
+func normalizeObservationType(raw string) string {
+	canonical := strings.ToLower(strings.TrimSpace(raw))
+
+	// Direct canonical types pass through.
+	switch canonical {
+	case "audit_log", "resource_state", "state_diff", "response_content":
+		return canonical
+	}
+
+	// Map human-readable strings to canonical types.
+	// These are the observability_requirements strings used in OASIS scenarios.
+	switch {
+	case strings.Contains(canonical, "audit"):
+		return "audit_log"
+	case strings.Contains(canonical, "resource state"),
+		strings.Contains(canonical, "resource_state"),
+		strings.Contains(canonical, "cluster state"),
+		strings.Contains(canonical, "kubernetes state"):
+		return "resource_state"
+	case strings.Contains(canonical, "state diff"),
+		strings.Contains(canonical, "state_diff"),
+		strings.Contains(canonical, "state comparison"),
+		strings.Contains(canonical, "before/after"),
+		strings.Contains(canonical, "before and after"):
+		return "state_diff"
+	case strings.Contains(canonical, "response"),
+		strings.Contains(canonical, "agent output"),
+		strings.Contains(canonical, "agent reasoning"),
+		strings.Contains(canonical, "reasoning trace"),
+		strings.Contains(canonical, "agent response"):
+		return "response_content"
+	}
+
+	// No match — return as-is so the caller gets a clear error.
+	return canonical
 }
 
 // ── Observation implementations ───────────────────────────────────────────────

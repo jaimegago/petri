@@ -46,22 +46,29 @@ func (c *CLI) runServe(opts *serveOptions) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	kubeconfigPath, err := c.resolveServeKubeconfig(ctx, opts.lab)
+	labInfo, err := c.resolveServeLabInfo(ctx, opts.lab)
 	if err != nil {
 		return err
+	}
+
+	// --audit-log-path flag takes precedence; fall back to lab metadata.
+	auditLogPath := opts.auditLogPath
+	if auditLogPath == "" && labInfo.auditLogPath != "" {
+		auditLogPath = labInfo.auditLogPath
+		c.log.Info("auto-detected audit log path from lab metadata", "path", auditLogPath)
 	}
 
 	c.log.Info("starting OASIS provider server",
 		"listen", opts.listen,
 		"lab", opts.lab,
-		"kubeconfig", kubeconfigPath,
-		"audit_log_path", opts.auditLogPath,
+		"kubeconfig", labInfo.kubeconfigPath,
+		"audit_log_path", auditLogPath,
 	)
 
-	kube := chaos.NewKubeClient(kubeconfigPath)
+	kube := chaos.NewKubeClient(labInfo.kubeconfigPath)
 	provider := oasis.New(oasis.ProviderConfig{
-		KubeconfigPath: kubeconfigPath,
-		AuditLogPath:   opts.auditLogPath,
+		KubeconfigPath: labInfo.kubeconfigPath,
+		AuditLogPath:   auditLogPath,
 	}, kube, c.log)
 
 	srv := oasis.NewServer(provider, c.log)
@@ -71,35 +78,48 @@ func (c *CLI) runServe(opts *serveOptions) error {
 	return nil
 }
 
-// resolveServeKubeconfig returns the kubeconfig path for the named lab.
-// If labName is empty, returns empty string (uses the default kubeconfig).
-func (c *CLI) resolveServeKubeconfig(ctx context.Context, labName string) (string, error) {
+// serveLabInfo holds resolved lab connection details for the serve command.
+type serveLabInfo struct {
+	kubeconfigPath string
+	auditLogPath   string
+}
+
+// resolveServeLabInfo returns the kubeconfig and audit log paths for the named lab.
+func (c *CLI) resolveServeLabInfo(ctx context.Context, labName string) (serveLabInfo, error) {
 	if labName == "" {
 		c.log.Warn("no --lab flag provided; using default kubeconfig — all scenarios share the same cluster")
-		return "", nil
+		return serveLabInfo{}, nil
 	}
 
 	mgr, err := c.stateManager()
 	if err != nil {
-		return "", err
+		return serveLabInfo{}, err
 	}
 
 	lab, err := mgr.GetLabByName(ctx, labName)
 	if err != nil {
-		return "", fmt.Errorf("lab %q not found: %w", labName, err)
+		return serveLabInfo{}, fmt.Errorf("lab %q not found: %w", labName, err)
 	}
 	if lab.Status != types.LabStatusActive {
-		return "", fmt.Errorf("lab %q is not active (status: %s); only active labs can serve OASIS scenarios", labName, lab.Status)
+		return serveLabInfo{}, fmt.Errorf("lab %q is not active (status: %s); only active labs can serve OASIS scenarios", labName, lab.Status)
 	}
 	if lab.CloudProvider != types.CloudProviderLocal {
-		return "", fmt.Errorf("lab %q uses provider %q; petri serve currently requires a local (kind) lab", labName, lab.CloudProvider)
+		return serveLabInfo{}, fmt.Errorf("lab %q uses provider %q; petri serve currently requires a local (kind) lab", labName, lab.CloudProvider)
 	}
 
 	kubeconfigPath := localKubeconfigPath(lab)
 	if kubeconfigPath == "" {
-		return "", fmt.Errorf("lab %q has no kubeconfig path in metadata; was it created successfully?", labName)
+		return serveLabInfo{}, fmt.Errorf("lab %q has no kubeconfig path in metadata; was it created successfully?", labName)
+	}
+
+	var auditLogPath string
+	if len(lab.Metadata.Clusters) > 0 {
+		auditLogPath = lab.Metadata.Clusters[0].AuditLogPath
 	}
 
 	c.log.Info("using lab cluster for OASIS scenarios", "lab", labName, "kubeconfig", kubeconfigPath)
-	return kubeconfigPath, nil
+	return serveLabInfo{
+		kubeconfigPath: kubeconfigPath,
+		auditLogPath:   auditLogPath,
+	}, nil
 }

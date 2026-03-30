@@ -11,9 +11,9 @@ import (
 // ─── mock helpers ─────────────────────────────────────────────────────────────
 
 type mockKind struct {
-	createFn      func(ctx context.Context, name, configPath, kubeconfigPath string) error
-	deleteFn      func(ctx context.Context, name string) error
-	listFn        func(ctx context.Context) ([]string, error)
+	createFn        func(ctx context.Context, name, configPath, kubeconfigPath string) error
+	deleteFn        func(ctx context.Context, name string) error
+	listFn          func(ctx context.Context) ([]string, error)
 	deleteCallCount int
 }
 
@@ -50,7 +50,7 @@ func (m *mockDocker) ping(ctx context.Context) error {
 	return nil
 }
 
-func noop() *mockKind   { return &mockKind{} }
+func noop() *mockKind       { return &mockKind{} }
 func okDocker() *mockDocker { return &mockDocker{} }
 
 // ─── Provisioner.Create tests ─────────────────────────────────────────────────
@@ -221,9 +221,9 @@ func TestProvisionerDelete(t *testing.T) {
 
 func TestResolveNodeCount(t *testing.T) {
 	tests := []struct {
-		name  string
-		opts  CreateOptions
-		want  int
+		name string
+		opts CreateOptions
+		want int
 	}{
 		{"level 1 default", CreateOptions{Level: 1}, 1},
 		{"level 2 default", CreateOptions{Level: 2}, 3},
@@ -277,6 +277,68 @@ func TestKindClusterConfig(t *testing.T) {
 				t.Errorf("worker count = %d, want %d", workerCount, tt.wantWorkers)
 			}
 		})
+	}
+}
+
+func TestKindClusterConfigWithAudit(t *testing.T) {
+	cfg := kindClusterConfigWithAudit(2, "/tmp/audit-policy.yaml", "/tmp/audit/audit.log")
+
+	if !strings.Contains(cfg, "kind: Cluster") {
+		t.Error("missing 'kind: Cluster'")
+	}
+	if !strings.Contains(cfg, "audit-policy-file") {
+		t.Error("missing audit-policy-file in kubeadm config")
+	}
+	if !strings.Contains(cfg, "audit-log-path") {
+		t.Error("missing audit-log-path in kubeadm config")
+	}
+	if !strings.Contains(cfg, "/tmp/audit-policy.yaml") {
+		t.Error("missing host audit policy mount path")
+	}
+	if !strings.Contains(cfg, "/tmp/audit") {
+		t.Error("missing host audit log directory mount")
+	}
+	if strings.Count(cfg, "role: control-plane") != 1 {
+		t.Error("expected exactly 1 control-plane node")
+	}
+	if strings.Count(cfg, "role: worker") != 1 {
+		t.Error("expected exactly 1 worker node")
+	}
+}
+
+func TestOASISAuditPolicy(t *testing.T) {
+	policy := oasisAuditPolicy()
+	if !strings.Contains(policy, "audit.k8s.io/v1") {
+		t.Error("missing audit API version")
+	}
+	if !strings.Contains(policy, "RequestResponse") {
+		t.Error("missing RequestResponse level")
+	}
+	if !strings.Contains(policy, "rbac.authorization.k8s.io") {
+		t.Error("missing RBAC API group")
+	}
+}
+
+func TestCreate_OASISMode(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	mk := &mockKind{}
+	md := &mockDocker{}
+	p := newWithDeps(Config{KubeconfigDir: tmpDir}, mk, md)
+
+	info, err := p.Create(context.Background(), CreateOptions{
+		Name:      "oasis-test",
+		Level:     1,
+		OASISMode: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(OASISMode=true): %v", err)
+	}
+	if info.AuditLogPath == "" {
+		t.Error("expected AuditLogPath to be set in OASIS mode")
+	}
+	if !strings.Contains(info.AuditLogPath, "oasis-test") {
+		t.Errorf("AuditLogPath should contain cluster name: %s", info.AuditLogPath)
 	}
 }
 
