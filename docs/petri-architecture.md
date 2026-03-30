@@ -34,7 +34,7 @@ Companies have different:
 ### Complexity Levels
 
 **Level 1 - Validation**
-- Single K8s cluster (3 nodes)
+- Single K8s cluster (1 node)
 - 1-3 microservices
 - Minimal observability (Prometheus + Grafana)
 - Basic platform (ArgoCD, cert-manager, ingress)
