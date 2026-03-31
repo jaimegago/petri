@@ -41,10 +41,11 @@ petri destroy my-first-lab # Tear down everything
 ### OASIS Evaluation Server
 
 ```bash
-petri serve --lab=my-first-lab
+petri create --company=acme --level=1 --local --oasis --name=eval-lab
+petri serve --lab=eval-lab
 ```
 
-Starts an HTTP server implementing the [OASIS evaluation spec](docs/oasis-spec/) for scenario-based testing of AI agents against live clusters.
+The `--oasis` flag configures audit logging and Calico CNI (for NetworkPolicy enforcement). `petri serve` starts an HTTP server implementing the [OASIS evaluation spec](docs/oasis-spec/) for scenario-based testing of AI agents against live clusters.
 
 ## Commands
 

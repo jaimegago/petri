@@ -41,6 +41,7 @@ petri create --company=<company> --level=<1|2|3> [flags]
 | `--cloud` | string | from company | Cloud provider override (aws, azure, gcp) |
 | `--ttl` | string | level-specific | Time-to-live (e.g. 4h, 30m) |
 | `--no-apps` | bool | false | Skip application deployment |
+| `--oasis` | bool | false | Enable OASIS evaluation mode (audit logging, Calico CNI for NetworkPolicy) |
 | `--dry-run` | bool | false | Print what would be created without creating it |
 
 Local labs create git repos on the filesystem under `~/.petri/labs/<id>/repos/`.
@@ -152,6 +153,13 @@ petri serve [flags]
 | `--audit-log-path` | string | | Path to Kubernetes audit log file |
 
 Implements the OASIS evaluation spec for scenario-based testing of AI agents against live Kubernetes clusters.
+
+For best results, create the lab with `--oasis` to auto-configure audit logging and Calico CNI (NetworkPolicy enforcement):
+
+```bash
+petri create --company=acme --level=1 --local --oasis --name=eval-lab
+petri serve --lab=eval-lab
+```
 
 ### `petri completion`
 

@@ -1,10 +1,10 @@
 # Petri — Deferred Work Items
 
-Items are ordered by dependency (earlier items unblock later ones). Each item is scoped as a standalone CC prompt.
+All items below have been **implemented**. This document is preserved for historical reference.
 
 ---
 
-## 001 — Observability state injection: metrics
+## 001 — Observability state injection: metrics ✅
 
 ### Context
 Many capability scenarios require Prometheus metrics to be queryable by the agent (e.g., p99 latency, error rates, memory usage trends). The OASIS provider currently handles namespaces, deployments, configmaps, secrets, services, and RBAC — but not metrics. Without metrics injection, scenarios in Diagnostic Accuracy (multi-signal correlation), Observability Interpretation, and Escalation Judgment categories cannot be evaluated.
@@ -28,7 +28,7 @@ Medium
 
 ---
 
-## 002 — Observability state injection: traces
+## 002 — Observability state injection: traces ✅
 
 ### Context
 Scenarios in Observability Interpretation require distributed traces (Jaeger/Tempo style) that the agent can navigate. The trace data includes span hierarchies with service names, operation names, durations, and parent-child relationships.
@@ -49,7 +49,7 @@ Medium
 
 ---
 
-## 003 — Observability state injection: dashboards and alerts
+## 003 — Observability state injection: dashboards and alerts ✅
 
 ### Context
 Some scenarios reference dashboards (e.g., `resource: dashboard/system-health, panels: [...]`) and alerts (e.g., `resource: alert/high-memory, status: pending`). The prompt injection scenario S-PI-003 embeds an injection payload in a dashboard title.
@@ -69,7 +69,7 @@ Medium
 
 ---
 
-## 004 — Advanced deployment statuses
+## 004 — Advanced deployment statuses ✅
 
 ### Context
 The translator currently supports "running" and "crashloopbackoff" deployment statuses. Scenarios also require: OOMKilled, pending (Insufficient CPU), degraded (partial readiness failure), elevated_error_rate, and error. Each requires a different mechanism to produce.
@@ -95,7 +95,7 @@ Medium
 
 ---
 
-## 005 — Audit log auto-configuration for kind clusters
+## 005 — Audit log auto-configuration for kind clusters ✅
 
 ### Context
 The Observe endpoint supports audit_log queries, but it requires the user to manually configure the kind cluster's API server with an audit policy and pass --audit-log-path to petri serve. This is friction for getting started. The create command should auto-configure audit logging when creating a kind lab intended for OASIS evaluation.
@@ -117,7 +117,7 @@ Medium
 
 ---
 
-## 006 — GitOps state injection
+## 006 — GitOps state injection ✅
 
 ### Context
 Scenarios reference GitOps application state (e.g., `resource: gitops-application/api-service, sync_status: synced, source_repo: ...`). The state corruption prevention scenario S-SC-003 tests whether the agent introduces drift to a GitOps-managed resource. Without GitOps state injection, these scenarios cannot be evaluated.
@@ -138,7 +138,7 @@ Medium
 
 ---
 
-## 007 — Event and history injection
+## 007 — Event and history injection ✅
 
 ### Context
 Some capability scenarios reference Kubernetes events (e.g., `resource: events/default, recent: [{type: Normal, reason: ScalingReplicaSet}]`) and deployment history metadata (e.g., `last_deploy: 15_minutes_ago`). The contextual awareness and multi-step reasoning scenarios need this.
@@ -160,7 +160,7 @@ Small
 
 ---
 
-## 008 — Runbook injection
+## 008 — Runbook injection ✅
 
 ### Context
 Multi-step reasoning scenarios reference runbooks (e.g., `resource: runbook/elevated-error-rate, steps: ["Check error logs...", "Check if deployment occurred..."]`). The agent needs to discover and reference these runbooks.
@@ -180,7 +180,7 @@ Small
 
 ---
 
-## 009 — Ingress and NetworkPolicy enforcement
+## 009 — Ingress and NetworkPolicy enforcement ✅
 
 ### Context
 Some scenarios reference Ingress resources and NetworkPolicies (e.g., contextual awareness scenario with restrict-backend NetworkPolicy). The translator creates the resources but doesn't verify that NetworkPolicies are actually enforced. Kind clusters need a CNI that supports NetworkPolicy (Calico or Cilium) for enforcement to work.

@@ -40,4 +40,8 @@ go fmt ./...
 - Key packages: `pkg/orchestrator`, `pkg/provisioners/{git,terraform,pulumi,local,kubectl}`, `pkg/generators/{iac,gitops,apps,commits,observability,platform}`, `pkg/companies`, `pkg/state`, `pkg/crypto`, `pkg/oasis`, `pkg/chaos`, `pkg/scenarios`, `pkg/metrics`, `pkg/instrumentation`.
 - Templates: `templates/{terraform,pulumi,gitops,apps,observability,platform}`.
 - CLI commands: create, destroy, list, info, health, init, export, extend, cleanup, credentials, serve, completion.
+- OASIS state injection kinds in `pkg/oasis/translate.go`: namespace, deployment, configmap, secret, service, serviceaccount, role, rolebinding, hpa, pvc, pod, dashboard, gitops-application, metrics, traces, alert, events, runbook, ingress, networkpolicy.
+- Deployment status modes: running (default), crashloopbackoff, oomkilled, pending, degraded, elevated_error_rate, error.
+- Mock observability servers (metrics, traces, alert) deploy a Python pod + ConfigMap + Service per instance.
+- OASIS kind clusters (`--oasis` flag on `petri create`) disable the default CNI and install Calico v3.27.0 for NetworkPolicy enforcement.
 - YAML manifests built by hand (not templates) in `pkg/chaos/kube.go` and `pkg/oasis/translate.go` must quote all label/annotation values to prevent YAML bool/number coercion.
