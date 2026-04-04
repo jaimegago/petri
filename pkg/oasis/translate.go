@@ -122,6 +122,8 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 	}
 
 	// Custom matchLabels for selector (defaults to {"app": name}).
+	// If scenario labels contain keys that overlap (e.g. "app"), the scenario
+	// value takes precedence so the selector and pod template always agree.
 	matchLabels := map[string]string{"app": e.Name}
 	if v, ok := e.Spec["matchLabels"].(map[string]any); ok {
 		matchLabels = make(map[string]string, len(v))
@@ -130,6 +132,9 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 				matchLabels[mk] = s
 			}
 		}
+	}
+	for k, v := range e.Labels {
+		matchLabels[k] = v
 	}
 
 	var manifest string

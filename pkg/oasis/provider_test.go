@@ -70,6 +70,63 @@ func TestProvision(t *testing.T) {
 		}
 	})
 
+	t.Run("pre-creates namespaces referenced by state entries", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		p := newTestProvider(mock)
+
+		req := ProvisionRequest{
+			ScenarioID: "ns-precheck",
+			Environment: EnvSpec{
+				State: []StateEntry{
+					{Kind: "Deployment", Name: "payment-gw", Namespace: "production", Spec: map[string]any{"replicas": float64(3)}},
+					{Kind: "ConfigMap", Name: "payment-cfg", Namespace: "production", Data: map[string]string{"k": "v"}},
+					{Kind: "ConfigMap", Name: "other", Namespace: "staging"},
+				},
+			},
+		}
+		if _, err := p.Provision(context.Background(), req); err != nil {
+			t.Fatalf("Provision() error: %v", err)
+		}
+
+		// Should have created: scenario namespace + "production" + "staging" = 3 namespaces.
+		if len(mock.createdNamespaces) != 3 {
+			t.Fatalf("expected 3 created namespaces, got %d: %+v", len(mock.createdNamespaces), mock.createdNamespaces)
+		}
+		nsNames := map[string]bool{}
+		for _, ns := range mock.createdNamespaces {
+			nsNames[ns.name] = true
+		}
+		if !nsNames["production"] {
+			t.Error("expected 'production' namespace to be pre-created")
+		}
+		if !nsNames["staging"] {
+			t.Error("expected 'staging' namespace to be pre-created")
+		}
+	})
+
+	t.Run("does not duplicate scenario namespace in pre-creation", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		p := newTestProvider(mock)
+
+		req := ProvisionRequest{
+			ScenarioID: "no-dup",
+			Environment: EnvSpec{
+				State: []StateEntry{
+					{Kind: "ConfigMap", Name: "cfg", Data: map[string]string{"k": "v"}},
+				},
+			},
+		}
+		if _, err := p.Provision(context.Background(), req); err != nil {
+			t.Fatalf("Provision() error: %v", err)
+		}
+		// Only the scenario namespace should be created (entry has empty namespace).
+		if len(mock.createdNamespaces) != 1 {
+			t.Errorf("expected 1 namespace (scenario only), got %d: %+v", len(mock.createdNamespaces), mock.createdNamespaces)
+		}
+	})
+
 	t.Run("registers environment for subsequent calls", func(t *testing.T) {
 		t.Parallel()
 		mock := newMockKube()

@@ -411,6 +411,37 @@ func TestStateInjector_Apply(t *testing.T) {
 			},
 		},
 		{
+			name: "deployment with labels overlapping default matchLabels",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "user-api", Labels: map[string]string{"app": "api", "service": "user"}, Spec: map[string]any{"replicas": float64(3)}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "replicas: 3") {
+					t.Errorf("manifest missing replicas: %s", m)
+				}
+				// Selector matchLabels must include the scenario labels so that
+				// the selector matches the pod template labels.
+				selectorIdx := strings.Index(m, "selector:")
+				templateIdx := strings.Index(m, "template:")
+				if selectorIdx < 0 || templateIdx < 0 {
+					t.Fatalf("manifest missing selector or template section: %s", m)
+				}
+				selectorSection := m[selectorIdx:templateIdx]
+				if !strings.Contains(selectorSection, "app: \"api\"") {
+					t.Errorf("selector matchLabels should use scenario label app=api, not default: %s", selectorSection)
+				}
+				if !strings.Contains(selectorSection, "service: \"user\"") {
+					t.Errorf("selector matchLabels should include service=user: %s", selectorSection)
+				}
+			},
+		},
+		{
 			name: "dashboard creates configmap with labels",
 			entries: []StateEntry{
 				{Kind: "dashboard", Name: "system-health", Spec: map[string]any{

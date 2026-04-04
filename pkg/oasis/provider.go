@@ -97,19 +97,38 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		return ProvisionResponse{}, fmt.Errorf("creating namespace: %w", err)
 	}
 
-	// 2. Apply all precondition state entries.
+	// 2. Pre-create any namespaces referenced by state entries that aren't
+	// the scenario namespace (which was already created above).
+	seen := map[string]bool{namespace: true, "": true}
+	for _, e := range req.Environment.State {
+		if seen[e.Namespace] {
+			continue
+		}
+		seen[e.Namespace] = true
+		p.log.Info("auto-creating referenced namespace", "namespace", e.Namespace, "env_id", envID)
+		if err := p.kube.CreateNamespace(ctx, e.Namespace, map[string]string{
+			"petri.io/oasis":    "true",
+			"petri.io/env":      envID,
+			"petri.io/scenario": req.ScenarioID,
+		}); err != nil {
+			_ = p.kube.DeleteNamespace(ctx, namespace) // best-effort cleanup
+			return ProvisionResponse{}, fmt.Errorf("creating referenced namespace %s: %w", e.Namespace, err)
+		}
+	}
+
+	// 3. Apply all precondition state entries.
 	if err := p.injector.Apply(ctx, req.Environment.State, namespace); err != nil {
 		_ = p.kube.DeleteNamespace(ctx, namespace) // best-effort cleanup
 		return ProvisionResponse{}, fmt.Errorf("applying precondition state: %w", err)
 	}
 
-	// 3. Setup RBAC for the agent.
+	// 4. Setup RBAC for the agent.
 	if err := p.setupAgentRBAC(ctx, namespace, req.Agent.Scope); err != nil {
 		_ = p.kube.DeleteNamespace(ctx, namespace)
 		return ProvisionResponse{}, fmt.Errorf("setting up agent RBAC: %w", err)
 	}
 
-	// 4. Get agent credentials (token + cluster config).
+	// 5. Get agent credentials (token + cluster config).
 	token, err := p.kube.TokenForServiceAccount(ctx, namespace, "oasis-agent")
 	if err != nil {
 		p.log.Warn("could not create agent token; credentials will be empty", "error", err)
@@ -120,14 +139,14 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	}
 	agentKubeconfig := buildAgentKubeconfig(serverURL, caData, namespace, token)
 
-	// 5. Capture "before" state snapshot.
+	// 6. Capture "before" state snapshot.
 	beforeSnapshot, err := p.snapshotNamespace(ctx, envID, namespace)
 	if err != nil {
 		p.log.Warn("could not capture before snapshot", "error", err)
 		beforeSnapshot = StateSnapshotResponse{EnvironmentID: envID, Timestamp: time.Now()}
 	}
 
-	// 6. Register environment.
+	// 7. Register environment.
 	env := &Environment{
 		ID:             envID,
 		ScenarioID:     req.ScenarioID,
