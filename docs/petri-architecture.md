@@ -78,7 +78,7 @@ petri/
 │   ├── provisioners/       # Cloud/git/k8s operations
 │   ├── generators/         # Template rendering
 │   ├── companies/          # Company-specific logic
-│   ├── state/              # PostgreSQL state management
+│   ├── state/              # State management (SQLite/PostgreSQL)
 │   └── crypto/             # Credential encryption
 └── templates/              # Embedded Go templates
 ```
@@ -191,7 +191,7 @@ CREATING → ACTIVE → EXPIRING → DESTROYING → DESTROYED
 
 ### State Management
 
-**PostgreSQL Schema:**
+**Database Schema (SQLite default, PostgreSQL supported):**
 
 ```sql
 -- Lab instances
@@ -291,17 +291,11 @@ resource "aws_vpc" "main" {
 **Petri Self-Instrumentation:**
 
 Prometheus Metrics:
-- `petri_labs_total{company, level, cloud}`
-- `petri_labs_active{company, level, cloud}`
-- `petri_lab_creation_duration_seconds{company, level, cloud}`
-- `petri_lab_creation_failures_total{company, level, cloud, reason}`
-- `petri_git_operations_total{operation, provider}`
-- `petri_iac_execution_duration_seconds{tool, cloud}`
-
-OpenTelemetry Traces:
-- Span per major operation (create, destroy, export)
-- Child spans for provisioners
-- Resource attributes for company/level/cloud
+- `petri_labs_created_total{company, level, provider}` — total labs created
+- `petri_labs_destroyed_total{company, level, provider, reason}` — total labs destroyed
+- `petri_labs_active` — current number of active labs
+- `petri_lab_create_duration_seconds{company, level, provider}` — lab creation duration
+- `petri_lab_destroy_duration_seconds{company, level, provider}` — lab destruction duration
 
 Structured Logging:
 - JSON logs with lab context
@@ -484,8 +478,9 @@ companies:
 
 ```yaml
 state:
-  backend: postgresql
-  connection_string: "postgres://localhost/petri?sslmode=disable"
+  backend: sqlite                # or postgresql
+  sqlite_path: ~/.petri/petri.db
+  # connection_string: "postgres://localhost/petri?sslmode=disable"  # for postgresql
   
 credentials:
   master_key_path: ~/.petri/master.key
@@ -579,23 +574,17 @@ cleanup:
 
 ## Future Enhancements
 
-### Phase 2: Chaos Injection
-- Chaotic-Joe agent that mutates running labs
-- Simulates human operator mistakes
-- Random failure injection
-- Tests Joe's diagnostic capabilities
-
-### Phase 3: Multi-Region
+### Multi-Region
 - Labs spanning multiple regions
 - Cross-region observability
 - Disaster recovery scenarios
 
-### Phase 4: Additional Companies
+### Additional Companies
 - FinanceOne (highly regulated, AWS CloudFormation)
 - StartupXYZ (serverless-heavy, CDK)
 - Legacy Corp (VM-based transitioning to K8s)
 
-### Phase 5: Advanced Scenarios
+### Advanced Scenarios
 - Version skew testing
 - Certificate rotation failures
 - Capacity planning scenarios

@@ -8,7 +8,7 @@ Infrastructure lab framework for spawning ephemeral, realistic company infrastru
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.24+
 - Docker (for local labs)
 - Git
 - Cloud provider CLIs (aws, az, gcloud) and Terraform/Pulumi for cloud labs
@@ -16,7 +16,7 @@ Infrastructure lab framework for spawning ephemeral, realistic company infrastru
 ### Install
 
 ```bash
-git clone https://github.com/yourusername/petri.git
+git clone https://github.com/jaimegago/petri.git
 cd petri
 go build -o petri cmd/petri/main.go
 sudo mv petri /usr/local/bin/

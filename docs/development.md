@@ -3,7 +3,7 @@
 ## Running from Source
 
 ```bash
-git clone https://github.com/yourusername/petri.git
+git clone https://github.com/jaimegago/petri.git
 cd petri
 go build ./cmd/petri/
 ./petri init
