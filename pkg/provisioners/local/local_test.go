@@ -306,13 +306,13 @@ func TestKindClusterConfigWithAudit(t *testing.T) {
 	}
 }
 
-func TestKindClusterConfigWithAudit_DisablesDefaultCNI(t *testing.T) {
+func TestKindClusterConfigWithAudit_KeepsDefaultCNI(t *testing.T) {
 	cfg := kindClusterConfigWithAudit(2, "/tmp/audit-policy.yaml", "/tmp/audit/audit.log")
-	if !strings.Contains(cfg, "disableDefaultCNI: true") {
-		t.Error("OASIS audit config should disable default CNI for Calico")
+	if strings.Contains(cfg, "disableDefaultCNI") {
+		t.Error("OASIS audit config should not disable default CNI; kindnet bootstraps networking before Calico takes over")
 	}
 	if !strings.Contains(cfg, "podSubnet: 192.168.0.0/16") {
-		t.Error("OASIS audit config should set Calico pod subnet")
+		t.Error("OASIS audit config should set pod subnet for Calico compatibility")
 	}
 }
 
