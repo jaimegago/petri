@@ -145,13 +145,17 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 	}
 
 	// In OASIS mode the default CNI is disabled in favour of Calico which
-	// supports NetworkPolicy enforcement. Apply the Calico manifest now.
+	// supports NetworkPolicy enforcement. Apply the Calico manifest and wait
+	// for full CNI readiness so that pods created after lab creation can start
+	// without FailedCreatePodSandBox errors.
 	if opts.OASISMode {
 		if _, statErr := os.Stat(kubeconfigPath); statErr == nil {
 			if err := runCmd(ctx, "kubectl", "--kubeconfig", kubeconfigPath,
 				"apply", "-f", CalicoCNIManifestURL); err != nil {
-				// Best-effort: cluster is still usable, but NetworkPolicies won't be enforced.
-				_, _ = fmt.Fprintf(os.Stderr, "petri: warning: failed to install Calico CNI: %v\n", err)
+				return nil, fmt.Errorf("installing Calico CNI: %w", err)
+			}
+			if err := waitForCalico(ctx, kubeconfigPath); err != nil {
+				return nil, fmt.Errorf("waiting for Calico CNI readiness: %w", err)
 			}
 		}
 	}
@@ -208,6 +212,52 @@ func resolveNodeCount(opts CreateOptions) int {
 	default:
 		return 1 // Level 1: single-node
 	}
+}
+
+// waitForCalico blocks until the Calico CNI is fully operational. It waits for
+// the calico-node daemonset and calico-kube-controllers deployment to roll out,
+// then runs a smoke-test pod to verify that the CNI can actually configure pod
+// networking (the rollout check alone doesn't guarantee /var/lib/calico/ is
+// mounted and functional on every node).
+func waitForCalico(ctx context.Context, kubeconfigPath string) error {
+	kube := func(args ...string) error {
+		return runCmd(ctx, "kubectl", append([]string{"--kubeconfig", kubeconfigPath}, args...)...)
+	}
+
+	// Wait for calico-node daemonset pods to be Running+Ready on all nodes.
+	if err := kube("rollout", "status", "daemonset/calico-node",
+		"-n", "kube-system", "--timeout", "3m"); err != nil {
+		return fmt.Errorf("calico-node daemonset not ready: %w", err)
+	}
+
+	// Wait for calico-kube-controllers deployment.
+	if err := kube("rollout", "status", "deployment/calico-kube-controllers",
+		"-n", "kube-system", "--timeout", "2m"); err != nil {
+		return fmt.Errorf("calico-kube-controllers not ready: %w", err)
+	}
+
+	// Smoke-test: create a throwaway pod and verify it reaches Running.
+	// This confirms the CNI plugin can actually set up pod networking.
+	const smokeNS = "kube-system"
+	const smokePod = "petri-cni-smoke"
+
+	_ = kube("delete", "pod", smokePod, "-n", smokeNS, "--ignore-not-found")
+
+	if err := kube("run", smokePod, "-n", smokeNS,
+		"--image", "busybox:1.36", "--restart=Never",
+		"--command", "--", "true"); err != nil {
+		return fmt.Errorf("creating CNI smoke-test pod: %w", err)
+	}
+	defer func() {
+		_ = kube("delete", "pod", smokePod, "-n", smokeNS, "--ignore-not-found")
+	}()
+
+	if err := kube("wait", "--for=condition=Ready",
+		"pod/"+smokePod, "-n", smokeNS, "--timeout", "60s"); err != nil {
+		return fmt.Errorf("CNI smoke-test pod did not reach Ready: %w", err)
+	}
+
+	return nil
 }
 
 // ── shared exec helpers ────────────────────────────────────────────────────────
