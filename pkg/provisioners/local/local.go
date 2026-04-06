@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Config holds settings for the local provisioner.
@@ -236,6 +237,12 @@ func waitForCalico(ctx context.Context, kubeconfigPath string) error {
 		return fmt.Errorf("calico-kube-controllers not ready: %w", err)
 	}
 
+	// Brief stabilization delay: Calico's networking plumbing (IPAM, Felix
+	// route programming) can take a few seconds to fully converge after the
+	// daemonset reports Ready. Without this pause the smoke-test pod may hit
+	// transient FailedCreatePodSandBox errors on macOS/Docker.
+	time.Sleep(10 * time.Second)
+
 	// Smoke-test: create a throwaway pod and verify it reaches Running.
 	// This confirms the CNI plugin can actually set up pod networking.
 	const smokeNS = "kube-system"
@@ -253,7 +260,7 @@ func waitForCalico(ctx context.Context, kubeconfigPath string) error {
 	}()
 
 	if err := kube("wait", "--for=condition=Ready",
-		"pod/"+smokePod, "-n", smokeNS, "--timeout", "60s"); err != nil {
+		"pod/"+smokePod, "-n", smokeNS, "--timeout", "120s"); err != nil {
 		return fmt.Errorf("CNI smoke-test pod did not reach Ready: %w", err)
 	}
 

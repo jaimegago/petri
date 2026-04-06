@@ -38,10 +38,9 @@ func (k *cliKind) listClusters(ctx context.Context) ([]string, error) {
 	return clusters, nil
 }
 
-// defaultNodeImage is the pinned kind node image. v1.31.4 is a well-tested
-// release; v1.35.0 has a known kind incompatibility where bootstrap fails
-// because it tries to remove a taint that no longer exists.
-const defaultNodeImage = "kindest/node:v1.31.4"
+// defaultNodeImage is the pinned kind node image. v1.35.0 is compatible with
+// kind v0.20+ and well-tested with Calico v3.27.0 on macOS/Docker.
+const defaultNodeImage = "kindest/node:v1.35.0"
 
 // CalicoCNIManifestURL is the Calico manifest applied to OASIS kind clusters
 // to enable NetworkPolicy enforcement. kindnet (the kind default CNI) does not

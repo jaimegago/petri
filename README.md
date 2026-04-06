@@ -9,9 +9,15 @@ Infrastructure lab framework for spawning ephemeral, realistic company infrastru
 ### Prerequisites
 
 - Go 1.24+
-- Docker (for local labs)
+- Docker Desktop 4.x+ (for local labs)
+- [kind](https://kind.sigs.k8s.io/) v0.20.0 or later (for local labs)
 - Git
 - Cloud provider CLIs (aws, az, gcloud) and Terraform/Pulumi for cloud labs
+
+> **Note:** OASIS mode (`--oasis`) installs Calico CNI for NetworkPolicy enforcement.
+> Calico initialization takes approximately 2 minutes on the first lab creation
+> (calico-node runs 3 init containers before reaching Ready). This is expected
+> behaviour on macOS/Docker Desktop.
 
 ### Install
 
