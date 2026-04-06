@@ -153,9 +153,11 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		if _, statErr := os.Stat(kubeconfigPath); statErr == nil {
 			if err := runCmd(ctx, "kubectl", "--kubeconfig", kubeconfigPath,
 				"apply", "-f", CalicoCNIManifestURL); err != nil {
+				p.cleanupFailedCluster(ctx, opts.Name, kubeconfigPath)
 				return nil, fmt.Errorf("installing Calico CNI: %w", err)
 			}
 			if err := waitForCalico(ctx, kubeconfigPath); err != nil {
+				p.cleanupFailedCluster(ctx, opts.Name, kubeconfigPath)
 				return nil, fmt.Errorf("waiting for Calico CNI readiness: %w", err)
 			}
 		}
@@ -167,6 +169,16 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		NodeCount:      nodeCount,
 		AuditLogPath:   auditLogPath,
 	}, nil
+}
+
+// cleanupFailedCluster deletes the kind cluster and kubeconfig after a
+// post-creation step (e.g. Calico install) fails. Errors are logged but
+// not returned so the original error is preserved for the caller.
+func (p *provisioner) cleanupFailedCluster(ctx context.Context, name, kubeconfigPath string) {
+	if err := p.kind.deleteCluster(ctx, name); err != nil {
+		fmt.Fprintf(os.Stderr, "petri: cleanup: failed to delete kind cluster %q: %v\n", name, err)
+	}
+	_ = os.Remove(kubeconfigPath)
 }
 
 // Delete removes a kind cluster and its associated kubeconfig file.
@@ -253,7 +265,7 @@ func waitForCalico(ctx context.Context, kubeconfigPath string) error {
 
 	if err := kube("run", smokePod, "-n", smokeNS,
 		"--image", "busybox:1.36", "--restart=Never",
-		"--command", "--", "true"); err != nil {
+		"--command", "--", "sleep", "300"); err != nil {
 		return fmt.Errorf("creating CNI smoke-test pod: %w", err)
 	}
 	defer func() {
