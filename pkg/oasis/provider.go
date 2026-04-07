@@ -38,6 +38,8 @@ type KubeClient interface {
 	GetClusterConfig(ctx context.Context) (serverURL, caData string, err error)
 	// TokenForServiceAccount creates a short-lived bearer token for a ServiceAccount.
 	TokenForServiceAccount(ctx context.Context, namespace, name string) (string, error)
+	// WaitForRollout waits for a Deployment to complete its rollout.
+	WaitForRollout(ctx context.Context, namespace, deployment string, timeout time.Duration) error
 }
 
 // ProviderConfig holds configuration for the OASIS provider.
@@ -120,6 +122,14 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	if err := p.injector.Apply(ctx, req.Environment.State, namespace); err != nil {
 		_ = p.kube.DeleteNamespace(ctx, namespace) // best-effort cleanup
 		return ProvisionResponse{}, fmt.Errorf("applying precondition state: %w", err)
+	}
+
+	// 3b. Wait for deployments that should be healthy to finish rolling out.
+	// Deployments with unhealthy expected status (crashloopbackoff, oomkilled,
+	// pending, error) are skipped — waiting would always time out.
+	if err := p.waitForHealthyDeployments(ctx, req.Environment.State, namespace); err != nil {
+		_ = p.kube.DeleteNamespace(ctx, namespace) // best-effort cleanup
+		return ProvisionResponse{}, fmt.Errorf("waiting for deployments: %w", err)
 	}
 
 	// 4. Setup RBAC for the agent.
@@ -413,6 +423,66 @@ func (p *petriProvider) observeResponseContent(env *Environment, req ObserveRequ
 }
 
 // ── Helper methods ────────────────────────────────────────────────────────────
+
+// waitForHealthyDeployments waits for deployments whose expected status is
+// healthy (running, degraded, elevated_error_rate) to finish rolling out.
+// Deployments with unhealthy expected status are skipped.
+func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries []StateEntry, namespace string) error {
+	const rolloutTimeout = 60 * time.Second
+
+	healthyStatuses := map[string]bool{
+		"running":             true,
+		"degraded":            true,
+		"elevated_error_rate": true,
+		"elevated-error-rate": true,
+	}
+
+	type pendingDeploy struct {
+		name      string
+		namespace string
+	}
+	var pending []pendingDeploy
+
+	for _, e := range entries {
+		if strings.ToLower(e.Kind) != "deployment" {
+			continue
+		}
+		status := "running" // default in translate.go
+		if v, ok := e.Spec["status"]; ok {
+			if s, ok := v.(string); ok {
+				status = strings.ToLower(s)
+			}
+		}
+		if !healthyStatuses[status] {
+			continue
+		}
+		ns := e.Namespace
+		if ns == "" {
+			ns = namespace
+		}
+		pending = append(pending, pendingDeploy{name: e.Name, namespace: ns})
+	}
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	p.log.Info("waiting for healthy deployments to roll out", "count", len(pending))
+
+	var failed []string
+	for _, d := range pending {
+		p.log.Info("waiting for deployment rollout", "deployment", d.name, "namespace", d.namespace)
+		if err := p.kube.WaitForRollout(ctx, d.namespace, d.name, rolloutTimeout); err != nil {
+			failed = append(failed, fmt.Sprintf("%s/%s", d.namespace, d.name))
+			p.log.Warn("deployment rollout failed", "deployment", d.name, "namespace", d.namespace, "error", err)
+		}
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("deployments did not become ready within %s: %s", rolloutTimeout, strings.Join(failed, ", "))
+	}
+	return nil
+}
 
 func (p *petriProvider) setupAgentRBAC(ctx context.Context, namespace string, scope AgentScope) error {
 	for _, manifest := range buildAgentRBACManifests(namespace, scope) {

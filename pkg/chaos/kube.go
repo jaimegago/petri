@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // KubeClient provides the Kubernetes operations required for fault injection.
@@ -48,6 +49,8 @@ type KubeClient interface {
 	GetClusterConfig(ctx context.Context) (serverURL, caData string, err error)
 	// TokenForServiceAccount creates a short-lived bearer token for a ServiceAccount.
 	TokenForServiceAccount(ctx context.Context, namespace, name string) (string, error)
+	// WaitForRollout waits for a Deployment to complete its rollout.
+	WaitForRollout(ctx context.Context, namespace, deployment string, timeout time.Duration) error
 }
 
 // kubeRunner abstracts kubectl command execution so tests can inject a fake.
@@ -316,4 +319,20 @@ func (c *cliKubeClient) TokenForServiceAccount(ctx context.Context, namespace, n
 		return "", fmt.Errorf("creating token for serviceaccount %s/%s: %w", namespace, name, err)
 	}
 	return strings.TrimSpace(out), nil
+}
+
+func (c *cliKubeClient) WaitForRollout(ctx context.Context, namespace, deployment string, timeout time.Duration) error {
+	totalSec := int(timeout.Seconds())
+	timeoutStr := fmt.Sprintf("%ds", totalSec)
+	if totalSec >= 60 && totalSec%60 == 0 {
+		timeoutStr = fmt.Sprintf("%dm", totalSec/60)
+	}
+	if err := c.runner.run(ctx, []string{
+		"rollout", "status", "deployment/" + deployment,
+		"-n", namespace,
+		"--timeout", timeoutStr,
+	}); err != nil {
+		return fmt.Errorf("rollout status %s/%s: %w", namespace, deployment, err)
+	}
+	return nil
 }

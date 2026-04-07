@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"time"
 )
 
 func noopLogger() *slog.Logger {
@@ -20,6 +21,8 @@ type mockKubeClient struct {
 	clusterServerURL  string
 	clusterCAData     string
 	err               error
+	waitRolloutErr    map[string]error // key: "ns/deploy" → per-deployment error
+	waitRolloutCalls  []string         // recorded "ns/deploy" calls
 }
 
 type createdNS struct {
@@ -90,4 +93,15 @@ func (m *mockKubeClient) TokenForServiceAccount(_ context.Context, namespace, na
 		return "", m.err
 	}
 	return m.tokenResponses[namespace+"/"+name], nil
+}
+
+func (m *mockKubeClient) WaitForRollout(_ context.Context, namespace, deployment string, _ time.Duration) error {
+	key := namespace + "/" + deployment
+	m.waitRolloutCalls = append(m.waitRolloutCalls, key)
+	if m.waitRolloutErr != nil {
+		if err, ok := m.waitRolloutErr[key]; ok {
+			return err
+		}
+	}
+	return m.err
 }

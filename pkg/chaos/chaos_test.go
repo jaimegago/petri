@@ -113,6 +113,11 @@ func (m *mockKubeClient) ApplyYAML(_ context.Context, _ string) error {
 	return m.err
 }
 
+func (m *mockKubeClient) WaitForRollout(_ context.Context, namespace, deployment string, _ time.Duration) error {
+	m.record("wait_rollout:" + namespace + "/" + deployment)
+	return m.err
+}
+
 func (m *mockKubeClient) GetClusterConfig(_ context.Context) (string, string, error) {
 	return "https://127.0.0.1:6443", "", m.err
 }

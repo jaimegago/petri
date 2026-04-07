@@ -3,6 +3,7 @@ package oasis
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -255,6 +256,140 @@ func TestProvision(t *testing.T) {
 			if containsStr(m, "kind: Role\n") && !containsStr(m, "namespace: "+env.Namespace) {
 				t.Errorf("Role should be in scenario namespace %s", env.Namespace)
 			}
+		}
+	})
+
+	t.Run("waits for running deployments before returning ready", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		p := newTestProvider(mock)
+
+		req := ProvisionRequest{
+			ScenarioID: "wait-sc",
+			Environment: EnvSpec{
+				State: []StateEntry{
+					{Kind: "Deployment", Name: "web-app", Namespace: "frontend", Spec: map[string]any{"status": "running", "replicas": float64(3)}},
+					{Kind: "Service", Name: "web-svc", Namespace: "frontend"},
+				},
+			},
+		}
+		resp, err := p.Provision(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Provision() error: %v", err)
+		}
+		if resp.Status != "ready" {
+			t.Errorf("status = %q, want %q", resp.Status, "ready")
+		}
+		// Should have called WaitForRollout for the running deployment.
+		if len(mock.waitRolloutCalls) != 1 {
+			t.Fatalf("expected 1 WaitForRollout call, got %d: %v", len(mock.waitRolloutCalls), mock.waitRolloutCalls)
+		}
+		if mock.waitRolloutCalls[0] != "frontend/web-app" {
+			t.Errorf("WaitForRollout called with %q, want %q", mock.waitRolloutCalls[0], "frontend/web-app")
+		}
+	})
+
+	t.Run("skips wait for unhealthy deployment statuses", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		p := newTestProvider(mock)
+
+		req := ProvisionRequest{
+			ScenarioID: "skip-sc",
+			Environment: EnvSpec{
+				State: []StateEntry{
+					{Kind: "Deployment", Name: "crash-app", Namespace: "ns1", Spec: map[string]any{"status": "CrashLoopBackOff"}},
+					{Kind: "Deployment", Name: "oom-app", Namespace: "ns1", Spec: map[string]any{"status": "oomkilled"}},
+					{Kind: "Deployment", Name: "pend-app", Namespace: "ns1", Spec: map[string]any{"status": "pending"}},
+					{Kind: "Deployment", Name: "err-app", Namespace: "ns1", Spec: map[string]any{"status": "error"}},
+				},
+			},
+		}
+		resp, err := p.Provision(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Provision() error: %v", err)
+		}
+		if resp.Status != "ready" {
+			t.Errorf("status = %q, want %q", resp.Status, "ready")
+		}
+		// No WaitForRollout calls expected.
+		if len(mock.waitRolloutCalls) != 0 {
+			t.Errorf("expected 0 WaitForRollout calls, got %d: %v", len(mock.waitRolloutCalls), mock.waitRolloutCalls)
+		}
+	})
+
+	t.Run("returns error when deployment rollout times out", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		mock.waitRolloutErr = map[string]error{
+			"frontend/web-app": fmt.Errorf("timed out waiting for rollout"),
+		}
+		p := newTestProvider(mock)
+
+		req := ProvisionRequest{
+			ScenarioID: "timeout-sc",
+			Environment: EnvSpec{
+				State: []StateEntry{
+					{Kind: "Deployment", Name: "web-app", Namespace: "frontend", Spec: map[string]any{"status": "running"}},
+				},
+			},
+		}
+		_, err := p.Provision(context.Background(), req)
+		if err == nil {
+			t.Fatal("expected error when rollout times out")
+		}
+		if !strings.Contains(err.Error(), "frontend/web-app") {
+			t.Errorf("error should mention failed deployment: %v", err)
+		}
+		// Namespace should be cleaned up.
+		if len(mock.deletedNamespaces) == 0 {
+			t.Error("expected namespace to be deleted on rollout failure")
+		}
+	})
+
+	t.Run("waits for degraded and elevated_error_rate deployments", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		p := newTestProvider(mock)
+
+		req := ProvisionRequest{
+			ScenarioID: "mixed-sc",
+			Environment: EnvSpec{
+				State: []StateEntry{
+					{Kind: "Deployment", Name: "degraded-app", Namespace: "ns1", Spec: map[string]any{"status": "degraded"}},
+					{Kind: "Deployment", Name: "error-rate-app", Namespace: "ns1", Spec: map[string]any{"status": "elevated_error_rate"}},
+					{Kind: "Deployment", Name: "crash-app", Namespace: "ns1", Spec: map[string]any{"status": "CrashLoopBackOff"}},
+				},
+			},
+		}
+		if _, err := p.Provision(context.Background(), req); err != nil {
+			t.Fatalf("Provision() error: %v", err)
+		}
+		// Should wait for degraded and elevated_error_rate, but not crashloop.
+		if len(mock.waitRolloutCalls) != 2 {
+			t.Fatalf("expected 2 WaitForRollout calls, got %d: %v", len(mock.waitRolloutCalls), mock.waitRolloutCalls)
+		}
+	})
+
+	t.Run("defaults to running status when spec has no status field", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		p := newTestProvider(mock)
+
+		req := ProvisionRequest{
+			ScenarioID: "default-sc",
+			Environment: EnvSpec{
+				State: []StateEntry{
+					{Kind: "Deployment", Name: "my-app", Namespace: "prod", Spec: map[string]any{"replicas": float64(2)}},
+				},
+			},
+		}
+		if _, err := p.Provision(context.Background(), req); err != nil {
+			t.Fatalf("Provision() error: %v", err)
+		}
+		// No explicit status → defaults to "running" → should wait.
+		if len(mock.waitRolloutCalls) != 1 {
+			t.Fatalf("expected 1 WaitForRollout call, got %d", len(mock.waitRolloutCalls))
 		}
 	})
 
