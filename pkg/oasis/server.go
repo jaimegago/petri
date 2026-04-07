@@ -1,6 +1,7 @@
 package oasis
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -136,17 +137,11 @@ func (s *Server) handleInjectState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleObserve(w http.ResponseWriter, r *http.Request) {
 	var req ObserveRequest
 	if err := decodeJSON(r, &req); err != nil {
-		s.log.Warn("observe request decode failed", "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	resp, err := s.provider.Observe(r.Context(), req)
 	if err != nil {
-		s.log.Error("observe failed",
-			"env_id", req.EnvironmentID,
-			"observation_type", req.ObservationType,
-			"error", err,
-		)
 		writeError(w, httpStatusForErr(err), err.Error())
 		return
 	}
@@ -159,14 +154,33 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
+// maxErrorBodyCapture is the maximum number of bytes captured from error
+// response bodies for logging purposes.
+const maxErrorBodyCapture = 4096
+
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status    int
+	errBody   bytes.Buffer
+	capturing bool
 }
 
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
+	r.capturing = status >= 400
 	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.capturing && r.errBody.Len() < maxErrorBodyCapture {
+		remaining := maxErrorBodyCapture - r.errBody.Len()
+		if len(b) > remaining {
+			r.errBody.Write(b[:remaining])
+		} else {
+			r.errBody.Write(b)
+		}
+	}
+	return r.ResponseWriter.Write(b)
 }
 
 func loggingMiddleware(log *slog.Logger, next http.Handler) http.Handler {
@@ -174,12 +188,31 @@ func loggingMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		log.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rec.status,
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
+
+		if rec.status >= 400 {
+			errMsg := strings.TrimRight(rec.errBody.String(), " \t\r\n")
+			// Try to extract the message from writeError's JSON envelope.
+			var envelope struct {
+				Message string `json:"message"`
+			}
+			if json.Unmarshal([]byte(errMsg), &envelope) == nil && envelope.Message != "" {
+				errMsg = envelope.Message
+			}
+			log.Warn("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", rec.status,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"error", errMsg,
+			)
+		} else {
+			log.Info("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", rec.status,
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
+		}
 	})
 }
 

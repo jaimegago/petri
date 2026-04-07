@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -347,6 +349,67 @@ func TestServer_ObserveRegression(t *testing.T) {
 // the same package and can access unexported types from mock_test.go.
 func newMockKubeForServer() *mockKubeClient {
 	return newMockKube()
+}
+
+func TestLoggingMiddleware_ErrorResponse(t *testing.T) {
+	t.Parallel()
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	handler := loggingMiddleware(log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusBadRequest, "missing required field: scenario_id")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/provision", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Verify the response was still written correctly to the client.
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("response status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	logged := logBuf.String()
+	for _, want := range []string{
+		`method=POST`,
+		`path=/v1/provision`,
+		`status=400`,
+		`error="missing required field: scenario_id"`,
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log output missing %q\ngot: %s", want, logged)
+		}
+	}
+}
+
+func TestLoggingMiddleware_SuccessNoBody(t *testing.T) {
+	t.Parallel()
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	handler := loggingMiddleware(log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("response status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	logged := logBuf.String()
+	if strings.Contains(logged, "error=") {
+		t.Errorf("success response should not contain error field\ngot: %s", logged)
+	}
+	for _, want := range []string{`method=GET`, `path=/healthz`, `status=200`} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log output missing %q\ngot: %s", want, logged)
+		}
+	}
 }
 
 func TestServer_ContentType(t *testing.T) {
