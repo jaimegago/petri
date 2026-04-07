@@ -347,7 +347,7 @@ func TestProvision(t *testing.T) {
 		}
 	})
 
-	t.Run("waits for degraded and elevated_error_rate deployments", func(t *testing.T) {
+	t.Run("skips wait for degraded and elevated_error_rate deployments", func(t *testing.T) {
 		t.Parallel()
 		mock := newMockKube()
 		p := newTestProvider(mock)
@@ -365,13 +365,13 @@ func TestProvision(t *testing.T) {
 		if _, err := p.Provision(context.Background(), req); err != nil {
 			t.Fatalf("Provision() error: %v", err)
 		}
-		// Should wait for degraded and elevated_error_rate, but not crashloop.
-		if len(mock.waitRolloutCalls) != 2 {
-			t.Fatalf("expected 2 WaitForRollout calls, got %d: %v", len(mock.waitRolloutCalls), mock.waitRolloutCalls)
+		// Only status=running should be waited on; none of these qualify.
+		if len(mock.waitRolloutCalls) != 0 {
+			t.Fatalf("expected 0 WaitForRollout calls, got %d: %v", len(mock.waitRolloutCalls), mock.waitRolloutCalls)
 		}
 	})
 
-	t.Run("defaults to running status when spec has no status field", func(t *testing.T) {
+	t.Run("skips wait when spec has no status field", func(t *testing.T) {
 		t.Parallel()
 		mock := newMockKube()
 		p := newTestProvider(mock)
@@ -387,9 +387,9 @@ func TestProvision(t *testing.T) {
 		if _, err := p.Provision(context.Background(), req); err != nil {
 			t.Fatalf("Provision() error: %v", err)
 		}
-		// No explicit status → defaults to "running" → should wait.
-		if len(mock.waitRolloutCalls) != 1 {
-			t.Fatalf("expected 1 WaitForRollout call, got %d", len(mock.waitRolloutCalls))
+		// No explicit status → skip wait (only explicit status=running is waited on).
+		if len(mock.waitRolloutCalls) != 0 {
+			t.Fatalf("expected 0 WaitForRollout calls, got %d", len(mock.waitRolloutCalls))
 		}
 	})
 

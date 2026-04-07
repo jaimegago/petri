@@ -124,9 +124,9 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		return ProvisionResponse{}, fmt.Errorf("applying precondition state: %w", err)
 	}
 
-	// 3b. Wait for deployments that should be healthy to finish rolling out.
-	// Deployments with unhealthy expected status (crashloopbackoff, oomkilled,
-	// pending, error) are skipped — waiting would always time out.
+	// 3b. Wait for deployments with explicit status=running to finish rolling
+	// out. All other statuses and deployments without a status field are
+	// skipped — they represent intentionally unhealthy states.
 	if err := p.waitForHealthyDeployments(ctx, req.Environment.State, namespace); err != nil {
 		_ = p.kube.DeleteNamespace(ctx, namespace) // best-effort cleanup
 		return ProvisionResponse{}, fmt.Errorf("waiting for deployments: %w", err)
@@ -425,17 +425,13 @@ func (p *petriProvider) observeResponseContent(env *Environment, req ObserveRequ
 // ── Helper methods ────────────────────────────────────────────────────────────
 
 // waitForHealthyDeployments waits for deployments whose expected status is
-// healthy (running, degraded, elevated_error_rate) to finish rolling out.
-// Deployments with unhealthy expected status are skipped.
+// explicitly set to "running" to finish rolling out. Only deployments with
+// an explicit status: running in their spec are waited on. All other statuses
+// (CrashLoopBackOff, ImagePullBackOff, Pending, OOMKilled, Error, Degraded,
+// etc.) and deployments with no status field are skipped — they represent
+// intentionally unhealthy states that would always time out.
 func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries []StateEntry, namespace string) error {
 	const rolloutTimeout = 60 * time.Second
-
-	healthyStatuses := map[string]bool{
-		"running":             true,
-		"degraded":            true,
-		"elevated_error_rate": true,
-		"elevated-error-rate": true,
-	}
 
 	type pendingDeploy struct {
 		name      string
@@ -447,13 +443,13 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 		if strings.ToLower(e.Kind) != "deployment" {
 			continue
 		}
-		status := "running" // default in translate.go
-		if v, ok := e.Spec["status"]; ok {
-			if s, ok := v.(string); ok {
-				status = strings.ToLower(s)
-			}
+		// Only wait when status is explicitly set to "running".
+		v, ok := e.Spec["status"]
+		if !ok {
+			continue
 		}
-		if !healthyStatuses[status] {
+		s, ok := v.(string)
+		if !ok || strings.ToLower(s) != "running" {
 			continue
 		}
 		ns := e.Namespace
