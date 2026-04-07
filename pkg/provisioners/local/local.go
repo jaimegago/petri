@@ -105,18 +105,35 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		return nil, fmt.Errorf("resolving kubeconfig path: %w", err)
 	}
 
-	// Determine audit log path for OASIS mode.
+	// Determine audit paths for OASIS mode.
+	//
+	// Each lab gets its own subdirectory under audit/ so that concurrent labs
+	// (and labs that share the same audit/ root over time) cannot read each
+	// other's audit events. The kube-apiserver inside the kind node always
+	// writes to /var/log/kubernetes/audit.log; per-lab isolation comes from
+	// the host-side bind-mount being a unique per-lab directory.
+	//
+	// Layout:
+	//   ~/.petri/kubeconfigs/audit/<lab>/
+	//     audit-policy.yaml   (read-only mount, projected to /etc/kubernetes/audit/audit-policy.yaml)
+	//     audit.log           (read-write, projected to /var/log/kubernetes/audit.log)
+	//
+	// The directory MUST exist on the host before kind create cluster runs,
+	// otherwise kind silently mounts an empty tmpfs over the missing path and
+	// the apiserver's audit writes vanish.
 	var auditLogPath string
 	var auditPolicyPath string
+	var auditDir string
 	if opts.OASISMode {
-		auditDir := filepath.Join(filepath.Dir(kubeconfigPath), "audit")
+		auditRoot := filepath.Join(filepath.Dir(kubeconfigPath), "audit")
+		auditDir = filepath.Join(auditRoot, opts.Name)
 		if err := os.MkdirAll(auditDir, 0o700); err != nil {
-			return nil, fmt.Errorf("creating audit dir: %w", err)
+			return nil, fmt.Errorf("creating per-lab audit dir %s: %w", auditDir, err)
 		}
-		auditLogPath = filepath.Join(auditDir, opts.Name+"-audit.log")
 
-		// Write the audit policy to a persistent location (kind mounts it).
-		auditPolicyPath = filepath.Join(auditDir, opts.Name+"-audit-policy.yaml")
+		auditLogPath = filepath.Join(auditDir, "audit.log")
+		auditPolicyPath = filepath.Join(auditDir, "audit-policy.yaml")
+
 		if err := os.WriteFile(auditPolicyPath, []byte(oasisAuditPolicy()), 0o600); err != nil {
 			return nil, fmt.Errorf("writing audit policy: %w", err)
 		}
@@ -131,7 +148,10 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 
 	kindCfg := kindClusterConfig(nodeCount)
 	if opts.OASISMode {
-		kindCfg = kindClusterConfigWithAudit(nodeCount, auditPolicyPath, auditLogPath)
+		// Pass the per-lab audit DIRECTORY (not the file path) to the kind config
+		// so that the bind-mount targets the per-lab subdirectory and the
+		// apiserver's audit.log lands inside it.
+		kindCfg = kindClusterConfigWithAudit(nodeCount, auditPolicyPath, auditDir)
 	}
 	if _, err := configFile.WriteString(kindCfg); err != nil {
 		return nil, fmt.Errorf("writing kind config: %w", err)
@@ -189,6 +209,10 @@ func (p *provisioner) Delete(ctx context.Context, name string) error {
 	// Best-effort kubeconfig removal.
 	if path, _ := p.resolveKubeconfigPath(name); path != "" {
 		_ = os.Remove(path)
+		// Best-effort per-lab audit directory removal. Safe even if the lab
+		// was not created with --oasis (the directory simply will not exist).
+		auditDir := filepath.Join(filepath.Dir(path), "audit", name)
+		_ = os.RemoveAll(auditDir)
 	}
 	return nil
 }

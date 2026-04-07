@@ -2,7 +2,6 @@ package local
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 )
 
@@ -80,10 +79,20 @@ rules:
 }
 
 // kindClusterConfigWithAudit generates kind cluster YAML with API server audit
-// logging enabled. The audit policy file and log file are mounted from the host
-// into the control-plane container via extraMounts and configured via
+// logging enabled. The audit policy file and log directory are mounted from the
+// host into the control-plane container via extraMounts and configured via
 // kubeadmConfigPatches.
-func kindClusterConfigWithAudit(nodeCount int, auditPolicyPath, auditLogPath string) string {
+//
+// auditPolicyHostPath is the absolute host-side path to the per-lab audit policy
+// YAML file. It is bind-mounted into the kind node at /etc/kubernetes/audit/audit-policy.yaml
+// and then projected into the kube-apiserver pod via extraVolumes.
+//
+// auditLogHostDir is the absolute host-side path to the per-lab directory where
+// the apiserver writes audit.log. It is bind-mounted into the kind node at
+// /var/log/kubernetes/, and then projected into the kube-apiserver pod via extraVolumes.
+// The apiserver always writes to /var/log/kubernetes/audit.log inside the pod;
+// per-lab isolation comes from the host-side directory being unique per lab.
+func kindClusterConfigWithAudit(nodeCount int, auditPolicyHostPath, auditLogHostDir string) string {
 	var b strings.Builder
 	b.WriteString("kind: Cluster\n")
 	b.WriteString("apiVersion: kind.x-k8s.io/v1alpha4\n")
@@ -118,10 +127,10 @@ func kindClusterConfigWithAudit(nodeCount int, auditPolicyPath, auditLogPath str
 	b.WriteString("        mountPath: /var/log/kubernetes\n")
 	b.WriteString("        readOnly: false\n")
 	b.WriteString("  extraMounts:\n")
-	b.WriteString("  - hostPath: " + auditPolicyPath + "\n")
+	b.WriteString("  - hostPath: " + auditPolicyHostPath + "\n")
 	b.WriteString("    containerPath: /etc/kubernetes/audit/audit-policy.yaml\n")
 	b.WriteString("    readOnly: true\n")
-	b.WriteString("  - hostPath: " + strings.TrimSuffix(auditLogPath, "/"+filepath.Base(auditLogPath)) + "\n")
+	b.WriteString("  - hostPath: " + auditLogHostDir + "\n")
 	b.WriteString("    containerPath: /var/log/kubernetes\n")
 	b.WriteString("    readOnly: false\n")
 	for i := 1; i < nodeCount; i++ {
