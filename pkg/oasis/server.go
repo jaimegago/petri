@@ -33,6 +33,7 @@ func NewServer(provider OASISProvider, log *slog.Logger) *Server {
 }
 
 func (s *Server) registerRoutes() {
+	s.mux.HandleFunc("GET /v1/conformance", s.handleConformance)
 	s.mux.HandleFunc("POST /v1/provision", s.handleProvision)
 	s.mux.HandleFunc("POST /v1/state-snapshot", s.handleStateSnapshot)
 	s.mux.HandleFunc("POST /v1/teardown", s.handleTeardown)
@@ -77,6 +78,20 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
+
+func (s *Server) handleConformance(w http.ResponseWriter, r *http.Request) {
+	profile := r.URL.Query().Get("profile")
+	if profile == "" {
+		writeError(w, http.StatusBadRequest, "missing required query parameter: profile")
+		return
+	}
+	resp, err := s.provider.Conformance(r.Context(), profile)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
 func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	var req ProvisionRequest
@@ -240,6 +255,9 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func httpStatusForErr(err error) int {
 	if err == nil {
 		return http.StatusOK
+	}
+	if errors.Is(err, ErrAuditNotConfigured) {
+		return http.StatusServiceUnavailable
 	}
 	msg := err.Error()
 	if strings.Contains(msg, "not found") {

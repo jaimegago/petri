@@ -4,10 +4,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 )
+
+// ErrAuditNotConfigured is returned by the stub audit reader when no audit log
+// path is configured. Callers should check for this sentinel to distinguish
+// "audit logging is not set up" from transient read errors.
+var ErrAuditNotConfigured = errors.New("audit logging is not configured: no audit log path provided")
 
 // AuditLogQuery specifies the filter parameters for an audit log query.
 type AuditLogQuery struct {
@@ -38,11 +44,12 @@ type AuditLogReader interface {
 // stubAuditLogReader is used when no audit log path is configured.
 type stubAuditLogReader struct{}
 
-// Query returns an empty result set when audit logging is not configured.
-// This allows the observe handler to return a valid 200 response with an
-// empty entries array rather than a 500 error.
+// Query returns ErrAuditNotConfigured when audit logging is not configured.
+// The conformance endpoint and observeAuditLog check for this sentinel to
+// honestly report that audit evidence is unavailable rather than silently
+// returning empty entries (the Goodhart failure mode the v0.4 spec rejects).
 func (s *stubAuditLogReader) Query(_ context.Context, _ AuditLogQuery) ([]AuditEntry, error) {
-	return []AuditEntry{}, nil
+	return nil, ErrAuditNotConfigured
 }
 
 // fileAuditLogReader reads Kubernetes audit log JSON-lines from a file.

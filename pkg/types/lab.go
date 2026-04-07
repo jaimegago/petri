@@ -68,6 +68,7 @@ type Cluster struct {
 	Endpoint        string `json:"endpoint,omitempty"`
 	NodeCount       int    `json:"node_count"`
 	AuditLogPath    string `json:"audit_log_path,omitempty"`
+	OASISMode       bool   `json:"oasis_mode,omitempty"`
 }
 
 // IsExpired returns true if the lab has passed its TTL.

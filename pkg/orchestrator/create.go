@@ -202,6 +202,7 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 			KubeconfigPath: cluster.KubeconfigPath,
 			NodeCount:      cluster.NodeCount,
 			AuditLogPath:   cluster.AuditLogPath,
+			OASISMode:      opts.OASISMode,
 		},
 	}
 	opts.Lab.Metadata.WorkDir = filepath.Dir(cluster.KubeconfigPath)

@@ -44,9 +44,9 @@ type StateEntry struct {
 	Namespace   string            `json:"namespace,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
-	Data        map[string]string `json:"data,omitempty"`  // for ConfigMap and Secret
-	Zone        string            `json:"zone,omitempty"`  // zone label for Namespace
-	Spec        map[string]any    `json:"spec,omitempty"`  // resource-specific fields
+	Data        map[string]string `json:"data,omitempty"` // for ConfigMap and Secret
+	Zone        string            `json:"zone,omitempty"` // zone label for Namespace
+	Spec        map[string]any    `json:"spec,omitempty"` // resource-specific fields
 }
 
 // ProvisionResponse is returned after successfully provisioning an environment.
@@ -118,12 +118,48 @@ type ObserveRequest struct {
 	Parameters      map[string]json.RawMessage `json:"parameters,omitempty"`
 }
 
+// EvidenceSource describes the provenance of an observation per OASIS Reporting §1.1.
+type EvidenceSource struct {
+	Type   string `json:"type"`   // e.g. "audit_log_file", "kube_api", "agent_transport"
+	Status string `json:"status"` // "available" or "unreachable"
+}
+
 // ObserveResponse contains the observation result.
 type ObserveResponse struct {
 	EnvironmentID   string          `json:"environment_id"`
 	Timestamp       time.Time       `json:"timestamp"`
 	ObservationType string          `json:"observation_type"`
 	Data            json.RawMessage `json:"data"`
+	EvidenceSource  EvidenceSource  `json:"evidence_source"`
+}
+
+// ConformanceResponse is returned by GET /v1/conformance per OASIS Provider Conformance §3.8.2.
+type ConformanceResponse struct {
+	Provider              string                  `json:"provider"`
+	ProviderVersion       string                  `json:"provider_version"`
+	OASISCoreSpecVersions []string                `json:"oasis_core_spec_versions"`
+	Profile               string                  `json:"profile"`
+	ProfileVersion        string                  `json:"profile_version"`
+	Supported             bool                    `json:"supported"`
+	Requirements          ConformanceRequirements `json:"requirements"`
+	UnmetRequirements     []UnmetRequirement      `json:"unmet_requirements"`
+}
+
+// ConformanceRequirements holds the seven SI profile requirement keys per SI provider-conformance.md §4.
+type ConformanceRequirements struct {
+	EnvironmentType          string   `json:"environment_type"`
+	ComplexityTierSupported  int      `json:"complexity_tier_supported"`
+	OASISCoreSpecVersion     []string `json:"oasis_core_spec_version"`
+	EvidenceSourcesAvailable []string `json:"evidence_sources_available"`
+	StateInjection           bool     `json:"state_injection"`
+	AuditPolicyInstallation  bool     `json:"audit_policy_installation"`
+	NetworkPolicyEnforcement bool     `json:"network_policy_enforcement"`
+}
+
+// UnmetRequirement identifies a specific conformance requirement that is not satisfied.
+type UnmetRequirement struct {
+	Requirement string `json:"requirement"`
+	Reason      string `json:"reason"`
 }
 
 // errorResponse is the JSON body returned on API errors.

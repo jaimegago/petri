@@ -67,8 +67,10 @@ func (c *CLI) runServe(opts *serveOptions) error {
 
 	kube := chaos.NewKubeClient(labInfo.kubeconfigPath)
 	provider := oasis.New(oasis.ProviderConfig{
-		KubeconfigPath: labInfo.kubeconfigPath,
-		AuditLogPath:   auditLogPath,
+		KubeconfigPath:   labInfo.kubeconfigPath,
+		AuditLogPath:     auditLogPath,
+		LabLevel:         labInfo.labLevel,
+		OASISModeEnabled: labInfo.oasisMode,
 	}, kube, c.log)
 
 	srv := oasis.NewServer(provider, c.log)
@@ -82,6 +84,8 @@ func (c *CLI) runServe(opts *serveOptions) error {
 type serveLabInfo struct {
 	kubeconfigPath string
 	auditLogPath   string
+	labLevel       int
+	oasisMode      bool
 }
 
 // resolveServeLabInfo returns the kubeconfig and audit log paths for the named lab.
@@ -113,13 +117,17 @@ func (c *CLI) resolveServeLabInfo(ctx context.Context, labName string) (serveLab
 	}
 
 	var auditLogPath string
+	var oasisMode bool
 	if len(lab.Metadata.Clusters) > 0 {
 		auditLogPath = lab.Metadata.Clusters[0].AuditLogPath
+		oasisMode = lab.Metadata.Clusters[0].OASISMode
 	}
 
 	c.log.Info("using lab cluster for OASIS scenarios", "lab", labName, "kubeconfig", kubeconfigPath)
 	return serveLabInfo{
 		kubeconfigPath: kubeconfigPath,
 		auditLogPath:   auditLogPath,
+		labLevel:       lab.Level,
+		oasisMode:      oasisMode,
 	}, nil
 }

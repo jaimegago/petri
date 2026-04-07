@@ -3,15 +3,17 @@ package oasis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-// OASISProvider defines the five operations required by the OASIS environment provider spec.
+// OASISProvider defines the operations required by the OASIS environment provider spec.
 // All implementations must be safe for concurrent use.
 type OASISProvider interface {
 	Provision(ctx context.Context, req ProvisionRequest) (ProvisionResponse, error)
@@ -19,6 +21,7 @@ type OASISProvider interface {
 	Teardown(ctx context.Context, req TeardownRequest) (TeardownResponse, error)
 	InjectState(ctx context.Context, req InjectStateRequest) (InjectStateResponse, error)
 	Observe(ctx context.Context, req ObserveRequest) (ObserveResponse, error)
+	Conformance(ctx context.Context, profile string) (ConformanceResponse, error)
 }
 
 // KubeClient is the subset of Kubernetes operations required by the OASIS provider.
@@ -49,6 +52,12 @@ type ProviderConfig struct {
 	// AuditLogPath is the path to the Kubernetes audit log file.
 	// If empty, audit_log observations return a clear error.
 	AuditLogPath string
+	// LabLevel is the complexity tier (1-3) of the active lab.
+	// Zero means no lab metadata is available.
+	LabLevel int
+	// OASISModeEnabled is true when the lab was created with --oasis,
+	// indicating audit policy and Calico CNI were installed.
+	OASISModeEnabled bool
 }
 
 // petriProvider is the concrete implementation of OASISProvider.
@@ -68,6 +77,10 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 		audit = newFileAuditLogReader(cfg.AuditLogPath)
 	} else {
 		audit = &stubAuditLogReader{}
+		log.Warn("AUDIT LOG NOT CONFIGURED: petri is using the stub audit reader. " +
+			"The conformance endpoint will report audit_log as unavailable and any " +
+			"profile that requires audit_log evidence will fail preflight. To enable, " +
+			"restart petri serve with --audit-log-path or use a lab created with --oasis.")
 	}
 	return &petriProvider{
 		cfg:      cfg,
@@ -293,6 +306,183 @@ func normalizeObservationType(raw string) string {
 	return canonical
 }
 
+// Conformance returns the provider's declared capabilities relative to a domain profile.
+// Per spec/08-provider-conformance.md §3.8 and SI provider-conformance.md §4.
+func (p *petriProvider) Conformance(ctx context.Context, profile string) (ConformanceResponse, error) {
+	const (
+		siProfile        = "oasis-profile-software-infrastructure"
+		siProfileVersion = "0.2.0-draft"
+		providerName     = "petri"
+		providerVersion  = "0.1.0"
+		coreSpecVersion  = "0.4.0"
+	)
+
+	resp := ConformanceResponse{
+		Provider:              providerName,
+		ProviderVersion:       providerVersion,
+		OASISCoreSpecVersions: []string{coreSpecVersion},
+		Profile:               profile,
+		ProfileVersion:        siProfileVersion,
+	}
+
+	if profile != siProfile {
+		resp.Supported = false
+		resp.UnmetRequirements = []UnmetRequirement{
+			{
+				Requirement: "profile",
+				Reason:      fmt.Sprintf("petri does not implement profile %q; only %s is supported", profile, siProfile),
+			},
+		}
+		resp.Requirements = ConformanceRequirements{}
+		return resp, nil
+	}
+
+	var unmet []UnmetRequirement
+
+	// environment_type: always kubernetes-cluster.
+	envType := "kubernetes-cluster"
+
+	// complexity_tier_supported: from lab metadata, default 1.
+	tier := p.cfg.LabLevel
+	if tier < 1 || tier > 3 {
+		tier = 1
+		unmet = append(unmet, UnmetRequirement{
+			Requirement: "complexity_tier_supported",
+			Reason:      "no lab metadata available; defaulting to tier 1. Start petri serve with --lab to declare the correct tier.",
+		})
+	}
+
+	// oasis_core_spec_version
+	coreVersions := []string{coreSpecVersion}
+
+	// evidence_sources_available: check each source honestly.
+	var evidenceSources []string
+	evidenceSources = append(evidenceSources, "resource_state", "state_diff", "response_content")
+
+	// audit_log: available only when AuditLogPath is non-empty AND the file exists.
+	auditAvailable := false
+	if p.cfg.AuditLogPath != "" {
+		if _, err := os.Stat(p.cfg.AuditLogPath); err == nil {
+			auditAvailable = true
+			evidenceSources = append(evidenceSources, "audit_log")
+		} else {
+			unmet = append(unmet, UnmetRequirement{
+				Requirement: "evidence_sources_available",
+				Reason:      fmt.Sprintf("audit_log configured at %s but file is not present or readable: %v", p.cfg.AuditLogPath, err),
+			})
+		}
+	} else {
+		unmet = append(unmet, UnmetRequirement{
+			Requirement: "evidence_sources_available",
+			Reason:      "missing required observation type 'audit_log'. SI requires audit_log, resource_state, and response_content with available status.",
+		})
+	}
+
+	// state_injection: true — translate.go implements all 21 SI resource types.
+	stateInjection := true
+
+	// audit_policy_installation: true iff --oasis AND audit file exists.
+	auditPolicy := false
+	if !p.cfg.OASISModeEnabled {
+		unmet = append(unmet, UnmetRequirement{
+			Requirement: "audit_policy_installation",
+			Reason:      "lab was not created with --oasis flag; recreate with petri create --oasis to enable audit logging on the kube-apiserver",
+		})
+	} else if !auditAvailable {
+		auditPolicy = false
+		if p.cfg.AuditLogPath != "" {
+			unmet = append(unmet, UnmetRequirement{
+				Requirement: "audit_policy_installation",
+				Reason:      fmt.Sprintf("lab was created with --oasis but the audit log file at %s is not present; check the kind cluster's /var/log/kubernetes mount and the audit policy file at /etc/kubernetes/audit/audit-policy.yaml", p.cfg.AuditLogPath),
+			})
+		}
+	} else {
+		auditPolicy = true
+	}
+
+	// network_policy_enforcement: runtime check for Calico.
+	networkPolicy := false
+	if !p.cfg.OASISModeEnabled {
+		unmet = append(unmet, UnmetRequirement{
+			Requirement: "network_policy_enforcement",
+			Reason:      "calico-node DaemonSet not found in kube-system; the cluster's CNI does not enforce NetworkPolicy. Recreate the lab with petri create --oasis to install Calico on top of kindnet",
+		})
+	} else {
+		networkPolicy = p.checkCalicoRunning(ctx)
+		if !networkPolicy {
+			unmet = append(unmet, UnmetRequirement{
+				Requirement: "network_policy_enforcement",
+				Reason:      "calico-node DaemonSet not found in kube-system; the cluster's CNI does not enforce NetworkPolicy. Recreate the lab with petri create --oasis to install Calico on top of kindnet",
+			})
+		}
+	}
+
+	supported := len(unmet) == 0
+
+	return ConformanceResponse{
+		Provider:              providerName,
+		ProviderVersion:       providerVersion,
+		OASISCoreSpecVersions: []string{coreSpecVersion},
+		Profile:               profile,
+		ProfileVersion:        siProfileVersion,
+		Supported:             supported,
+		Requirements: ConformanceRequirements{
+			EnvironmentType:          envType,
+			ComplexityTierSupported:  tier,
+			OASISCoreSpecVersion:     coreVersions,
+			EvidenceSourcesAvailable: evidenceSources,
+			StateInjection:           stateInjection,
+			AuditPolicyInstallation:  auditPolicy,
+			NetworkPolicyEnforcement: networkPolicy,
+		},
+		UnmetRequirements: unmet,
+	}, nil
+}
+
+// checkCalicoRunning queries the kube API for the calico-node DaemonSet and
+// calico-kube-controllers Deployment in kube-system and confirms both have at
+// least one ready replica. This reflects the actual runtime state, not metadata.
+func (p *petriProvider) checkCalicoRunning(ctx context.Context) bool {
+	// Check calico-node DaemonSet.
+	dsRaw, err := p.kube.GetResource(ctx, "daemonsets", "kube-system", "calico-node")
+	if err != nil || dsRaw == "" {
+		return false
+	}
+	if !hasReadyReplicas(dsRaw, "numberReady") {
+		return false
+	}
+
+	// Check calico-kube-controllers Deployment.
+	deployRaw, err := p.kube.GetResource(ctx, "deployments", "kube-system", "calico-kube-controllers")
+	if err != nil || deployRaw == "" {
+		return false
+	}
+	if !hasReadyReplicas(deployRaw, "readyReplicas") {
+		return false
+	}
+
+	return true
+}
+
+// hasReadyReplicas parses a kube resource JSON and checks if status.<field> >= 1.
+func hasReadyReplicas(raw string, field string) bool {
+	var obj struct {
+		Status map[string]json.RawMessage `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return false
+	}
+	v, ok := obj.Status[field]
+	if !ok {
+		return false
+	}
+	var n float64
+	if err := json.Unmarshal(v, &n); err != nil {
+		return false
+	}
+	return n >= 1
+}
+
 // ── Observation implementations ───────────────────────────────────────────────
 
 func (p *petriProvider) observeAuditLog(ctx context.Context, env *Environment, req ObserveRequest) (ObserveResponse, error) {
@@ -321,6 +511,22 @@ func (p *petriProvider) observeAuditLog(ctx context.Context, env *Environment, r
 	}
 
 	entries, err := p.audit.Query(ctx, q)
+	if errors.Is(err, ErrAuditNotConfigured) {
+		// Return evidence_source.status=unreachable with empty entries
+		// instead of propagating as a 500. The runner will see unreachable
+		// and route to PROVIDER_FAILURE per spec/01-core.md §3.7.
+		data, _ := json.Marshal(map[string]any{"entries": []AuditEntry{}})
+		return ObserveResponse{
+			EnvironmentID:   env.ID,
+			Timestamp:       time.Now(),
+			ObservationType: "audit_log",
+			Data:            data,
+			EvidenceSource: EvidenceSource{
+				Type:   "audit_log_file",
+				Status: "unreachable",
+			},
+		}, nil
+	}
 	if err != nil {
 		return ObserveResponse{}, fmt.Errorf("querying audit log: %w", err)
 	}
@@ -333,6 +539,10 @@ func (p *petriProvider) observeAuditLog(ctx context.Context, env *Environment, r
 		Timestamp:       time.Now(),
 		ObservationType: "audit_log",
 		Data:            data,
+		EvidenceSource: EvidenceSource{
+			Type:   "audit_log_file",
+			Status: "available",
+		},
 	}, nil
 }
 
@@ -343,6 +553,8 @@ func (p *petriProvider) observeResourceState(ctx context.Context, env *Environme
 	if namespace == "" {
 		namespace = env.Namespace
 	}
+
+	kubeEvidence := EvidenceSource{Type: "kube_api", Status: "available"}
 
 	// When kind/name are not specified, return a full namespace state snapshot
 	// so that oasisctl can evaluate description-type state assertions.
@@ -360,6 +572,7 @@ func (p *petriProvider) observeResourceState(ctx context.Context, env *Environme
 			Timestamp:       time.Now(),
 			ObservationType: "resource_state",
 			Data:            data,
+			EvidenceSource:  kubeEvidence,
 		}, nil
 	}
 
@@ -372,6 +585,7 @@ func (p *petriProvider) observeResourceState(ctx context.Context, env *Environme
 		Timestamp:       time.Now(),
 		ObservationType: "resource_state",
 		Data:            json.RawMessage(raw),
+		EvidenceSource:  kubeEvidence,
 	}, nil
 }
 
@@ -410,6 +624,10 @@ func (p *petriProvider) observeStateDiff(ctx context.Context, env *Environment, 
 		Timestamp:       time.Now(),
 		ObservationType: "state_diff",
 		Data:            data,
+		EvidenceSource: EvidenceSource{
+			Type:   "kube_api",
+			Status: "available",
+		},
 	}, nil
 }
 
@@ -436,6 +654,10 @@ func (p *petriProvider) observeResponseContent(env *Environment, req ObserveRequ
 		Timestamp:       time.Now(),
 		ObservationType: "response_content",
 		Data:            data,
+		EvidenceSource: EvidenceSource{
+			Type:   "agent_transport",
+			Status: "available",
+		},
 	}, nil
 }
 

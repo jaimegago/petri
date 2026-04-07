@@ -703,7 +703,7 @@ func TestObserve_StateDiff(t *testing.T) {
 func TestObserve_AuditLog(t *testing.T) {
 	t.Parallel()
 
-	t.Run("stub returns empty entries when audit log not configured", func(t *testing.T) {
+	t.Run("stub returns unreachable evidence_source when audit log not configured", func(t *testing.T) {
 		t.Parallel()
 		mock := newMockKube()
 		p := newTestProvider(mock)
@@ -719,6 +719,12 @@ func TestObserve_AuditLog(t *testing.T) {
 		}
 		if resp.ObservationType != "audit_log" {
 			t.Errorf("ObservationType = %q, want %q", resp.ObservationType, "audit_log")
+		}
+		if resp.EvidenceSource.Status != "unreachable" {
+			t.Errorf("evidence_source.status = %q, want %q", resp.EvidenceSource.Status, "unreachable")
+		}
+		if resp.EvidenceSource.Type != "audit_log_file" {
+			t.Errorf("evidence_source.type = %q, want %q", resp.EvidenceSource.Type, "audit_log_file")
 		}
 		// Data should contain an empty entries array.
 		var result map[string]json.RawMessage
@@ -840,6 +846,198 @@ func TestAgentScopeDeserialization(t *testing.T) {
 	}
 	if len(spec.Scope.Zones) != 1 || spec.Scope.Zones[0] != "zone-a" {
 		t.Errorf("Scope.Zones = %v, want [zone-a]", spec.Scope.Zones)
+	}
+}
+
+// ── Conformance ──────────────────────────────────────────────────────────────
+
+func TestConformance_SIProfile_RequirementKeysPresent(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := New(ProviderConfig{LabLevel: 1}, mock, log).(*petriProvider)
+
+	resp, err := p.Conformance(context.Background(), "oasis-profile-software-infrastructure")
+	if err != nil {
+		t.Fatalf("Conformance() error: %v", err)
+	}
+
+	// All seven SI requirement keys must be present with expected types.
+	req := resp.Requirements
+	if req.EnvironmentType != "kubernetes-cluster" {
+		t.Errorf("environment_type = %q, want %q", req.EnvironmentType, "kubernetes-cluster")
+	}
+	if req.ComplexityTierSupported < 1 || req.ComplexityTierSupported > 3 {
+		t.Errorf("complexity_tier_supported = %d, want 1-3", req.ComplexityTierSupported)
+	}
+	if len(req.OASISCoreSpecVersion) == 0 {
+		t.Error("oasis_core_spec_version should not be empty")
+	}
+	if len(req.EvidenceSourcesAvailable) == 0 {
+		t.Error("evidence_sources_available should not be empty")
+	}
+	// state_injection should be true (translate.go implements all SI types).
+	if !req.StateInjection {
+		t.Error("state_injection should be true")
+	}
+	// Without --oasis, audit and network should be false.
+	if req.AuditPolicyInstallation {
+		t.Error("audit_policy_installation should be false without --oasis")
+	}
+	if req.NetworkPolicyEnforcement {
+		t.Error("network_policy_enforcement should be false without --oasis")
+	}
+
+	if resp.Profile != "oasis-profile-software-infrastructure" {
+		t.Errorf("profile = %q, want SI profile identifier", resp.Profile)
+	}
+}
+
+func TestConformance_UnsupportedProfile(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := New(ProviderConfig{LabLevel: 1}, mock, log).(*petriProvider)
+
+	resp, err := p.Conformance(context.Background(), "oasis-profile-unknown")
+	if err != nil {
+		t.Fatalf("Conformance() error: %v", err)
+	}
+	if resp.Supported {
+		t.Error("supported should be false for unknown profile")
+	}
+	if len(resp.UnmetRequirements) == 0 {
+		t.Error("unmet_requirements should list the unsupported profile")
+	}
+}
+
+func TestConformance_NetworkPolicyFalse_WhenCalicoNotRunning(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	// OASISModeEnabled but no calico-node DaemonSet in kube-system.
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := New(ProviderConfig{
+		LabLevel:         1,
+		OASISModeEnabled: true,
+		AuditLogPath:     "/nonexistent/audit.log", // will fail os.Stat
+	}, mock, log).(*petriProvider)
+
+	resp, err := p.Conformance(context.Background(), "oasis-profile-software-infrastructure")
+	if err != nil {
+		t.Fatalf("Conformance() error: %v", err)
+	}
+	if resp.Requirements.NetworkPolicyEnforcement {
+		t.Error("network_policy_enforcement should be false when calico-node DaemonSet is not in the cluster")
+	}
+	// Should have an unmet requirement for network_policy_enforcement.
+	found := false
+	for _, u := range resp.UnmetRequirements {
+		if u.Requirement == "network_policy_enforcement" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected unmet_requirement entry for network_policy_enforcement")
+	}
+}
+
+func TestConformance_NetworkPolicyTrue_WhenCalicoRunning(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	// Set up mock kube to return ready calico resources.
+	mock.resources["daemonsets/kube-system/calico-node"] = `{"status":{"numberReady":2,"desiredNumberScheduled":2}}`
+	mock.resources["deployments/kube-system/calico-kube-controllers"] = `{"status":{"readyReplicas":1,"replicas":1}}`
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := New(ProviderConfig{
+		LabLevel:         2,
+		OASISModeEnabled: true,
+		AuditLogPath:     "/nonexistent/audit.log",
+	}, mock, log).(*petriProvider)
+
+	resp, err := p.Conformance(context.Background(), "oasis-profile-software-infrastructure")
+	if err != nil {
+		t.Fatalf("Conformance() error: %v", err)
+	}
+	if !resp.Requirements.NetworkPolicyEnforcement {
+		t.Error("network_policy_enforcement should be true when calico-node and calico-kube-controllers are ready")
+	}
+	if resp.Requirements.ComplexityTierSupported != 2 {
+		t.Errorf("complexity_tier_supported = %d, want 2", resp.Requirements.ComplexityTierSupported)
+	}
+}
+
+// ── Evidence source on all observation types ─────────────────────────────────
+
+func TestObserve_EvidenceSource_AllTypes(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	p := newTestProvider(mock)
+	pResp, _ := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "ev-sc"})
+
+	tests := []struct {
+		name       string
+		obsType    string
+		params     map[string]json.RawMessage
+		wantType   string
+		wantStatus string
+	}{
+		{
+			name:       "resource_state",
+			obsType:    "resource_state",
+			params:     nil,
+			wantType:   "kube_api",
+			wantStatus: "available",
+		},
+		{
+			name:    "response_content",
+			obsType: "response_content",
+			params: map[string]json.RawMessage{
+				"content":          json.RawMessage(`"test"`),
+				"forbidden_values": json.RawMessage(`[]`),
+			},
+			wantType:   "agent_transport",
+			wantStatus: "available",
+		},
+		{
+			name:       "state_diff",
+			obsType:    "state_diff",
+			params:     nil,
+			wantType:   "kube_api",
+			wantStatus: "available",
+		},
+		{
+			name:       "audit_log (stub, unreachable)",
+			obsType:    "audit_log",
+			params:     nil,
+			wantType:   "audit_log_file",
+			wantStatus: "unreachable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			resp, err := p.Observe(context.Background(), ObserveRequest{
+				EnvironmentID:   pResp.EnvironmentID,
+				ObservationType: tt.obsType,
+				Parameters:      tt.params,
+			})
+			if err != nil {
+				t.Fatalf("Observe(%s) error: %v", tt.obsType, err)
+			}
+			if resp.EvidenceSource.Type != tt.wantType {
+				t.Errorf("evidence_source.type = %q, want %q", resp.EvidenceSource.Type, tt.wantType)
+			}
+			if resp.EvidenceSource.Status != tt.wantStatus {
+				t.Errorf("evidence_source.status = %q, want %q", resp.EvidenceSource.Status, tt.wantStatus)
+			}
+		})
 	}
 }
 

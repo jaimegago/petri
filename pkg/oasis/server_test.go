@@ -15,12 +15,13 @@ import (
 
 // mockOASISProvider is a test double for OASISProvider.
 type mockOASISProvider struct {
-	provisionResp ProvisionResponse
-	snapshotResp  StateSnapshotResponse
-	teardownResp  TeardownResponse
-	injectResp    InjectStateResponse
-	observeResp   ObserveResponse
-	err           error
+	provisionResp   ProvisionResponse
+	snapshotResp    StateSnapshotResponse
+	teardownResp    TeardownResponse
+	injectResp      InjectStateResponse
+	observeResp     ObserveResponse
+	conformanceResp ConformanceResponse
+	err             error
 }
 
 func (m *mockOASISProvider) Provision(_ context.Context, _ ProvisionRequest) (ProvisionResponse, error) {
@@ -41,6 +42,10 @@ func (m *mockOASISProvider) InjectState(_ context.Context, _ InjectStateRequest)
 
 func (m *mockOASISProvider) Observe(_ context.Context, _ ObserveRequest) (ObserveResponse, error) {
 	return m.observeResp, m.err
+}
+
+func (m *mockOASISProvider) Conformance(_ context.Context, _ string) (ConformanceResponse, error) {
+	return m.conformanceResp, m.err
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
@@ -321,7 +326,7 @@ func TestServer_ObserveRegression(t *testing.T) {
 		}
 	})
 
-	t.Run("audit_log returns 200", func(t *testing.T) {
+	t.Run("audit_log returns 200 with unreachable evidence_source when stub", func(t *testing.T) {
 		t.Parallel()
 		obsReq := map[string]any{
 			"environment_id":   envID,
@@ -338,8 +343,11 @@ func TestServer_ObserveRegression(t *testing.T) {
 		if resp.ObservationType != "audit_log" {
 			t.Errorf("ObservationType = %q, want %q", resp.ObservationType, "audit_log")
 		}
-		if len(resp.Data) == 0 {
-			t.Error("observe audit_log returned empty data")
+		if resp.EvidenceSource.Status != "unreachable" {
+			t.Errorf("evidence_source.status = %q, want %q", resp.EvidenceSource.Status, "unreachable")
+		}
+		if resp.EvidenceSource.Type != "audit_log_file" {
+			t.Errorf("evidence_source.type = %q, want %q", resp.EvidenceSource.Type, "audit_log_file")
 		}
 	})
 }
@@ -410,6 +418,56 @@ func TestLoggingMiddleware_SuccessNoBody(t *testing.T) {
 			t.Errorf("log output missing %q\ngot: %s", want, logged)
 		}
 	}
+}
+
+func TestServer_Conformance(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns 200 with SI requirements for known profile", func(t *testing.T) {
+		t.Parallel()
+		mock := &mockOASISProvider{
+			conformanceResp: ConformanceResponse{
+				Provider:              "petri",
+				ProviderVersion:       "0.1.0",
+				OASISCoreSpecVersions: []string{"0.4.0"},
+				Profile:               "oasis-profile-software-infrastructure",
+				ProfileVersion:        "0.2.0-draft",
+				Supported:             false,
+				Requirements: ConformanceRequirements{
+					EnvironmentType:          "kubernetes-cluster",
+					ComplexityTierSupported:  1,
+					OASISCoreSpecVersion:     []string{"0.4.0"},
+					EvidenceSourcesAvailable: []string{"resource_state", "state_diff", "response_content"},
+					StateInjection:           true,
+					AuditPolicyInstallation:  false,
+					NetworkPolicyEnforcement: false,
+				},
+			},
+		}
+		srv := NewServer(mock, noopLogger())
+		w := getRequest(t, srv.Handler(), "/v1/conformance?profile=oasis-profile-software-infrastructure")
+
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want %d, body = %s", w.Code, http.StatusOK, w.Body.String())
+		}
+		var resp ConformanceResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if resp.Requirements.EnvironmentType != "kubernetes-cluster" {
+			t.Errorf("environment_type = %q, want %q", resp.Requirements.EnvironmentType, "kubernetes-cluster")
+		}
+	})
+
+	t.Run("returns 400 when profile query param missing", func(t *testing.T) {
+		t.Parallel()
+		srv := NewServer(&mockOASISProvider{}, noopLogger())
+		w := getRequest(t, srv.Handler(), "/v1/conformance")
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+	})
 }
 
 func TestServer_ContentType(t *testing.T) {
