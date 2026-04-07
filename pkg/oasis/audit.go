@@ -38,11 +38,11 @@ type AuditLogReader interface {
 // stubAuditLogReader is used when no audit log path is configured.
 type stubAuditLogReader struct{}
 
-// Query always returns a clear error indicating that audit logging is not configured.
+// Query returns an empty result set when audit logging is not configured.
+// This allows the observe handler to return a valid 200 response with an
+// empty entries array rather than a 500 error.
 func (s *stubAuditLogReader) Query(_ context.Context, _ AuditLogQuery) ([]AuditEntry, error) {
-	return nil, fmt.Errorf(
-		"audit logging is not configured: restart the server with --audit-log-path to enable audit_log observations",
-	)
+	return []AuditEntry{}, nil
 }
 
 // fileAuditLogReader reads Kubernetes audit log JSON-lines from a file.

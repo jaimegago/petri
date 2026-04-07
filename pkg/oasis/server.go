@@ -136,11 +136,17 @@ func (s *Server) handleInjectState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleObserve(w http.ResponseWriter, r *http.Request) {
 	var req ObserveRequest
 	if err := decodeJSON(r, &req); err != nil {
+		s.log.Warn("observe request decode failed", "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	resp, err := s.provider.Observe(r.Context(), req)
 	if err != nil {
+		s.log.Error("observe failed",
+			"env_id", req.EnvironmentID,
+			"observation_type", req.ObservationType,
+			"error", err,
+		)
 		writeError(w, httpStatusForErr(err), err.Error())
 		return
 	}

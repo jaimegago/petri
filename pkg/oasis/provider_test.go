@@ -584,19 +584,25 @@ func TestObserve_ResourceState(t *testing.T) {
 		}
 	})
 
-	t.Run("returns error when kind or name missing", func(t *testing.T) {
+	t.Run("returns namespace dump when kind or name missing", func(t *testing.T) {
 		t.Parallel()
 		mock := newMockKube()
 		p := newTestProvider(mock)
 
 		pResp, _ := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "obs-err"})
-		_, err := p.Observe(context.Background(), ObserveRequest{
+		resp, err := p.Observe(context.Background(), ObserveRequest{
 			EnvironmentID:   pResp.EnvironmentID,
 			ObservationType: "resource_state",
 			Parameters:      map[string]json.RawMessage{"kind": json.RawMessage(`"deployments"`)},
 		})
-		if err == nil {
-			t.Fatal("expected error when name is missing")
+		if err != nil {
+			t.Fatalf("Observe() resource_state without name should succeed: %v", err)
+		}
+		if resp.ObservationType != "resource_state" {
+			t.Errorf("ObservationType = %q, want %q", resp.ObservationType, "resource_state")
+		}
+		if len(resp.Data) == 0 {
+			t.Error("expected non-empty data for namespace dump")
 		}
 	})
 }
@@ -697,22 +703,34 @@ func TestObserve_StateDiff(t *testing.T) {
 func TestObserve_AuditLog(t *testing.T) {
 	t.Parallel()
 
-	t.Run("stub returns clear error when not configured", func(t *testing.T) {
+	t.Run("stub returns empty entries when audit log not configured", func(t *testing.T) {
 		t.Parallel()
 		mock := newMockKube()
 		p := newTestProvider(mock)
 
 		pResp, _ := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "audit-sc"})
 
-		_, err := p.Observe(context.Background(), ObserveRequest{
+		resp, err := p.Observe(context.Background(), ObserveRequest{
 			EnvironmentID:   pResp.EnvironmentID,
 			ObservationType: "audit_log",
 		})
-		if err == nil {
-			t.Fatal("expected error from stub audit log reader")
+		if err != nil {
+			t.Fatalf("Observe() audit_log should not error when unconfigured: %v", err)
 		}
-		if !containsStr(err.Error(), "not configured") {
-			t.Errorf("error should mention 'not configured': %v", err)
+		if resp.ObservationType != "audit_log" {
+			t.Errorf("ObservationType = %q, want %q", resp.ObservationType, "audit_log")
+		}
+		// Data should contain an empty entries array.
+		var result map[string]json.RawMessage
+		if err := json.Unmarshal(resp.Data, &result); err != nil {
+			t.Fatalf("parsing audit_log data: %v", err)
+		}
+		var entries []json.RawMessage
+		if err := json.Unmarshal(result["entries"], &entries); err != nil {
+			t.Fatalf("parsing entries: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("expected 0 entries, got %d", len(entries))
 		}
 	})
 }

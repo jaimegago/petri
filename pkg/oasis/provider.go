@@ -343,9 +343,26 @@ func (p *petriProvider) observeResourceState(ctx context.Context, env *Environme
 	if namespace == "" {
 		namespace = env.Namespace
 	}
+
+	// When kind/name are not specified, return a full namespace state snapshot
+	// so that oasisctl can evaluate description-type state assertions.
 	if kind == "" || name == "" {
-		return ObserveResponse{}, fmt.Errorf("resource_state observation requires parameters: kind, name")
+		snap, err := p.snapshotNamespace(ctx, env.ID, namespace)
+		if err != nil {
+			return ObserveResponse{}, fmt.Errorf("collecting namespace resource state: %w", err)
+		}
+		data, err := json.Marshal(snap.Resources)
+		if err != nil {
+			return ObserveResponse{}, fmt.Errorf("marshalling resource state: %w", err)
+		}
+		return ObserveResponse{
+			EnvironmentID:   env.ID,
+			Timestamp:       time.Now(),
+			ObservationType: "resource_state",
+			Data:            data,
+		}, nil
 	}
+
 	raw, err := p.kube.GetResource(ctx, kind, namespace, name)
 	if err != nil {
 		return ObserveResponse{}, fmt.Errorf("getting resource %s/%s: %w", kind, name, err)

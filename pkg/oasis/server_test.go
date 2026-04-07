@@ -13,12 +13,12 @@ import (
 
 // mockOASISProvider is a test double for OASISProvider.
 type mockOASISProvider struct {
-	provisionResp     ProvisionResponse
-	snapshotResp      StateSnapshotResponse
-	teardownResp      TeardownResponse
-	injectResp        InjectStateResponse
-	observeResp       ObserveResponse
-	err               error
+	provisionResp ProvisionResponse
+	snapshotResp  StateSnapshotResponse
+	teardownResp  TeardownResponse
+	injectResp    InjectStateResponse
+	observeResp   ObserveResponse
+	err           error
 }
 
 func (m *mockOASISProvider) Provision(_ context.Context, _ ProvisionRequest) (ProvisionResponse, error) {
@@ -247,6 +247,106 @@ func TestServer_Observe(t *testing.T) {
 			t.Errorf("ObservationType = %q, want %q", resp.ObservationType, "resource_state")
 		}
 	})
+}
+
+// TestServer_ObserveRegression exercises /v1/observe through the full HTTP
+// handler stack with a real provider and a freshly provisioned environment.
+// Both resource_state and audit_log must return 200 with non-empty body.
+// This catches regressions where observe returns 500 for valid env_ids.
+func TestServer_ObserveRegression(t *testing.T) {
+	t.Parallel()
+
+	// Wire up a real provider with a mock kube client.
+	mock := newMockKubeForServer()
+	provider := New(ProviderConfig{}, mock, noopLogger())
+	srv := NewServer(provider, noopLogger())
+	handler := srv.Handler()
+
+	// Provision an environment through the HTTP layer.
+	provReq := map[string]any{
+		"scenario_id": "regression-observe",
+		"environment": map[string]any{
+			"type": "kubernetes-cluster",
+			"state": []map[string]any{
+				{
+					"kind": "configmap",
+					"name": "test-config",
+					"data": map[string]string{"KEY": "value"},
+				},
+			},
+		},
+	}
+	w := postJSON(t, handler, "/v1/provision", provReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("provision status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var provResp ProvisionResponse
+	if err := json.NewDecoder(w.Body).Decode(&provResp); err != nil {
+		t.Fatalf("decoding provision response: %v", err)
+	}
+	envID := provResp.EnvironmentID
+	if envID == "" {
+		t.Fatal("provision returned empty environment_id")
+	}
+
+	t.Run("resource_state with params returns 200", func(t *testing.T) {
+		t.Parallel()
+		obsReq := map[string]any{
+			"environment_id":   envID,
+			"observation_type": "resource_state",
+			"parameters": map[string]any{
+				"kind": "configmaps",
+				"name": "test-config",
+			},
+		}
+		w := postJSON(t, handler, "/v1/observe", obsReq)
+		// The mock returns empty string for unknown resources (not an error),
+		// so the handler should still return 200.
+		if w.Code != http.StatusOK {
+			t.Fatalf("observe resource_state status = %d, body = %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("resource_state without params returns 200", func(t *testing.T) {
+		t.Parallel()
+		obsReq := map[string]any{
+			"environment_id":   envID,
+			"observation_type": "resource_state",
+		}
+		w := postJSON(t, handler, "/v1/observe", obsReq)
+		if w.Code != http.StatusOK {
+			t.Fatalf("observe resource_state (no params) status = %d, body = %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("audit_log returns 200", func(t *testing.T) {
+		t.Parallel()
+		obsReq := map[string]any{
+			"environment_id":   envID,
+			"observation_type": "audit_log",
+		}
+		w := postJSON(t, handler, "/v1/observe", obsReq)
+		if w.Code != http.StatusOK {
+			t.Fatalf("observe audit_log status = %d, body = %s", w.Code, w.Body.String())
+		}
+		var resp ObserveResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decoding observe response: %v", err)
+		}
+		if resp.ObservationType != "audit_log" {
+			t.Errorf("ObservationType = %q, want %q", resp.ObservationType, "audit_log")
+		}
+		if len(resp.Data) == 0 {
+			t.Error("observe audit_log returned empty data")
+		}
+	})
+}
+
+// newMockKubeForServer returns a mockKubeClient usable by server-level tests.
+// It is defined here (in the server_test.go file) because server_test.go is in
+// the same package and can access unexported types from mock_test.go.
+func newMockKubeForServer() *mockKubeClient {
+	return newMockKube()
 }
 
 func TestServer_ContentType(t *testing.T) {
