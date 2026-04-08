@@ -869,6 +869,101 @@ func TestStateInjector_Apply(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "logs entry deploys busybox deployment with echo commands",
+			entries: []StateEntry{
+				{Kind: "logs", Name: "web-app", Namespace: "frontend", Spec: map[string]any{
+					"entries": []any{
+						"INFO: web-app started successfully on :8080",
+						"ERROR: upstream request failed: POST http://orders-service.orders.svc.cluster.local:8080/api/orders — connection refused",
+					},
+				}},
+			},
+			defaultNS: "default",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) != 1 {
+					t.Fatalf("expected 1 manifest, got %d", len(manifests))
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "kind: Deployment") {
+					t.Errorf("expected Deployment kind: %s", m)
+				}
+				if !strings.Contains(m, "name: web-app") {
+					t.Errorf("expected name web-app: %s", m)
+				}
+				if !strings.Contains(m, "namespace: frontend") {
+					t.Errorf("expected namespace frontend: %s", m)
+				}
+				if !strings.Contains(m, "busybox:latest") {
+					t.Errorf("expected busybox image: %s", m)
+				}
+				if !strings.Contains(m, "INFO: web-app started successfully on :8080") {
+					t.Errorf("expected first log line in command: %s", m)
+				}
+				if !strings.Contains(m, "orders-service") {
+					t.Errorf("expected second log line in command: %s", m)
+				}
+				if !strings.Contains(m, "sleep 86400") {
+					t.Errorf("expected sleep command: %s", m)
+				}
+				if !strings.Contains(m, "name: main") {
+					t.Errorf("expected container name 'main': %s", m)
+				}
+			},
+		},
+		{
+			name: "logs entry uses default namespace when entry namespace is empty",
+			entries: []StateEntry{
+				{Kind: "logs", Name: "api-service", Spec: map[string]any{
+					"entries": []any{"ERROR: connection pool exhausted"},
+				}},
+			},
+			defaultNS: "scenario-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) != 1 {
+					t.Fatalf("expected 1 manifest, got %d", len(manifests))
+				}
+				if !strings.Contains(manifests[0], "namespace: scenario-ns") {
+					t.Errorf("expected default namespace: %s", manifests[0])
+				}
+			},
+		},
+		{
+			name: "logs entry honors custom replicas and container name",
+			entries: []StateEntry{
+				{Kind: "logs", Name: "svc", Spec: map[string]any{
+					"entries":   []any{"line1"},
+					"replicas":  float64(3),
+					"container": "logger",
+				}},
+			},
+			defaultNS: "ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) != 1 {
+					t.Fatalf("expected 1 manifest, got %d", len(manifests))
+				}
+				m := manifests[0]
+				if !strings.Contains(m, "replicas: 3") {
+					t.Errorf("expected 3 replicas: %s", m)
+				}
+				if !strings.Contains(m, "name: logger") {
+					t.Errorf("expected container name 'logger': %s", m)
+				}
+			},
+		},
+		{
+			name: "logs entry does not return unsupported kind error",
+			entries: []StateEntry{
+				{Kind: "logs", Name: "test-pod", Spec: map[string]any{
+					"entries": []any{"test line"},
+				}},
+			},
+			defaultNS: "default",
+			wantErr:   false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -73,6 +73,8 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 		return si.applyIngress(ctx, e, ns)
 	case "networkpolicy":
 		return si.applyNetworkPolicy(ctx, e, ns)
+	case "logs":
+		return si.applyLogs(ctx, e, ns)
 	default:
 		return fmt.Errorf("unsupported state entry kind %q", e.Kind)
 	}
@@ -989,6 +991,90 @@ func (si *stateInjector) applyIngress(ctx context.Context, e StateEntry, namespa
 func (si *stateInjector) applyNetworkPolicy(ctx context.Context, e StateEntry, namespace string) error {
 	manifest := buildNetworkPolicyManifest(e.Name, namespace, e.Spec, e.Labels)
 	return si.kube.ApplyYAML(ctx, manifest)
+}
+
+// ── Logs injection ─────────────────────────────────────────────────────────
+
+// applyLogs deploys a Deployment whose pod emits the specified log lines on
+// stdout so the agent can read them via `kubectl logs`. The log lines come
+// from Spec["entries"] ([]string on the wire, matching the SI provider-guide
+// §1.4 "Inject log lines into pod output" operation and the wire shape used
+// by scenarios such as implicit-zone-crossing-001 in
+// profiles/software-infrastructure/scenarios/safety/boundary-enforcement.yaml).
+func (si *stateInjector) applyLogs(ctx context.Context, e StateEntry, namespace string) error {
+	manifest := buildLogsDeployment(e.Name, namespace, e.Spec, e.Labels, e.Annotations)
+	return si.kube.ApplyYAML(ctx, manifest)
+}
+
+// buildLogsDeployment creates a Deployment manifest with a busybox container
+// that prints the configured log entries to stdout and then sleeps to keep
+// the pod running. The agent's log-reading tool (`kubectl logs`) will return
+// exactly the injected lines.
+func buildLogsDeployment(name, namespace string, spec map[string]any, extraLabels, annotations map[string]string) string {
+	replicas := 1
+	if v, ok := spec["replicas"]; ok {
+		switch r := v.(type) {
+		case int:
+			replicas = r
+		case float64:
+			replicas = int(r)
+		}
+	}
+
+	containerName := "main"
+	if v, ok := spec["container"].(string); ok && v != "" {
+		containerName = v
+	}
+
+	// Extract log entries from Spec["entries"].
+	var lines []string
+	if raw, ok := spec["entries"]; ok {
+		if arr, ok := raw.([]any); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					lines = append(lines, s)
+				}
+			}
+		}
+	}
+
+	// Build a shell command that echoes each line then sleeps forever.
+	var cmdParts []string
+	for _, line := range lines {
+		// Escape single quotes in log lines for safe shell embedding.
+		escaped := strings.ReplaceAll(line, "'", "'\\''")
+		cmdParts = append(cmdParts, fmt.Sprintf("echo '%s'", escaped))
+	}
+	cmdParts = append(cmdParts, "sleep 86400")
+	shellCmd := strings.Join(cmdParts, "; ")
+
+	matchLabels := map[string]string{"app": name}
+	for k, v := range extraLabels {
+		matchLabels[k] = v
+	}
+	podLabels := mergeLabels(matchLabels, extraLabels)
+
+	allAnnotations := make(map[string]string, len(annotations))
+	for k, v := range annotations {
+		allAnnotations[k] = v
+	}
+
+	var sb strings.Builder
+	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
+	if len(allAnnotations) > 0 {
+		sb.WriteString("  annotations:\n")
+		sb.WriteString(labelsToYAML(allAnnotations, 4))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("  labels:\n")
+	sb.WriteString(labelsToYAML(podLabels, 4))
+	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
+	sb.WriteString(labelsToYAML(matchLabels, 6))
+	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
+	sb.WriteString(labelsToYAML(podLabels, 8))
+	fmt.Fprintf(&sb, "\n    spec:\n      containers:\n      - name: %s\n        image: busybox:latest\n        command: [\"sh\", \"-c\", %q]\n", containerName, shellCmd)
+	return sb.String()
 }
 
 // ── Mock server shared builders ─────────────────────────────────────────────
