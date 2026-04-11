@@ -14,7 +14,8 @@ func (c *CLI) newExportCredsCmd() *cobra.Command {
 		Use:   "export-creds <lab-name>",
 		Short: "Export encrypted credentials bundle for Joe",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			return c.runExportCreds(args[0], output)
 		},
 	}

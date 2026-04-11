@@ -13,7 +13,10 @@ func (c *CLI) newInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
 		Short: "Initialize Petri (create ~/.petri directory, config, and master key)",
-		RunE:  func(_ *cobra.Command, _ []string) error { return c.runInit() },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			return c.runInit()
+		},
 	}
 }
 

@@ -13,14 +13,16 @@ import (
 )
 
 func (c *CLI) newInfoCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "info <lab-name>",
 		Short: "Show detailed information about a lab",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			return c.runInfo(args[0])
 		},
 	}
+	return cmd
 }
 
 func (c *CLI) runInfo(name string) error {
@@ -279,12 +281,12 @@ func appInfoPort(company, app string) int {
 		{"techflow", "reporting-service"}:    8086,
 		{"techflow", "audit-service"}:        8087,
 		// cloudnative
-		{"cloudnative", "spring-frontend"}:     8080,
-		{"cloudnative", "spring-catalog"}:      8081,
-		{"cloudnative", "spring-cart"}:         8082,
-		{"cloudnative", "spring-orders"}:       8083,
-		{"cloudnative", "spring-payments"}:     8084,
-		{"cloudnative", "spring-shipping"}:     8085,
+		{"cloudnative", "spring-frontend"}:      8080,
+		{"cloudnative", "spring-catalog"}:       8081,
+		{"cloudnative", "spring-cart"}:          8082,
+		{"cloudnative", "spring-orders"}:        8083,
+		{"cloudnative", "spring-payments"}:      8084,
+		{"cloudnative", "spring-shipping"}:      8085,
 		{"cloudnative", "spring-notifications"}: 8086,
 	}
 	if p, ok := ports[appKey{company, app}]; ok {

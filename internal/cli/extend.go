@@ -16,7 +16,8 @@ func (c *CLI) newExtendCmd() *cobra.Command {
 		Use:   "extend <lab-name>",
 		Short: "Extend the TTL of a lab",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			return c.runExtend(args[0], ttl)
 		},
 	}

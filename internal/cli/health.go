@@ -13,7 +13,10 @@ func (c *CLI) newHealthCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "health",
 		Short: "Check Petri dependencies and connectivity",
-		RunE:  func(_ *cobra.Command, _ []string) error { return c.runHealth() },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			return c.runHealth()
+		},
 	}
 }
 

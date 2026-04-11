@@ -40,7 +40,8 @@ Examples:
   petri create --company=acme --level=1 --local --name=my-lab
   petri create --company=acme --level=2 --name=aws-lab --ttl=4h
   petri create --company=techflow --level=3 --name=azure-lab`,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
 			return c.runCreate(opts)
 		},
 	}

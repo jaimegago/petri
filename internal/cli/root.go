@@ -68,6 +68,7 @@ func (c *CLI) newRootCmd() *cobra.Command {
 an LLM-based infrastructure copilot. Each lab includes Kubernetes clusters,
 applications, IaC repositories with realistic git history, and observability stacks.`,
 		Version:           version,
+		SilenceErrors:     true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error { return c.initialize(cmd.Name()) },
 	}
 

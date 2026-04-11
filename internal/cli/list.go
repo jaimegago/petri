@@ -26,7 +26,8 @@ func (c *CLI) newListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List labs",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
 			return c.runList(filterCompany, filterLevel, filterStatus, aliveOnly, format)
 		},
 	}

@@ -16,7 +16,8 @@ func (c *CLI) newCleanupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cleanup",
 		Short: "Clean up expired or orphaned labs",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
 			return c.runCleanup(expired)
 		},
 	}

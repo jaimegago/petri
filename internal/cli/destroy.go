@@ -19,7 +19,8 @@ func (c *CLI) newDestroyCmd() *cobra.Command {
 		Use:   "destroy <lab-name>",
 		Short: "Destroy a lab and all its resources",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			return c.runDestroy(args[0], force)
 		},
 	}

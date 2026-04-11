@@ -40,6 +40,7 @@ PowerShell:
 		ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
 		Args:                  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
 			root := cmd.Root()
 			switch args[0] {
 			case "bash":

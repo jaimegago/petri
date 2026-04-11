@@ -32,7 +32,8 @@ environments for AI infrastructure copilot assessment.
 Typical workflow:
   petri create --name oasis-lab --company acme --level 1 --local
   petri serve --lab oasis-lab --listen :8090`,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
 			return c.runServe(opts)
 		},
 	}
