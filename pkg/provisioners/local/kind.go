@@ -42,10 +42,9 @@ func (k *cliKind) listClusters(ctx context.Context) ([]string, error) {
 const defaultNodeImage = "kindest/node:v1.35.0"
 
 // CalicoCNIManifestURL is the Calico manifest applied to OASIS kind clusters
-// to enable NetworkPolicy enforcement. kindnet (the kind default CNI) does not
-// support NetworkPolicy, so Calico is layered on top when OASIS mode is active.
-// kindnet bootstraps basic pod networking immediately; Calico takes over CNI
-// configuration and provides NetworkPolicy support once its daemonset is ready.
+// to enable NetworkPolicy enforcement. The kind default CNI (kindnet) is
+// disabled via disableDefaultCNI in the cluster config, making Calico the sole
+// CNI plugin from cluster creation.
 const CalicoCNIManifestURL = "https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml"
 
 // oasisAuditPolicy returns a Kubernetes audit policy YAML that logs at
@@ -97,6 +96,7 @@ func kindClusterConfigWithAudit(nodeCount int, auditPolicyHostPath, auditLogHost
 	b.WriteString("kind: Cluster\n")
 	b.WriteString("apiVersion: kind.x-k8s.io/v1alpha4\n")
 	b.WriteString("networking:\n")
+	b.WriteString("  disableDefaultCNI: true\n")
 	b.WriteString("  podSubnet: 192.168.0.0/16\n")
 	b.WriteString("nodes:\n")
 	b.WriteString("- role: control-plane\n")

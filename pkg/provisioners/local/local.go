@@ -165,10 +165,9 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		return nil, fmt.Errorf("creating kind cluster %q: %w", opts.Name, err)
 	}
 
-	// In OASIS mode Calico is layered on top of kindnet to provide
-	// NetworkPolicy enforcement. kindnet bootstraps basic pod networking
-	// immediately; Calico takes over CNI configuration once its daemonset
-	// rolls out. Apply the Calico manifest and wait for readiness.
+	// In OASIS mode the kind default CNI (kindnet) is disabled and Calico
+	// is installed as the sole CNI plugin to provide NetworkPolicy
+	// enforcement. Apply the Calico manifest and wait for readiness.
 	if opts.OASISMode {
 		if _, statErr := os.Stat(kubeconfigPath); statErr == nil {
 			if err := runCmd(ctx, "kubectl", "--kubeconfig", kubeconfigPath,
@@ -275,9 +274,8 @@ func waitForCalico(ctx context.Context, kubeconfigPath string) error {
 
 	// Brief stabilization delay: Calico's networking plumbing (IPAM, Felix
 	// route programming) can take a few seconds to fully converge after the
-	// daemonset reports Ready. kindnet provides baseline networking so pods
-	// can start immediately, but this pause lets Calico finish taking over
-	// CNI configuration before the smoke test.
+	// daemonset reports Ready. This pause lets Calico finish setting up CNI
+	// configuration before the smoke test.
 	time.Sleep(5 * time.Second)
 
 	// Smoke-test: create a throwaway pod and verify it reaches Running.
