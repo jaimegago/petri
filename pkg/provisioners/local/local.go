@@ -288,8 +288,7 @@ func waitForCalico(ctx context.Context, kubeconfigPath string) error {
 	_ = kube("delete", "pod", smokePod, "-n", smokeNS, "--ignore-not-found")
 
 	if err := kube("run", smokePod, "-n", smokeNS,
-		"--image", "busybox:1.36", "--restart=Never",
-		"--command", "--", "sleep", "300"); err != nil {
+		"--image", "registry.k8s.io/pause:3.10", "--restart=Never"); err != nil {
 		return fmt.Errorf("creating CNI smoke-test pod: %w", err)
 	}
 	defer func() {
