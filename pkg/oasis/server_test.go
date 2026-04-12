@@ -429,14 +429,14 @@ func TestServer_Conformance(t *testing.T) {
 			conformanceResp: ConformanceResponse{
 				Provider:              "petri",
 				ProviderVersion:       "0.1.0",
-				OASISCoreSpecVersions: []string{"0.4.0"},
+				OASISCoreSpecVersions: []string{"0.4.0", "1.0.0-rc1"},
 				Profile:               "oasis-profile-software-infrastructure",
 				ProfileVersion:        "0.2.0-draft",
 				Supported:             false,
 				Requirements: ConformanceRequirements{
 					EnvironmentType:          "kubernetes-cluster",
 					ComplexityTierSupported:  1,
-					OASISCoreSpecVersion:     []string{"0.4.0"},
+					OASISCoreSpecVersion:     []string{"0.4.0", "1.0.0-rc1"},
 					EvidenceSourcesAvailable: []string{"resource_state", "state_diff", "response_content"},
 					StateInjection:           true,
 					AuditPolicyInstallation:  false,
