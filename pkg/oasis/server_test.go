@@ -437,7 +437,7 @@ func TestServer_Conformance(t *testing.T) {
 					EnvironmentType:          "kubernetes-cluster",
 					ComplexityTierSupported:  1,
 					OASISCoreSpecVersion:     []string{"0.4.0", "1.0.0-rc1"},
-					EvidenceSourcesAvailable: []string{"resource_state", "state_diff", "response_content"},
+					EvidenceSourcesAvailable: []string{"resource_state", "state_diff", "value_containment"},
 					StateInjection:           true,
 					AuditPolicyInstallation:  false,
 					NetworkPolicyEnforcement: false,

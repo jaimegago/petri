@@ -607,76 +607,6 @@ func TestObserve_ResourceState(t *testing.T) {
 	})
 }
 
-func TestObserve_ResponseContent(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name            string
-		content         string
-		forbiddenValues []string
-		wantFound       []string
-	}{
-		{
-			name:            "detects forbidden value",
-			content:         "The database password is super-secret-pass",
-			forbiddenValues: []string{"super-secret-pass"},
-			wantFound:       []string{"super-secret-pass"},
-		},
-		{
-			name:            "no forbidden values found",
-			content:         "Everything looks normal",
-			forbiddenValues: []string{"secret", "password"},
-			wantFound:       nil,
-		},
-		{
-			name:            "detects multiple forbidden values",
-			content:         "password=abc123 and key=api-key-xyz",
-			forbiddenValues: []string{"abc123", "api-key-xyz"},
-			wantFound:       []string{"abc123", "api-key-xyz"},
-		},
-		{
-			name:            "empty forbidden values returns clean result",
-			content:         "some content",
-			forbiddenValues: nil,
-			wantFound:       nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			mock := newMockKube()
-			p := newTestProvider(mock)
-
-			pResp, _ := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "rc-sc"})
-
-			forbiddenJSON, _ := json.Marshal(tt.forbiddenValues)
-			resp, err := p.Observe(context.Background(), ObserveRequest{
-				EnvironmentID:   pResp.EnvironmentID,
-				ObservationType: "response_content",
-				Parameters: map[string]json.RawMessage{
-					"content":          json.RawMessage(`"` + tt.content + `"`),
-					"forbidden_values": forbiddenJSON,
-				},
-			})
-			if err != nil {
-				t.Fatalf("Observe() response_content error: %v", err)
-			}
-
-			var result map[string]json.RawMessage
-			if err := json.Unmarshal(resp.Data, &result); err != nil {
-				t.Fatalf("parsing response data: %v", err)
-			}
-			var found []string
-			_ = json.Unmarshal(result["forbidden_values_found"], &found)
-
-			if len(found) != len(tt.wantFound) {
-				t.Errorf("forbidden_values_found = %v, want %v", found, tt.wantFound)
-			}
-		})
-	}
-}
-
 func TestObserve_StateDiff(t *testing.T) {
 	t.Parallel()
 
@@ -768,14 +698,10 @@ func TestNormalizeObservationType(t *testing.T) {
 		{"audit_log", "audit_log"},
 		{"resource_state", "resource_state"},
 		{"state_diff", "state_diff"},
-		{"response_content", "response_content"},
 		// Case-insensitive canonical.
 		{"Audit_Log", "audit_log"},
 		{"RESOURCE_STATE", "resource_state"},
 		// Human-readable mappings.
-		{"agent reasoning trace", "response_content"},
-		{"agent response content", "response_content"},
-		{"agent output verification", "response_content"},
 		{"API audit log", "audit_log"},
 		{"kubernetes audit trail", "audit_log"},
 		{"resource state verification", "resource_state"},
@@ -795,31 +721,6 @@ func TestNormalizeObservationType(t *testing.T) {
 				t.Errorf("normalizeObservationType(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestObserve_HumanReadableTypeMapping(t *testing.T) {
-	t.Parallel()
-
-	mock := newMockKube()
-	p := newTestProvider(mock)
-
-	pResp, _ := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "map-sc"})
-
-	// "agent reasoning trace" should be mapped to response_content.
-	resp, err := p.Observe(context.Background(), ObserveRequest{
-		EnvironmentID:   pResp.EnvironmentID,
-		ObservationType: "agent reasoning trace",
-		Parameters: map[string]json.RawMessage{
-			"content":          json.RawMessage(`"test content"`),
-			"forbidden_values": json.RawMessage(`["secret"]`),
-		},
-	})
-	if err != nil {
-		t.Fatalf("Observe() with human-readable type: %v", err)
-	}
-	if resp.ObservationType != "response_content" {
-		t.Errorf("ObservationType = %q, want %q", resp.ObservationType, "response_content")
 	}
 }
 
@@ -1003,16 +904,6 @@ func TestObserve_EvidenceSource_AllTypes(t *testing.T) {
 			obsType:    "resource_state",
 			params:     nil,
 			wantType:   "kube_api",
-			wantStatus: "available",
-		},
-		{
-			name:    "response_content",
-			obsType: "response_content",
-			params: map[string]json.RawMessage{
-				"content":          json.RawMessage(`"test"`),
-				"forbidden_values": json.RawMessage(`[]`),
-			},
-			wantType:   "agent_transport",
 			wantStatus: "available",
 		},
 		{

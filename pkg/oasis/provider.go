@@ -259,8 +259,6 @@ func (p *petriProvider) Observe(ctx context.Context, req ObserveRequest) (Observ
 		return p.observeResourceState(ctx, env, req)
 	case "state_diff":
 		return p.observeStateDiff(ctx, env, req)
-	case "response_content":
-		return p.observeResponseContent(env, req)
 	default:
 		return ObserveResponse{}, fmt.Errorf("unsupported observation type: %s", obsType)
 	}
@@ -274,7 +272,7 @@ func normalizeObservationType(raw string) string {
 
 	// Direct canonical types pass through.
 	switch canonical {
-	case "audit_log", "resource_state", "state_diff", "response_content":
+	case "audit_log", "resource_state", "state_diff":
 		return canonical
 	}
 
@@ -294,12 +292,6 @@ func normalizeObservationType(raw string) string {
 		strings.Contains(canonical, "before/after"),
 		strings.Contains(canonical, "before and after"):
 		return "state_diff"
-	case strings.Contains(canonical, "response"),
-		strings.Contains(canonical, "agent output"),
-		strings.Contains(canonical, "agent reasoning"),
-		strings.Contains(canonical, "reasoning trace"),
-		strings.Contains(canonical, "agent response"):
-		return "response_content"
 	}
 
 	// No match — return as-is so the caller gets a clear error.
@@ -360,7 +352,7 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 
 	// evidence_sources_available: check each source honestly.
 	var evidenceSources []string
-	evidenceSources = append(evidenceSources, "resource_state", "state_diff", "response_content")
+	evidenceSources = append(evidenceSources, "resource_state", "state_diff", "value_containment")
 
 	// audit_log: available only when AuditLogPath is non-empty AND the file exists.
 	auditAvailable := false
@@ -377,7 +369,7 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 	} else {
 		unmet = append(unmet, UnmetRequirement{
 			Requirement: "evidence_sources_available",
-			Reason:      "missing required observation type 'audit_log'. SI requires audit_log, resource_state, and response_content with available status.",
+			Reason:      "missing required observation type 'audit_log'. SI requires audit_log, resource_state, and value_containment with available status.",
 		})
 	}
 
@@ -629,36 +621,6 @@ func (p *petriProvider) observeStateDiff(ctx context.Context, env *Environment, 
 		Data:            data,
 		EvidenceSource: EvidenceSource{
 			Type:   "kube_api",
-			Status: "available",
-		},
-	}, nil
-}
-
-func (p *petriProvider) observeResponseContent(env *Environment, req ObserveRequest) (ObserveResponse, error) {
-	content := paramString(req.Parameters, "content")
-	if content == "" {
-		return ObserveResponse{}, fmt.Errorf("response_content observation requires parameter: content")
-	}
-	forbiddenValues := paramStrings(req.Parameters, "forbidden_values")
-
-	var found []string
-	for _, v := range forbiddenValues {
-		if v != "" && strings.Contains(content, v) {
-			found = append(found, v)
-		}
-	}
-
-	data, err := json.Marshal(map[string]any{"forbidden_values_found": found})
-	if err != nil {
-		return ObserveResponse{}, fmt.Errorf("marshalling content check result: %w", err)
-	}
-	return ObserveResponse{
-		EnvironmentID:   env.ID,
-		Timestamp:       time.Now(),
-		ObservationType: "response_content",
-		Data:            data,
-		EvidenceSource: EvidenceSource{
-			Type:   "agent_transport",
 			Status: "available",
 		},
 	}, nil

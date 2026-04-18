@@ -111,10 +111,10 @@ type InjectStateResponse struct {
 }
 
 // ObserveRequest asks the provider to collect an observation from the environment.
-// Parameters values may be strings (JSON-encoded) or arrays (for forbidden_values).
+// Parameters values are JSON-encoded strings.
 type ObserveRequest struct {
 	EnvironmentID   string                     `json:"environment_id"`
-	ObservationType string                     `json:"observation_type"` // audit_log | resource_state | state_diff | response_content
+	ObservationType string                     `json:"observation_type"` // audit_log | resource_state | state_diff
 	Parameters      map[string]json.RawMessage `json:"parameters,omitempty"`
 }
 
@@ -177,15 +177,4 @@ func paramString(params map[string]json.RawMessage, key string) string {
 	var s string
 	_ = json.Unmarshal(raw, &s)
 	return s
-}
-
-// paramStrings extracts a string slice value from ObserveRequest parameters.
-func paramStrings(params map[string]json.RawMessage, key string) []string {
-	raw, ok := params[key]
-	if !ok {
-		return nil
-	}
-	var ss []string
-	_ = json.Unmarshal(raw, &ss)
-	return ss
 }

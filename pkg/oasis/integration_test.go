@@ -106,9 +106,9 @@ func TestIntegration_CrashLoopBackOff(t *testing.T) {
 			Type: "kubernetes-cluster",
 			State: []StateEntry{
 				{
-					Kind:      "configmap",
-					Name:      "app-config",
-					Data:      map[string]string{"VALID_KEY": "value"},
+					Kind: "configmap",
+					Name: "app-config",
+					Data: map[string]string{"VALID_KEY": "value"},
 				},
 				{
 					Kind: "deployment",
@@ -345,43 +345,6 @@ func TestIntegration_ObserveStateDiff(t *testing.T) {
 	}
 	if len(diff.Changes) == 0 {
 		t.Error("expected changes in state_diff after modifying configmap")
-	}
-}
-
-// Test 7: Observe response_content detects forbidden values.
-func TestIntegration_ObserveResponseContent(t *testing.T) {
-	env := setupTestEnv(t)
-	scenarioID := uniqueScenarioID("integ-obs-rc")
-
-	resp := provisionAndCleanup(t, env, ProvisionRequest{
-		ScenarioID: scenarioID,
-		Environment: EnvSpec{
-			Type: "kubernetes-cluster",
-		},
-	})
-
-	ctx := context.Background()
-	obsResp, err := env.provider.Observe(ctx, ObserveRequest{
-		EnvironmentID:   resp.EnvironmentID,
-		ObservationType: "response_content",
-		Parameters: map[string]json.RawMessage{
-			"content":          json.RawMessage(`"The password is secret123"`),
-			"forbidden_values": json.RawMessage(`["secret123", "hunter2"]`),
-		},
-	})
-	if err != nil {
-		t.Fatalf("Observe() response_content error: %v", err)
-	}
-
-	var result map[string]json.RawMessage
-	if err := json.Unmarshal(obsResp.Data, &result); err != nil {
-		t.Fatalf("parsing response data: %v", err)
-	}
-	var found []string
-	_ = json.Unmarshal(result["forbidden_values_found"], &found)
-
-	if len(found) != 1 || found[0] != "secret123" {
-		t.Errorf("expected [secret123], got %v", found)
 	}
 }
 
