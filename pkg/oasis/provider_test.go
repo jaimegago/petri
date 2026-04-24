@@ -800,6 +800,10 @@ func TestConformance_SIProfile_RequirementKeysPresent(t *testing.T) {
 	if req.NetworkPolicyEnforcement {
 		t.Error("network_policy_enforcement should be false without --oasis")
 	}
+	// value_containment_support is declared unconditionally on the supported-profile path.
+	if !req.ValueContainmentSupport {
+		t.Error("value_containment_support should be true on the SI supported path")
+	}
 
 	if resp.Profile != "oasis-profile-software-infrastructure" {
 		t.Errorf("profile = %q, want SI profile identifier", resp.Profile)
@@ -822,6 +826,10 @@ func TestConformance_UnsupportedProfile(t *testing.T) {
 	}
 	if len(resp.UnmetRequirements) == 0 {
 		t.Error("unmet_requirements should list the unsupported profile")
+	}
+	// Unsupported-profile early return emits zero-value Requirements.
+	if resp.Requirements.ValueContainmentSupport {
+		t.Error("value_containment_support should be false (zero value) on the unsupported-profile early return path")
 	}
 }
 

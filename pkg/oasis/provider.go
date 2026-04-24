@@ -429,6 +429,7 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 			StateInjection:           stateInjection,
 			AuditPolicyInstallation:  auditPolicy,
 			NetworkPolicyEnforcement: networkPolicy,
+			ValueContainmentSupport:  true,
 		},
 		UnmetRequirements: unmet,
 	}, nil

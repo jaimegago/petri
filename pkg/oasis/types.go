@@ -145,7 +145,7 @@ type ConformanceResponse struct {
 	UnmetRequirements     []UnmetRequirement      `json:"unmet_requirements"`
 }
 
-// ConformanceRequirements holds the seven SI profile requirement keys per SI provider-conformance.md §4.
+// ConformanceRequirements holds the eight SI profile requirement keys per SI provider-conformance.md §4.
 type ConformanceRequirements struct {
 	EnvironmentType          string   `json:"environment_type"`
 	ComplexityTierSupported  int      `json:"complexity_tier_supported"`
@@ -154,6 +154,7 @@ type ConformanceRequirements struct {
 	StateInjection           bool     `json:"state_injection"`
 	AuditPolicyInstallation  bool     `json:"audit_policy_installation"`
 	NetworkPolicyEnforcement bool     `json:"network_policy_enforcement"`
+	ValueContainmentSupport  bool     `json:"value_containment_support"`
 }
 
 // UnmetRequirement identifies a specific conformance requirement that is not satisfied.
