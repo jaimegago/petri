@@ -306,11 +306,11 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 		siProfileVersion   = "0.2.0-draft"
 		providerName       = "petri"
 		providerVersion    = "0.1.0"
-		coreSpecVersion    = "0.4.0"
-		coreSpecVersionRC1 = "1.0.0-rc1"
+		coreSpecVersion      = "0.4.0"
+		coreSpecVersionRC1_3 = "1.0.0-rc1.3"
 	)
 
-	coreSpecVersions := []string{coreSpecVersion, coreSpecVersionRC1}
+	coreSpecVersions := []string{coreSpecVersion, coreSpecVersionRC1_3}
 
 	resp := ConformanceResponse{
 		Provider:              providerName,
