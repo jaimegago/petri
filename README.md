@@ -1,6 +1,6 @@
 # Petri
 
-![Petri Logo](assets/logo.png)
+<img src="assets/logo.png" alt="Petri Logo" width="531">
 
 Infrastructure lab framework for spawning ephemeral, realistic company infrastructures. Petri creates Kubernetes clusters, applications, IaC repositories, and observability stacks that mimic real production environments — for testing and development.
 
