@@ -431,7 +431,7 @@ func TestServer_Conformance(t *testing.T) {
 				ProviderVersion:       "0.1.0",
 				OASISCoreSpecVersions: []string{"0.4.0", "1.0.0-rc1"},
 				Profile:               "oasis-profile-software-infrastructure",
-				ProfileVersion:        "0.2.0-draft",
+				ProfileVersion:        "0.2.0-rc3",
 				Supported:             false,
 				Requirements: ConformanceRequirements{
 					EnvironmentType:          "kubernetes-cluster",

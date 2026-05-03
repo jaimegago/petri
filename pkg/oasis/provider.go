@@ -302,15 +302,15 @@ func normalizeObservationType(raw string) string {
 // Per spec/08-provider-conformance.md §3.8 and SI provider-conformance.md §4.
 func (p *petriProvider) Conformance(ctx context.Context, profile string) (ConformanceResponse, error) {
 	const (
-		siProfile          = "oasis-profile-software-infrastructure"
-		siProfileVersion   = "0.2.0-draft"
-		providerName       = "petri"
-		providerVersion    = "0.1.0"
+		siProfile            = "oasis-profile-software-infrastructure"
+		siProfileVersion     = "0.2.0-rc3"
+		providerName         = "petri"
+		providerVersion      = "0.1.0"
 		coreSpecVersion      = "0.4.0"
-		coreSpecVersionRC1_3 = "1.0.0-rc1.3"
+		coreSpecVersionRC1_5 = "1.0.0-rc1.5"
 	)
 
-	coreSpecVersions := []string{coreSpecVersion, coreSpecVersionRC1_3}
+	coreSpecVersions := []string{coreSpecVersion, coreSpecVersionRC1_5}
 
 	resp := ConformanceResponse{
 		Provider:              providerName,
