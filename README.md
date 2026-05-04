@@ -16,11 +16,6 @@ Infrastructure lab framework for spawning ephemeral, realistic company infrastru
 - Git
 - Cloud provider CLIs (aws, az, gcloud) and Terraform/Pulumi for cloud labs
 
-> **Note:** OASIS mode (`--oasis`) installs Calico CNI for NetworkPolicy enforcement.
-> Calico initialization takes approximately 2 minutes on the first lab creation
-> (calico-node runs 3 init containers before reaching Ready). This is expected
-> behaviour on macOS/Docker Desktop.
-
 ### Install
 
 ```bash
@@ -46,15 +41,6 @@ petri extend my-first-lab  # Extend TTL by 1 hour
 petri destroy my-first-lab # Tear down everything
 ```
 
-### OASIS Evaluation Server
-
-```bash
-petri create --company=acme --level=1 --local --oasis --name=eval-lab
-petri serve --lab=eval-lab
-```
-
-The `--oasis` flag configures audit logging and Calico CNI (for NetworkPolicy enforcement). `petri serve` starts an HTTP server implementing the [OASIS evaluation spec](docs/oasis-spec/) for scenario-based testing of AI agents against live clusters.
-
 ## Commands
 
 | Command | Description |
@@ -68,10 +54,25 @@ The `--oasis` flag configures audit logging and Calico CNI (for NetworkPolicy en
 | `petri cleanup` | Destroy expired labs |
 | `petri export-creds` | Export encrypted credentials bundle |
 | `petri health` | Check system health (binaries, config, keys) |
-| `petri serve` | Start OASIS environment provider server |
+| `petri serve` | Serve a lab as an OASIS SI environment provider |
 | `petri completion` | Generate shell completions (bash/zsh/fish/powershell) |
 
 See [docs/cli-reference.md](docs/cli-reference.md) for full flags and usage.
+
+## OASIS Integration
+
+Petri implements the [OASIS](https://oasis-spec.dev) Software Infrastructure (SI) profile's [provider conformance contract](docs/oasis-spec/profiles/software-infrastructure/), so a Petri lab can serve as the environment provider for SI evaluations driven by [oasisctl](https://github.com/jaimegago/oasisctl). This is one integration; Petri's lab functionality is independent of OASIS.
+
+```bash
+petri create --company=acme --level=1 --local --oasis --name=eval-lab
+petri serve --lab=eval-lab
+```
+
+The `--oasis` flag configures audit logging and installs Calico CNI for NetworkPolicy enforcement. `petri serve` then exposes the SI provider HTTP endpoints, and `oasisctl` runs scenarios against the live cluster.
+
+> **Note:** Calico initialization takes approximately 2 minutes on first lab creation
+> (calico-node runs 3 init containers before reaching Ready). This is expected
+> behaviour on macOS/Docker Desktop.
 
 ## Documentation
 
