@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/jaimegago/petri/pkg/logger"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func newTestRecorder(t *testing.T) (*Recorder, *prometheus.Registry) {

@@ -292,7 +292,7 @@ func TestScenarioRunner_Run_ExecutesStepsInOrder(t *testing.T) {
 	fault1 := &mockFault{faultType: chaos.FaultKillPod}
 	fault2 := &mockFault{faultType: chaos.FaultScaleToZero}
 	faults := map[chaos.FaultType]chaos.Fault{
-		chaos.FaultKillPod:    fault1,
+		chaos.FaultKillPod:     fault1,
 		chaos.FaultScaleToZero: fault2,
 	}
 	emitter := &mockEmitter{}
@@ -377,7 +377,7 @@ func TestScenarioRunner_Run_ContinuesAfterFaultError(t *testing.T) {
 	failFault := &mockFault{faultType: chaos.FaultKillPod, err: errors.New("pod not found")}
 	succFault := &mockFault{faultType: chaos.FaultScaleToZero}
 	faults := map[chaos.FaultType]chaos.Fault{
-		chaos.FaultKillPod:    failFault,
+		chaos.FaultKillPod:     failFault,
 		chaos.FaultScaleToZero: succFault,
 	}
 	emitter := &mockEmitter{}

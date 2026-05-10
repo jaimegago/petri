@@ -182,10 +182,10 @@ func defaultReplicas(level int) int {
 // defaultPort returns a conventional port for well-known app names.
 func defaultPort(app string) int {
 	portMap := map[string]int{
-		"api-gateway":    8080,
-		"auth-service":   8081,
-		"user-service":   8082,
-		"order-service":  8083,
+		"api-gateway":       8080,
+		"auth-service":      8081,
+		"user-service":      8082,
+		"order-service":     8083,
 		"boutique-frontend": 8080,
 	}
 	if p, ok := portMap[app]; ok {

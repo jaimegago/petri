@@ -181,9 +181,9 @@ func TestGenerate_WithEmbeddedFS(t *testing.T) {
 	gen := gitops.New()
 
 	tests := []struct {
-		name    string
-		tool    string
-		level   int
+		name     string
+		tool     string
+		level    int
 		minFiles int
 	}{
 		{"argocd-level1", "argocd", 1, 1},

@@ -4,6 +4,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 
 	"log/slog"
@@ -22,6 +24,7 @@ import (
 	"github.com/jaimegago/petri/pkg/logger"
 	"github.com/jaimegago/petri/pkg/metrics"
 	"github.com/jaimegago/petri/pkg/orchestrator"
+	"github.com/jaimegago/petri/pkg/preflight"
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
 	"github.com/jaimegago/petri/pkg/provisioners/kubectl"
 	localprov "github.com/jaimegago/petri/pkg/provisioners/local"
@@ -45,6 +48,15 @@ type CLI struct {
 	cipher        crypto.Cipher
 	metricsReg    *prometheus.Registry
 	metricsRec    *metrics.Recorder
+
+	// Test seams for the preflight subcommand. nil in production; non-nil
+	// in unit tests to bypass real cluster / network IO.
+	preflightKube      preflight.KubeClient
+	preflightHTTP      *http.Client
+	preflightUtilImage string // overrides the hardcoded util image when non-empty
+	// serveVerifyOut overrides the destination of serve --verify's
+	// rendered failure report. nil in production (writes to os.Stderr).
+	serveVerifyOut io.Writer
 }
 
 // NewCLI creates a CLI with zero-value dependencies.
@@ -88,6 +100,7 @@ applications, IaC repositories with realistic git history, and observability sta
 		c.newCleanupCmd(),
 		c.newCompletionCmd(),
 		c.newServeCmd(),
+		c.newVerifyCmd(),
 	)
 
 	return cmd

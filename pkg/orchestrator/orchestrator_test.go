@@ -99,11 +99,10 @@ func (m *mockTFProv) Output(ctx context.Context, workDir string, env []string) (
 	return nil, nil
 }
 
-
 type mockKubectl struct {
-	applyFn  func(ctx context.Context, manifest string) error
-	waitFn   func(ctx context.Context, timeout time.Duration) error
-	applied  []string
+	applyFn func(ctx context.Context, manifest string) error
+	waitFn  func(ctx context.Context, timeout time.Duration) error
+	applied []string
 }
 
 func (m *mockKubectl) ApplyManifest(ctx context.Context, manifest string) error {
@@ -140,7 +139,7 @@ func (m *mockAppsGen) Generate(ctx context.Context, tmplCtx generators.TemplateC
 
 type mockCipher struct{}
 
-func (m *mockCipher) Encrypt(plaintext []byte) (string, error) { return string(plaintext), nil }
+func (m *mockCipher) Encrypt(plaintext []byte) (string, error)  { return string(plaintext), nil }
 func (m *mockCipher) Decrypt(ciphertext string) ([]byte, error) { return []byte(ciphertext), nil }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

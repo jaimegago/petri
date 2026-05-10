@@ -14,6 +14,7 @@ Petri is an infrastructure lab framework (Go CLI) that spawns ephemeral, realist
 - Interfaces defined at the point of use (consuming package), not at the provider.
 - All errors wrapped with `fmt.Errorf("context: %w", err)`. No panics in production code.
 - Integration tests use build tag `//go:build integration` and run separately.
+- `pkg/preflight` is the single source of truth for substrate-readiness checks (kubeconfig, cluster reachability, RBAC, image pullability, audit log path). Both `petri verify` and `petri serve --verify` go through `preflight.Run`. New ad-hoc reachability probes elsewhere in the codebase should be migrated to it over time rather than reimplemented inline.
 
 ## Repo Dependencies
 
@@ -36,7 +37,7 @@ go fmt ./...
 - Company definitions: `configs/companies.yaml` (acme/aws/terraform/argocd, techflow/azure/pulumi/flux, cloudnative/gcp/terraform/anthos).
 - Config loaded from `~/.petri/config.yaml`; default state backend is SQLite (`~/.petri/petri.db`).
 - Three complexity levels: L1 (single cluster, basic), L2 (multi-cluster, realistic), L3 (production-realistic, full platform).
-- CLI commands: create, destroy, list, info, health, init, export, extend, cleanup, serve, completion.
+- CLI commands: create, destroy, list, info, health, init, export, extend, cleanup, serve, verify, completion.
 - OASIS kind clusters (`--oasis` flag on `petri create`) disable the default CNI and install Calico for NetworkPolicy enforcement.
 - YAML manifests built by hand (not templates) in `pkg/chaos/kube.go` and `pkg/oasis/translate.go` must quote all label/annotation values to prevent YAML bool/number coercion.
 - OASIS Deployment/Pod state entries that omit `spec.image` resolve to `config.OASIS.DefaultImage` (default: `registry.k8s.io/nginx-slim:0.27`). Internal builders for unhealthy states (CrashLoop, OOMKilled, logs) use `registry.k8s.io/e2e-test-images/busybox:1.37.0-2`. Never default to Docker Hub images — its blob storage runs on Cloudflare R2, which is null-routed by some ISPs and corporate networks.

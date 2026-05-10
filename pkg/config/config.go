@@ -110,6 +110,10 @@ type OASISConfig struct {
 	// at registry.k8s.io to avoid Docker Hub's Cloudflare R2 dependency. See
 	// DefaultOASISImage for rationale.
 	DefaultImage string `yaml:"default_image"`
+	// AuditLogPath is the path to the Kubernetes audit log file used for
+	// audit_log observations. Optional. When set, `petri verify` checks that
+	// the parent directory exists and is writable.
+	AuditLogPath string `yaml:"audit_log_path"`
 }
 
 // CompaniesFile is the top-level structure of companies.yaml.
@@ -179,6 +183,7 @@ func Load(cfgFile ...string) (*Config, error) {
 	// Expand ~ in file paths so users can write ~/.petri/... in config.yaml.
 	cfg.State.SQLitePath = expandHome(cfg.State.SQLitePath)
 	cfg.Credentials.MasterKeyPath = expandHome(cfg.Credentials.MasterKeyPath)
+	cfg.OASIS.AuditLogPath = expandHome(cfg.OASIS.AuditLogPath)
 
 	// Restore the default OASIS image when the user explicitly clears it
 	// (e.g. `oasis: {}` or `oasis:\n  default_image: ""`). Falling through
@@ -222,6 +227,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("PETRI_OASIS_DEFAULT_IMAGE"); v != "" {
 		cfg.OASIS.DefaultImage = v
+	}
+	if v := os.Getenv("PETRI_OASIS_AUDIT_LOG_PATH"); v != "" {
+		cfg.OASIS.AuditLogPath = v
 	}
 }
 

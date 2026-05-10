@@ -681,7 +681,7 @@ func TestCLIRepo_IntegrationMultipleCommits(t *testing.T) {
 	now := time.Now()
 
 	for i := 0; i < 3; i++ {
-		ts := now.Add(time.Duration(-(3-i)) * 24 * time.Hour)
+		ts := now.Add(time.Duration(-(3 - i)) * 24 * time.Hour)
 		spec := commits.CommitSpec{
 			Message:   fmt.Sprintf("commit %d", i),
 			Author:    authors[i%2],

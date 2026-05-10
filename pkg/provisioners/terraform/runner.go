@@ -26,8 +26,8 @@ func (r *cliRunner) capture(ctx context.Context, workDir string, env []string, a
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.Env = append(os.Environ(),
-		"TF_IN_AUTOMATION=1",  // suppress interactive prompts and spinners
-		"TF_INPUT=0",          // disable interactive variable prompts
+		"TF_IN_AUTOMATION=1",   // suppress interactive prompts and spinners
+		"TF_INPUT=0",           // disable interactive variable prompts
 		"CHECKPOINT_DISABLE=1", // disable upgrade-check HTTP calls
 	)
 	cmd.Env = append(cmd.Env, env...)

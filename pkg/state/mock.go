@@ -20,7 +20,7 @@ type MockManager struct {
 	mu          sync.RWMutex
 	labs        map[uuid.UUID]*types.Lab
 	resources   map[uuid.UUID]*types.LabResource // keyed by resource ID
-	credentials map[string]*types.LabCredential   // keyed by "labID/credType"
+	credentials map[string]*types.LabCredential  // keyed by "labID/credType"
 
 	// CloseErr is returned by Close if set.
 	CloseErr error

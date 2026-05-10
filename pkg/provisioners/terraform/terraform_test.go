@@ -284,10 +284,10 @@ func TestDestroy(t *testing.T) {
 
 func TestOutput(t *testing.T) {
 	tests := []struct {
-		name      string
-		json      string
-		wantKeys  []string
-		wantErr   bool
+		name     string
+		json     string
+		wantKeys []string
+		wantErr  bool
 	}{
 		{
 			name:     "single string output",

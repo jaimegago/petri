@@ -350,11 +350,11 @@ func TestDestroy(t *testing.T) {
 
 func TestOutput(t *testing.T) {
 	tests := []struct {
-		name     string
-		json     string
+		name       string
+		json       string
 		captureErr error
-		wantKeys []string
-		wantErr  bool
+		wantKeys   []string
+		wantErr    bool
 	}{
 		{
 			name:     "string and numeric outputs",

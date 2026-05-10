@@ -326,8 +326,8 @@ func (c *Correlator) Correlate(tl *Timeline, actions []Action) (*CorrelationRepo
 
 	// Build a mutable copy of actions so we can mark them as attributed.
 	type taggedAction struct {
-		action    Action
-		snapshot  ActionSnapshot
+		action     Action
+		snapshot   ActionSnapshot
 		attributed bool
 	}
 	tagged := make([]taggedAction, len(actions))

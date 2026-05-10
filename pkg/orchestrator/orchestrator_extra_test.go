@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/jaimegago/petri/pkg/logger"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/jaimegago/petri/pkg/generators"
 	"github.com/jaimegago/petri/pkg/metrics"
