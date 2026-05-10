@@ -14,8 +14,8 @@ import (
 
 // State backend identifiers.
 const (
-	BackendSQLite     = "sqlite"
-	BackendPostgres   = "postgresql"
+	BackendSQLite   = "sqlite"
+	BackendPostgres = "postgresql"
 )
 
 // Git provider identifiers.
