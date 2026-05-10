@@ -72,6 +72,7 @@ func (c *CLI) runServe(opts *serveOptions) error {
 		AuditLogPath:     auditLogPath,
 		LabLevel:         labInfo.labLevel,
 		OASISModeEnabled: labInfo.oasisMode,
+		DefaultImage:     c.cfg.OASIS.DefaultImage,
 	}, kube, c.log)
 
 	srv := oasis.NewServer(provider, c.log)

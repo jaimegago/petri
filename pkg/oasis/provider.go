@@ -58,7 +58,16 @@ type ProviderConfig struct {
 	// OASISModeEnabled is true when the lab was created with --oasis,
 	// indicating audit policy and Calico CNI were installed.
 	OASISModeEnabled bool
+	// DefaultImage is the OCI image used for OASIS Deployment and Pod
+	// state entries when the scenario does not set spec.image. Empty
+	// values fall back to defaultOASISImage so the provider never
+	// silently pulls from Docker Hub.
+	DefaultImage string
 }
+
+// defaultOASISImage mirrors config.DefaultOASISImage so the oasis package
+// has no import cycle on pkg/config. Keep these two constants in lockstep.
+const defaultOASISImage = "registry.k8s.io/nginx-slim:0.27"
 
 // petriProvider is the concrete implementation of OASISProvider.
 type petriProvider struct {
@@ -82,11 +91,14 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 			"profile that requires audit_log evidence will fail preflight. To enable, " +
 			"restart petri serve with --audit-log-path or use a lab created with --oasis.")
 	}
+	if cfg.DefaultImage == "" {
+		cfg.DefaultImage = defaultOASISImage
+	}
 	return &petriProvider{
 		cfg:      cfg,
 		kube:     kube,
 		store:    newEnvironmentStore(),
-		injector: newStateInjector(kube),
+		injector: newStateInjector(kube, cfg.DefaultImage),
 		audit:    audit,
 		log:      log,
 	}

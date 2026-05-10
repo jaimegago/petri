@@ -35,6 +35,19 @@ const (
 	DefaultMetricsPort = 9090
 )
 
+// Default OASIS settings.
+//
+// DefaultOASISImage is the OCI image used for OASIS Deployment and Pod state
+// entries when the scenario does not set spec.image. It is hosted on
+// registry.k8s.io (CNCF) rather than Docker Hub: Docker Hub blob storage is
+// served from Cloudflare R2 (172.64.0.0/13), which is null-routed by some
+// ISPs, corporate networks, and mobile carriers. When R2 is unreachable,
+// every scenario default-falling-back to Docker Hub fails with
+// ImagePullBackOff and the failure is misattributed to petri.
+const (
+	DefaultOASISImage = "registry.k8s.io/nginx-slim:0.27"
+)
+
 // Default cleanup durations.
 const (
 	DefaultCheckInterval = 5 * time.Minute
@@ -49,6 +62,7 @@ type Config struct {
 	Git           GitConfig           `yaml:"git"`
 	Cloud         CloudConfig         `yaml:"cloud"`
 	Cleanup       CleanupConfig       `yaml:"cleanup"`
+	OASIS         OASISConfig         `yaml:"oasis"`
 }
 
 // StateConfig configures the state backend.
@@ -89,6 +103,15 @@ type CleanupConfig struct {
 	GracePeriod   time.Duration `yaml:"grace_period"`
 }
 
+// OASISConfig configures the OASIS environment provider (`petri serve`).
+type OASISConfig struct {
+	// DefaultImage is the OCI image used for OASIS Deployment and Pod state
+	// entries when the scenario does not set spec.image. The default points
+	// at registry.k8s.io to avoid Docker Hub's Cloudflare R2 dependency. See
+	// DefaultOASISImage for rationale.
+	DefaultImage string `yaml:"default_image"`
+}
+
 // CompaniesFile is the top-level structure of companies.yaml.
 type CompaniesFile struct {
 	Companies []types.Company `yaml:"companies"`
@@ -120,6 +143,9 @@ func DefaultConfig() *Config {
 		Cleanup: CleanupConfig{
 			CheckInterval: DefaultCheckInterval,
 			GracePeriod:   DefaultGracePeriod,
+		},
+		OASIS: OASISConfig{
+			DefaultImage: DefaultOASISImage,
 		},
 	}
 }
@@ -154,6 +180,13 @@ func Load(cfgFile ...string) (*Config, error) {
 	cfg.State.SQLitePath = expandHome(cfg.State.SQLitePath)
 	cfg.Credentials.MasterKeyPath = expandHome(cfg.Credentials.MasterKeyPath)
 
+	// Restore the default OASIS image when the user explicitly clears it
+	// (e.g. `oasis: {}` or `oasis:\n  default_image: ""`). Falling through
+	// with an empty string would silently disable the Docker Hub workaround.
+	if cfg.OASIS.DefaultImage == "" {
+		cfg.OASIS.DefaultImage = DefaultOASISImage
+	}
+
 	return cfg, nil
 }
 
@@ -186,6 +219,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("PETRI_LOG_LEVEL"); v != "" {
 		cfg.Observability.LogLevel = v
+	}
+	if v := os.Getenv("PETRI_OASIS_DEFAULT_IMAGE"); v != "" {
+		cfg.OASIS.DefaultImage = v
 	}
 }
 

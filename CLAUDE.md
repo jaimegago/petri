@@ -39,3 +39,4 @@ go fmt ./...
 - CLI commands: create, destroy, list, info, health, init, export, extend, cleanup, serve, completion.
 - OASIS kind clusters (`--oasis` flag on `petri create`) disable the default CNI and install Calico for NetworkPolicy enforcement.
 - YAML manifests built by hand (not templates) in `pkg/chaos/kube.go` and `pkg/oasis/translate.go` must quote all label/annotation values to prevent YAML bool/number coercion.
+- OASIS Deployment/Pod state entries that omit `spec.image` resolve to `config.OASIS.DefaultImage` (default: `registry.k8s.io/nginx-slim:0.27`). Internal builders for unhealthy states (CrashLoop, OOMKilled, logs) use `registry.k8s.io/e2e-test-images/busybox:1.37.0-2`. Never default to Docker Hub images — its blob storage runs on Cloudflare R2, which is null-routed by some ISPs and corporate networks.

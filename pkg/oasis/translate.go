@@ -11,10 +11,32 @@ import (
 // stateInjector translates OASIS StateEntry objects into Kubernetes operations.
 type stateInjector struct {
 	kube KubeClient
+	// defaultImage is the OCI image used for Deployment and Pod state
+	// entries that omit spec.image. It must be a fully-qualified, pinned
+	// image hosted on a registry not backed by Cloudflare R2 (Docker Hub
+	// blob storage relies on R2, which is null-routed by some networks).
+	// See pkg/config.DefaultOASISImage.
+	defaultImage string
+	// utilImage is the OCI image used internally to construct intentionally
+	// unhealthy or behavioural pod states (CrashLoopBackOff, OOMKilled,
+	// log emission). Like defaultImage, it must not pull from Docker Hub.
+	utilImage string
 }
 
-func newStateInjector(kube KubeClient) *stateInjector {
-	return &stateInjector{kube: kube}
+// defaultUtilImage is the busybox-equivalent hosted on registry.k8s.io.
+// It is used for builders that need a small shell + sleep loop without
+// making the choice configurable to scenarios.
+const defaultUtilImage = "registry.k8s.io/e2e-test-images/busybox:1.37.0-2"
+
+func newStateInjector(kube KubeClient, defaultImage string) *stateInjector {
+	if defaultImage == "" {
+		defaultImage = defaultOASISImage
+	}
+	return &stateInjector{
+		kube:         kube,
+		defaultImage: defaultImage,
+		utilImage:    defaultUtilImage,
+	}
 }
 
 // Apply translates and applies each state entry to the cluster.
@@ -102,7 +124,7 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		}
 	}
 
-	image := "nginx:latest"
+	image := si.defaultImage
 	if v, ok := e.Spec["image"]; ok {
 		if s, ok := v.(string); ok && s != "" {
 			image = s
@@ -148,9 +170,9 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 				configMapRef = s
 			}
 		}
-		manifest = buildCrashLoopDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, configMapRef, matchLabels)
+		manifest = buildCrashLoopDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, configMapRef, matchLabels, si.utilImage)
 	case "oomkilled":
-		manifest = buildOOMKilledDeployment(e.Name, namespace, replicas, e.Labels, e.Annotations, managedBy, matchLabels)
+		manifest = buildOOMKilledDeployment(e.Name, namespace, replicas, e.Labels, e.Annotations, managedBy, matchLabels, si.utilImage)
 	case "pending":
 		manifest = buildPendingDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, matchLabels)
 	case "degraded":
@@ -244,7 +266,7 @@ func (si *stateInjector) applyPVC(ctx context.Context, e StateEntry, namespace s
 }
 
 func (si *stateInjector) applyPod(ctx context.Context, e StateEntry, namespace string) error {
-	manifest := buildPodManifest(e.Name, namespace, e.Spec, e.Labels)
+	manifest := buildPodManifest(e.Name, namespace, e.Spec, e.Labels, si.defaultImage)
 	return si.kube.ApplyYAML(ctx, manifest)
 }
 
@@ -288,7 +310,7 @@ func buildRunningDeployment(name, namespace, image string, replicas int, extraLa
 	return sb.String()
 }
 
-func buildCrashLoopDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy, configMapRef string, matchLabels map[string]string) string {
+func buildCrashLoopDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy, configMapRef string, matchLabels map[string]string, utilImage string) string {
 	podLabels := mergeLabels(matchLabels, extraLabels)
 	allAnnotations := make(map[string]string, len(annotations))
 	for k, v := range annotations {
@@ -319,8 +341,12 @@ func buildCrashLoopDeployment(name, namespace, image string, replicas int, extra
 		fmt.Fprintf(&sb, "        image: %s\n", image)
 		fmt.Fprintf(&sb, "        env:\n        - name: MISSING_CONFIG_VALUE\n          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: __petri_missing_key__\n              optional: false\n", configMapRef)
 	} else {
-		// Simple exit-1 container to trigger CrashLoopBackOff.
-		sb.WriteString("        image: busybox:latest\n")
+		// Simple exit-1 container to trigger CrashLoopBackOff. Sourced
+		// from registry.k8s.io rather than Docker Hub to avoid R2.
+		if utilImage == "" {
+			utilImage = defaultUtilImage
+		}
+		fmt.Fprintf(&sb, "        image: %s\n", utilImage)
 		sb.WriteString("        command: [\"sh\", \"-c\", \"echo CrashLoopBackOff simulation; exit 1\"]\n")
 	}
 	return sb.String()
@@ -610,8 +636,11 @@ func buildPVCManifest(name, namespace string, spec map[string]any, labels map[st
 
 // ── Pod manifest builder ─────────────────────────────────────────────────────
 
-func buildPodManifest(name, namespace string, spec map[string]any, labels map[string]string) string {
-	image := "nginx:latest"
+func buildPodManifest(name, namespace string, spec map[string]any, labels map[string]string, defaultImage string) string {
+	image := defaultImage
+	if image == "" {
+		image = defaultOASISImage
+	}
 	if v, ok := spec["image"].(string); ok && v != "" {
 		image = v
 	}
@@ -733,7 +762,10 @@ func buildDashboardJSON(name string, spec map[string]any) string {
 
 // buildOOMKilledDeployment creates a deployment with a very low memory limit
 // so the OOM killer terminates the container, producing OOMKilled status.
-func buildOOMKilledDeployment(name, namespace string, replicas int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string) string {
+func buildOOMKilledDeployment(name, namespace string, replicas int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string, utilImage string) string {
+	if utilImage == "" {
+		utilImage = defaultUtilImage
+	}
 	podLabels := mergeLabels(matchLabels, extraLabels)
 	allAnnotations := mergeAnnotations(annotations, managedBy)
 
@@ -748,7 +780,7 @@ func buildOOMKilledDeployment(name, namespace string, replicas int, extraLabels,
 	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
 	sb.WriteString(labelsToYAML(podLabels, 8))
 	sb.WriteString("\n    spec:\n      containers:\n      - name: app\n")
-	sb.WriteString("        image: busybox:latest\n")
+	fmt.Fprintf(&sb, "        image: %s\n", utilImage)
 	sb.WriteString("        command: [\"sh\", \"-c\", \"dd if=/dev/zero of=/dev/null bs=1M\"]\n")
 	sb.WriteString("        resources:\n")
 	sb.WriteString("          limits:\n")
@@ -1002,7 +1034,7 @@ func (si *stateInjector) applyNetworkPolicy(ctx context.Context, e StateEntry, n
 // by scenarios such as implicit-zone-crossing-001 in
 // profiles/software-infrastructure/scenarios/safety/boundary-enforcement.yaml).
 func (si *stateInjector) applyLogs(ctx context.Context, e StateEntry, namespace string) error {
-	manifest := buildLogsDeployment(e.Name, namespace, e.Spec, e.Labels, e.Annotations)
+	manifest := buildLogsDeployment(e.Name, namespace, e.Spec, e.Labels, e.Annotations, si.utilImage)
 	return si.kube.ApplyYAML(ctx, manifest)
 }
 
@@ -1010,7 +1042,10 @@ func (si *stateInjector) applyLogs(ctx context.Context, e StateEntry, namespace 
 // that prints the configured log entries to stdout and then sleeps to keep
 // the pod running. The agent's log-reading tool (`kubectl logs`) will return
 // exactly the injected lines.
-func buildLogsDeployment(name, namespace string, spec map[string]any, extraLabels, annotations map[string]string) string {
+func buildLogsDeployment(name, namespace string, spec map[string]any, extraLabels, annotations map[string]string, utilImage string) string {
+	if utilImage == "" {
+		utilImage = defaultUtilImage
+	}
 	replicas := 1
 	if v, ok := spec["replicas"]; ok {
 		switch r := v.(type) {
@@ -1073,7 +1108,7 @@ func buildLogsDeployment(name, namespace string, spec map[string]any, extraLabel
 	sb.WriteString(labelsToYAML(matchLabels, 6))
 	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
 	sb.WriteString(labelsToYAML(podLabels, 8))
-	fmt.Fprintf(&sb, "\n    spec:\n      containers:\n      - name: %s\n        image: busybox:latest\n        command: [\"sh\", \"-c\", %q]\n", containerName, shellCmd)
+	fmt.Fprintf(&sb, "\n    spec:\n      containers:\n      - name: %s\n        image: %s\n        command: [\"sh\", \"-c\", %q]\n", containerName, utilImage, shellCmd)
 	return sb.String()
 }
 

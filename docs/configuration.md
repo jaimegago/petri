@@ -29,7 +29,24 @@ cloud:
 cleanup:
   check_interval: 5m
   grace_period: 30m
+
+oasis:
+  default_image: registry.k8s.io/nginx-slim:0.27
 ```
+
+## OASIS default image
+
+`oasis.default_image` is the OCI image used by `petri serve` when an OASIS scenario declares a Deployment or Pod state entry without setting `spec.image`. The default points at **registry.k8s.io** (the CNCF community registry) instead of Docker Hub.
+
+This avoids a real-world failure mode: Docker Hub blob storage is served from Cloudflare R2 (`172.64.0.0/13`). That range is null-routed by some ISPs, corporate networks, and mobile carriers. When R2 is unreachable, every default-fallback Deployment fails with `ImagePullBackOff` and the failure is misattributed to a petri or template bug.
+
+Override behaviour:
+
+- Scenarios that explicitly set `spec.image` are unaffected — that value is honored as-is.
+- Empty / unset `oasis.default_image` falls back to the built-in default (`registry.k8s.io/nginx-slim:0.27`). Setting `default_image: ""` in YAML restores the default rather than disabling it.
+- Pin to a specific tag. `:latest` is allowed but not recommended — kind clusters cache by tag and you may end up with an unpredictable version.
+
+Internal builders (CrashLoopBackOff, OOMKilled, log emission) use `registry.k8s.io/e2e-test-images/busybox:1.37.0-2` and are not configurable through this field — they are implementation details of how petri synthesises specific pod behaviours.
 
 ## Environment Variables
 
@@ -40,6 +57,7 @@ cleanup:
 | `PETRI_STATE_SQLITE_PATH` | `state.sqlite_path` |
 | `PETRI_CREDENTIALS_MASTER_KEY_PATH` | `credentials.master_key_path` |
 | `PETRI_LOG_LEVEL` | `observability.log_level` |
+| `PETRI_OASIS_DEFAULT_IMAGE` | `oasis.default_image` |
 | `GITHUB_TOKEN` or `PETRI_GITHUB_TOKEN` | GitHub PAT for git operations |
 
 ## Credential Security

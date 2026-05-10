@@ -895,8 +895,8 @@ func TestStateInjector_Apply(t *testing.T) {
 				if !strings.Contains(m, "namespace: frontend") {
 					t.Errorf("expected namespace frontend: %s", m)
 				}
-				if !strings.Contains(m, "busybox:latest") {
-					t.Errorf("expected busybox image: %s", m)
+				if !strings.Contains(m, "registry.k8s.io/e2e-test-images/busybox") {
+					t.Errorf("expected registry.k8s.io busybox image: %s", m)
 				}
 				if !strings.Contains(m, "INFO: web-app started successfully on :8080") {
 					t.Errorf("expected first log line in command: %s", m)
@@ -970,7 +970,7 @@ func TestStateInjector_Apply(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			mock := newMockKube()
-			si := newStateInjector(mock)
+			si := newStateInjector(mock, defaultOASISImage)
 			err := si.Apply(context.Background(), tt.entries, tt.defaultNS)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Apply() error = %v, wantErr = %v", err, tt.wantErr)
@@ -982,6 +982,111 @@ func TestStateInjector_Apply(t *testing.T) {
 				if tt.checkNS != nil {
 					tt.checkNS(t, mock.createdNamespaces)
 				}
+			}
+		})
+	}
+}
+
+func TestStateInjector_DefaultImage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		defaultImage string
+		entry        StateEntry
+		wantImage    string
+		notWant      []string
+	}{
+		{
+			name:         "deployment without spec.image uses configured default",
+			defaultImage: "registry.k8s.io/nginx-slim:0.27",
+			entry:        StateEntry{Kind: "Deployment", Name: "web", Spec: map[string]any{"status": "running"}},
+			wantImage:    "registry.k8s.io/nginx-slim:0.27",
+			notWant:      []string{"docker.io", "nginx:latest"},
+		},
+		{
+			name:         "deployment respects custom default image",
+			defaultImage: "registry.k8s.io/e2e-test-images/agnhost:2.45",
+			entry:        StateEntry{Kind: "Deployment", Name: "web", Spec: map[string]any{}},
+			wantImage:    "registry.k8s.io/e2e-test-images/agnhost:2.45",
+			notWant:      []string{"docker.io", "nginx:latest"},
+		},
+		{
+			name:         "explicit spec.image overrides default",
+			defaultImage: "registry.k8s.io/nginx-slim:0.27",
+			entry:        StateEntry{Kind: "Deployment", Name: "web", Spec: map[string]any{"image": "my-registry.example.com/app:v1"}},
+			wantImage:    "my-registry.example.com/app:v1",
+			notWant:      []string{"registry.k8s.io/nginx-slim", "docker.io"},
+		},
+		{
+			name:         "empty defaultImage falls back to embedded default",
+			defaultImage: "",
+			entry:        StateEntry{Kind: "Deployment", Name: "web", Spec: map[string]any{}},
+			wantImage:    defaultOASISImage,
+			notWant:      []string{"docker.io", "nginx:latest"},
+		},
+		{
+			name:         "pod without spec.image uses configured default",
+			defaultImage: "registry.k8s.io/nginx-slim:0.27",
+			entry:        StateEntry{Kind: "Pod", Name: "p", Spec: map[string]any{}},
+			wantImage:    "registry.k8s.io/nginx-slim:0.27",
+			notWant:      []string{"docker.io", "nginx:latest"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock := newMockKube()
+			si := newStateInjector(mock, tt.defaultImage)
+			if err := si.Apply(context.Background(), []StateEntry{tt.entry}, "ns"); err != nil {
+				t.Fatalf("Apply() error: %v", err)
+			}
+			if len(mock.appliedManifests) == 0 {
+				t.Fatal("expected applied manifest")
+			}
+			m := mock.appliedManifests[0]
+			if !strings.Contains(m, tt.wantImage) {
+				t.Errorf("manifest missing image %q:\n%s", tt.wantImage, m)
+			}
+			for _, banned := range tt.notWant {
+				if strings.Contains(m, banned) {
+					t.Errorf("manifest must not contain %q:\n%s", banned, m)
+				}
+			}
+		})
+	}
+}
+
+func TestStateInjector_UtilImageNotDockerHub(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		entry StateEntry
+	}{
+		{"crashloop", StateEntry{Kind: "Deployment", Name: "x", Spec: map[string]any{"status": "CrashLoopBackOff"}}},
+		{"oomkilled", StateEntry{Kind: "Deployment", Name: "x", Spec: map[string]any{"status": "oomkilled"}}},
+		{"logs", StateEntry{Kind: "logs", Name: "x", Spec: map[string]any{"entries": []any{"hi"}}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mock := newMockKube()
+			si := newStateInjector(mock, defaultOASISImage)
+			if err := si.Apply(context.Background(), []StateEntry{tc.entry}, "ns"); err != nil {
+				t.Fatalf("Apply() error: %v", err)
+			}
+			if len(mock.appliedManifests) == 0 {
+				t.Fatal("expected applied manifest")
+			}
+			m := mock.appliedManifests[0]
+			if strings.Contains(m, "busybox:latest") {
+				t.Errorf("%s builder must not pull busybox:latest from Docker Hub:\n%s", tc.name, m)
+			}
+			if !strings.Contains(m, "registry.k8s.io/") {
+				t.Errorf("%s builder should source util image from registry.k8s.io:\n%s", tc.name, m)
 			}
 		})
 	}

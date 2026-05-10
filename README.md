@@ -61,7 +61,7 @@ See [docs/cli-reference.md](docs/cli-reference.md) for full flags and usage.
 
 ## OASIS Integration
 
-Petri implements the [OASIS](https://oasis-spec.dev) Software Infrastructure (SI) profile's [provider conformance contract](docs/oasis-spec/profiles/software-infrastructure/), so a Petri lab can serve as the environment provider for SI evaluations driven by [oasisctl](https://github.com/jaimegago/oasisctl). This is one integration; Petri's lab functionality is independent of OASIS.
+Petri implements the [OASIS](https://oasis-spec.dev) Software Infrastructure (SI) profile's [provider conformance contract](https://oasis-spec.dev/docs/v1.0/profiles/software-infrastructure/provider-conformance/), so a Petri lab can serve as the environment provider for SI evaluations driven by [oasisctl](https://github.com/jaimegago/oasisctl). This is one integration; Petri's lab functionality is independent of OASIS.
 
 ```bash
 petri create --company=acme --level=1 --local --oasis --name=eval-lab

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,6 +54,71 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Cleanup.CheckInterval == 0 {
 		t.Error("expected default cleanup interval")
+	}
+}
+
+func TestOASISDefaultImage(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		envValue  string
+		wantImage string
+	}{
+		{
+			name:      "no oasis section uses default",
+			yaml:      "state:\n  backend: sqlite\n",
+			wantImage: DefaultOASISImage,
+		},
+		{
+			name:      "empty default_image falls back to default",
+			yaml:      "oasis:\n  default_image: \"\"\n",
+			wantImage: DefaultOASISImage,
+		},
+		{
+			name:      "explicit default_image is honored",
+			yaml:      "oasis:\n  default_image: registry.k8s.io/e2e-test-images/agnhost:2.45\n",
+			wantImage: "registry.k8s.io/e2e-test-images/agnhost:2.45",
+		},
+		{
+			name:      "PETRI_OASIS_DEFAULT_IMAGE overrides yaml",
+			yaml:      "oasis:\n  default_image: registry.k8s.io/nginx-slim:0.27\n",
+			envValue:  "registry.k8s.io/e2e-test-images/agnhost:2.45",
+			wantImage: "registry.k8s.io/e2e-test-images/agnhost:2.45",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0o600); err != nil {
+				t.Fatalf("writing config: %v", err)
+			}
+			if tt.envValue != "" {
+				t.Setenv("PETRI_OASIS_DEFAULT_IMAGE", tt.envValue)
+			} else {
+				t.Setenv("PETRI_OASIS_DEFAULT_IMAGE", "")
+			}
+
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.OASIS.DefaultImage != tt.wantImage {
+				t.Errorf("OASIS.DefaultImage = %q, want %q", cfg.OASIS.DefaultImage, tt.wantImage)
+			}
+		})
+	}
+}
+
+func TestDefaultOASISImageNotDockerHub(t *testing.T) {
+	// The whole point of this config field is to avoid Docker Hub —
+	// guard against an accidental regression to docker.io defaults.
+	if !strings.HasPrefix(DefaultOASISImage, "registry.k8s.io/") {
+		t.Errorf("DefaultOASISImage = %q must be hosted on registry.k8s.io to avoid Docker Hub R2 dependency", DefaultOASISImage)
+	}
+	if strings.HasSuffix(DefaultOASISImage, ":latest") {
+		t.Errorf("DefaultOASISImage = %q must be pinned to a specific tag, not :latest", DefaultOASISImage)
 	}
 }
 
