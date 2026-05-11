@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -13,6 +14,7 @@ func noopLogger() *slog.Logger {
 
 // mockKubeClient is a test double for KubeClient.
 type mockKubeClient struct {
+	mu                sync.Mutex
 	appliedManifests  []string
 	createdNamespaces []createdNS
 	deletedNamespaces []string
@@ -36,6 +38,14 @@ type mockKubeClient struct {
 	// notice its parent context being cancelled — the exact behavior the
 	// fast-fail path must not block on after detecting a pull failure.
 	waitRolloutIgnoreCancel bool
+	// deleteNamespaceDelay sleeps that long inside DeleteNamespace before
+	// returning. Used by async-cleanup tests to verify Provision returns
+	// without waiting for the slow kube call.
+	deleteNamespaceDelay time.Duration
+	// deleteNamespaceErr, when non-nil, is returned from DeleteNamespace
+	// after deleteNamespaceDelay elapses. Independent of m.err so a test
+	// can let other operations succeed but force DeleteNamespace to fail.
+	deleteNamespaceErr error
 }
 
 type createdNS struct {
@@ -53,6 +63,8 @@ func newMockKube() *mockKubeClient {
 }
 
 func (m *mockKubeClient) CreateNamespace(_ context.Context, name string, labels map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
 	}
@@ -60,15 +72,40 @@ func (m *mockKubeClient) CreateNamespace(_ context.Context, name string, labels 
 	return nil
 }
 
-func (m *mockKubeClient) DeleteNamespace(_ context.Context, name string) error {
+func (m *mockKubeClient) DeleteNamespace(ctx context.Context, name string) error {
+	if delay := m.deleteNamespaceDelay; delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
+	}
+	if m.deleteNamespaceErr != nil {
+		return m.deleteNamespaceErr
 	}
 	m.deletedNamespaces = append(m.deletedNamespaces, name)
 	return nil
 }
 
+// deletedNamespacesSnapshot returns a copy of the deletedNamespaces slice
+// under the mock's lock. Callers in tests use it to read the slice from a
+// goroutine other than the one that wrote to it (async cleanup tests).
+func (m *mockKubeClient) deletedNamespacesSnapshot() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.deletedNamespaces))
+	copy(out, m.deletedNamespaces)
+	return out
+}
+
 func (m *mockKubeClient) GetResource(_ context.Context, kind, namespace, name string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return "", m.err
 	}
@@ -76,6 +113,8 @@ func (m *mockKubeClient) GetResource(_ context.Context, kind, namespace, name st
 }
 
 func (m *mockKubeClient) ListResources(_ context.Context, kind, namespace string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return "", m.err
 	}
@@ -87,6 +126,8 @@ func (m *mockKubeClient) ListResources(_ context.Context, kind, namespace string
 }
 
 func (m *mockKubeClient) ApplyYAML(_ context.Context, manifest string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
 	}
@@ -95,6 +136,8 @@ func (m *mockKubeClient) ApplyYAML(_ context.Context, manifest string) error {
 }
 
 func (m *mockKubeClient) GetClusterConfig(_ context.Context) (string, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return "", "", m.err
 	}
@@ -102,6 +145,8 @@ func (m *mockKubeClient) GetClusterConfig(_ context.Context) (string, string, er
 }
 
 func (m *mockKubeClient) TokenForServiceAccount(_ context.Context, namespace, name string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.err != nil {
 		return "", m.err
 	}
@@ -110,28 +155,35 @@ func (m *mockKubeClient) TokenForServiceAccount(_ context.Context, namespace, na
 
 func (m *mockKubeClient) WaitForRollout(ctx context.Context, namespace, deployment string, timeout time.Duration) error {
 	key := namespace + "/" + deployment
+	m.mu.Lock()
 	m.waitRolloutCalls = append(m.waitRolloutCalls, key)
+	rolloutErr := m.waitRolloutErr
+	delay := m.waitRolloutDelay
+	ignoreCancel := m.waitRolloutIgnoreCancel
+	block := m.waitRolloutBlock
+	mErr := m.err
+	m.mu.Unlock()
 	resolveErr := func() error {
-		if m.waitRolloutErr != nil {
-			if err, ok := m.waitRolloutErr[key]; ok {
+		if rolloutErr != nil {
+			if err, ok := rolloutErr[key]; ok {
 				return err
 			}
 		}
-		return m.err
+		return mErr
 	}
 	switch {
-	case m.waitRolloutDelay > 0:
-		if m.waitRolloutIgnoreCancel {
-			time.Sleep(m.waitRolloutDelay)
+	case delay > 0:
+		if ignoreCancel {
+			time.Sleep(delay)
 			return resolveErr()
 		}
 		select {
-		case <-time.After(m.waitRolloutDelay):
+		case <-time.After(delay):
 			return resolveErr()
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-	case m.waitRolloutBlock:
+	case block:
 		select {
 		case <-time.After(timeout):
 			return resolveErr()

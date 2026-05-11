@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jaimegago/petri/pkg/preflight"
 )
 
 // OASISProvider defines the operations required by the OASIS environment provider spec.
@@ -77,6 +79,23 @@ type petriProvider struct {
 	injector *stateInjector
 	audit    AuditLogReader
 	log      *slog.Logger
+	tasks    *asyncTasks
+	// probeImage is the registry probe invoked from the async post-
+	// detection goroutine. Defaults to preflight.ProbeImage; tests inject
+	// a stub to control timing and outcome without doing real HTTP.
+	probeImage probeImageFunc
+}
+
+// probeImageFunc is the signature of the registry probe entry point.
+// Matches preflight.ProbeImage so the package default is a direct
+// reference (no adapter layer).
+type probeImageFunc func(ctx context.Context, image string) (preflight.ImageProbeResult, error)
+
+// defaultProbeImage is the production probe used when petriProvider is not
+// otherwise configured. The http.DefaultClient is intentionally shared so
+// connection reuse works across probes.
+func defaultProbeImage(ctx context.Context, image string) (preflight.ImageProbeResult, error) {
+	return preflight.ProbeImage(ctx, http.DefaultClient, image)
 }
 
 // New returns a new OASISProvider backed by the given KubeClient.
@@ -95,13 +114,24 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 		cfg.DefaultImage = defaultOASISImage
 	}
 	return &petriProvider{
-		cfg:      cfg,
-		kube:     kube,
-		store:    newEnvironmentStore(),
-		injector: newStateInjector(kube, cfg.DefaultImage),
-		audit:    audit,
-		log:      log,
+		cfg:        cfg,
+		kube:       kube,
+		store:      newEnvironmentStore(),
+		injector:   newStateInjector(kube, cfg.DefaultImage),
+		audit:      audit,
+		log:        log,
+		tasks:      newAsyncTasks(log),
+		probeImage: defaultProbeImage,
 	}
+}
+
+// WaitAsyncTasks blocks until in-flight background tasks (registry probes,
+// post-failure namespace cleanups) finish or ctx expires. Returns true if
+// every task drained, false on timeout. The server calls this during
+// graceful shutdown so async work spawned by the most recent request has
+// a bounded chance to complete before the process exits.
+func (p *petriProvider) WaitAsyncTasks(ctx context.Context) bool {
+	return p.tasks.Wait(ctx)
 }
 
 // Provision creates a new evaluation environment for the given scenario.
@@ -138,14 +168,22 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 			"petri.io/env":      envID,
 			"petri.io/scenario": req.ScenarioID,
 		}); err != nil {
-			_ = p.kube.DeleteNamespace(ctx, namespace) // best-effort cleanup
+			// Sync cleanup: failure here is in the setup phase, before any
+			// kubelet-side latency has accumulated. The response is fast and
+			// the operator expects the namespace to be gone by the time the
+			// 500 lands. See ADR 0011 for why only the rollout path is async.
+			_ = p.kube.DeleteNamespace(ctx, namespace)
 			return ProvisionResponse{}, fmt.Errorf("creating referenced namespace %s: %w", e.Namespace, err)
 		}
 	}
 
 	// 3. Apply all precondition state entries.
 	if err := p.injector.Apply(ctx, req.Environment.State, namespace); err != nil {
-		_ = p.kube.DeleteNamespace(ctx, namespace) // best-effort cleanup
+		// Sync cleanup: a partial state injection may matter for response
+		// semantics — the client may want to introspect what landed — so the
+		// caller currently waits for the namespace to be torn down before
+		// the response returns. ADR 0011 explains the per-path choice.
+		_ = p.kube.DeleteNamespace(ctx, namespace)
 		return ProvisionResponse{}, fmt.Errorf("applying precondition state: %w", err)
 	}
 
@@ -153,12 +191,20 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	// out. All other statuses and deployments without a status field are
 	// skipped — they represent intentionally unhealthy states.
 	if err := p.waitForHealthyDeployments(ctx, req.Environment.State, namespace); err != nil {
-		_ = p.kube.DeleteNamespace(ctx, namespace) // best-effort cleanup
+		// Async cleanup: the typed error from waitForHealthyDeployments is
+		// fully populated; the response body does not depend on the
+		// namespace being gone. Returning immediately cuts ~5s off the
+		// client-visible latency on the image-pull-failure path. See
+		// ADR 0011 for the contract.
+		p.scheduleNamespaceCleanup(namespace, envID, asyncCleanupReason(err))
 		return ProvisionResponse{}, fmt.Errorf("waiting for deployments: %w", err)
 	}
 
 	// 4. Setup RBAC for the agent.
 	if err := p.setupAgentRBAC(ctx, namespace, req.Agent.Scope); err != nil {
+		// Sync cleanup: RBAC failures are local kube API errors with no
+		// kubelet-side latency to hide behind. The response is fast and
+		// keeping cleanup inline preserves the historical behavior.
 		_ = p.kube.DeleteNamespace(ctx, namespace)
 		return ProvisionResponse{}, fmt.Errorf("setting up agent RBAC: %w", err)
 	}
@@ -711,6 +757,65 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 		return &ErrRolloutTimeout{Timeout: rolloutTimeout, Deployments: failed}
 	}
 	return nil
+}
+
+// asyncCleanupConfig holds the bounded timeout for the post-failure
+// namespace-cleanup goroutine. Picked at 60s because kube API namespace
+// finalization commonly takes 5-15s on busy clusters; 60s leaves headroom
+// without holding shutdown forever.
+const asyncCleanupTimeout = 60 * time.Second
+
+// asyncCleanupReason returns a short, log-friendly label describing why
+// cleanup was triggered. The full error is not logged here — it has already
+// been written by waitForHealthyDeployments — but the reason field helps
+// operators correlate the cleanup line with the upstream failure.
+func asyncCleanupReason(err error) string {
+	var pull *ErrImagePullFailure
+	if errors.As(err, &pull) {
+		return "image-pull-failure"
+	}
+	var timeout *ErrRolloutTimeout
+	if errors.As(err, &timeout) {
+		return "rollout-timeout"
+	}
+	return "deployment-rollout-failed"
+}
+
+// scheduleNamespaceCleanup deletes namespace in a tracked background
+// goroutine. Used on the waitForHealthyDeployments failure path where the
+// typed error is already in hand and the HTTP response is fully formed —
+// the client gains nothing by waiting for kube to ack the deletion. The
+// goroutine uses a detached context (decoupled from the request ctx) so
+// cleanup outlives the response, and is registered with p.tasks so petri
+// serve's shutdown handler can wait for it.
+func (p *petriProvider) scheduleNamespaceCleanup(namespace, envID, reason string) {
+	p.log.Info("async cleanup: deleting namespace after provision failure",
+		"namespace", namespace, "env_id", envID, "reason", reason)
+	p.tasks.Go("namespace-cleanup:"+namespace, func() {
+		cctx, cancel := context.WithTimeout(context.Background(), asyncCleanupTimeout)
+		defer cancel()
+		start := time.Now()
+		if err := p.kube.DeleteNamespace(cctx, namespace); err != nil {
+			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+				p.log.Warn("async cleanup: namespace deletion timed out",
+					"namespace", namespace,
+					"duration_ms", time.Since(start).Milliseconds(),
+					"error", err.Error(),
+				)
+				return
+			}
+			p.log.Warn("async cleanup: namespace deletion failed",
+				"namespace", namespace,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"error", err.Error(),
+			)
+			return
+		}
+		p.log.Info("async cleanup: namespace deletion succeeded",
+			"namespace", namespace,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	})
 }
 
 func (p *petriProvider) setupAgentRBAC(ctx context.Context, namespace string, scope AgentScope) error {

@@ -47,6 +47,22 @@ func (s *Server) Handler() http.Handler {
 	return loggingMiddleware(s.log, s.mux)
 }
 
+// asyncShutdowner is the optional interface a provider implements when it
+// spawns tracked background goroutines (registry probes, post-failure
+// namespace cleanups). Server.ListenAndServe waits on it during graceful
+// shutdown so in-flight async work has a bounded chance to complete before
+// the process exits. See ADR 0011.
+type asyncShutdowner interface {
+	WaitAsyncTasks(ctx context.Context) bool
+}
+
+// asyncShutdownTimeout bounds how long the server will wait for in-flight
+// async work (probes + cleanups) during graceful shutdown before forcing
+// exit. Matches the per-task cleanup budget in provider.go so a cleanup
+// that just started has a full budget to finish; the probe budget is the
+// same.
+const asyncShutdownTimeout = 30 * time.Second
+
 // ListenAndServe starts the HTTP server and blocks until ctx is cancelled or an error occurs.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	srv := &http.Server{
@@ -71,10 +87,32 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		shutdownErr := srv.Shutdown(shutdownCtx)
+		s.drainAsyncTasks()
+		return shutdownErr
 	case err := <-errCh:
 		return err
 	}
+}
+
+// drainAsyncTasks waits for the provider's in-flight async work to complete
+// during graceful shutdown, up to asyncShutdownTimeout. Outcome is logged
+// so operators reading run.log can tell whether cleanups landed before
+// petri serve exited.
+func (s *Server) drainAsyncTasks() {
+	a, ok := s.provider.(asyncShutdowner)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), asyncShutdownTimeout)
+	defer cancel()
+	s.log.Info("draining async tasks on shutdown", "timeout", asyncShutdownTimeout.String())
+	if a.WaitAsyncTasks(ctx) {
+		s.log.Info("async tasks drained cleanly on shutdown")
+		return
+	}
+	s.log.Warn("async tasks did not drain within shutdown budget; abandoning",
+		"timeout", asyncShutdownTimeout.String())
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────

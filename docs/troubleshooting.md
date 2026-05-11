@@ -89,6 +89,42 @@ that [`petri verify`](verify.md) uses, so you get an immediate answer to
 having to manually re-run verify. `probe_outcome` is one of `pass`,
 `manifest-fail`, `perarch-fail`, `blob-tcp-fail`, `blob-http-fail`.
 
+### Async log ordering: probe and cleanup arrive after the 502 response
+
+As of [ADR 0011](decisions/0011-async-cleanup-and-probe.md), the registry
+probe and the post-failure namespace deletion run in background goroutines
+so the HTTP 502 returns within ~1s of the watcher firing instead of ~10s.
+This means the `"image pull failure: registry probe result"` line and the
+`"async cleanup: namespace deletion succeeded"` line can — and usually do
+— appear in run.log **after** the corresponding HTTP-request log line for
+the 502. Look forward ~30s in the log for the async confirmations, not
+inline.
+
+The async lines you can grep for:
+
+```
+msg="async cleanup: deleting namespace after provision failure" namespace=oasis-xxx env_id=... reason=image-pull-failure
+msg="async cleanup: namespace deletion succeeded" namespace=oasis-xxx duration_ms=...
+msg="async cleanup: namespace deletion failed" namespace=oasis-xxx error=...
+msg="async cleanup: namespace deletion timed out" namespace=oasis-xxx
+msg="image pull failure: registry probe abandoned" image=... timeout=30s
+```
+
+On SIGTERM, `petri serve` waits up to 30s for in-flight async tasks
+before exiting and logs the outcome:
+
+```
+msg="draining async tasks on shutdown" timeout=30s
+msg="async tasks drained cleanly on shutdown"
+# or, if the budget elapsed:
+msg="async tasks did not drain within shutdown budget; abandoning" timeout=30s
+```
+
+If the abandonment line fires, the namespace was not torn down by petri.
+Either delete it manually with `kubectl delete ns oasis-xxx` or let the
+next `petri serve` run consume it (scenario namespaces include the env
+ID, so re-use is safe).
+
 When the failure is registry-side (`probe_outcome=manifest-fail` or
 `blob-tcp-fail`), see the [R2 / Cloudflare](#catching-the-r2--cloudflare-image-pull-failure)
 section above — that's the most common kind. When the probe passes but

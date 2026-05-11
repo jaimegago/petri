@@ -3,13 +3,19 @@ package oasis
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
-	"net/http"
+	"errors"
 	"strings"
 	"time"
-
-	"github.com/jaimegago/petri/pkg/preflight"
 )
+
+// registryProbeTimeout bounds the post-detection registry probe. The probe
+// itself usually finishes in well under a second on a reachable registry,
+// but an unrouted destination can stall on TCP retries. The 30s ceiling is
+// generous enough to cover the worst real-world case (HTTPS handshake +
+// blob HEAD on a slow-but-up registry) without leaking goroutines on
+// shutdown. The probe runs detached from the request context — see
+// ADR 0011 — so we cannot rely on the request's own deadline.
+const registryProbeTimeout = 30 * time.Second
 
 // pullWatchInterval is the cadence at which the watcher polls pod state. Set
 // to 3s — roughly one kubelet event-flush cycle — so we detect kubelet-
@@ -192,36 +198,48 @@ func (p *petriProvider) scanPullFailures(
 				"reason", cs.reason,
 				"message", cs.message,
 			)
-			p.logRegistryProbe(ctx, p.log, cs.image)
+			p.scheduleRegistryProbe(cs.image)
 			return pf
 		}
 	}
 	return nil
 }
 
-// logRegistryProbe runs ProbeImage against the failing reference and emits a
-// follow-up structured log line so the operator can immediately tell whether
-// the registry itself is unreachable or whether the failure is kubelet-
-// specific (e.g. kind node missing a private-registry credential). The probe
-// runs with a tight budget — failure to probe must not stall the fast-fail
-// path.
-func (p *petriProvider) logRegistryProbe(parent context.Context, log *slog.Logger, image string) {
-	pctx, cancel := context.WithTimeout(parent, 5*time.Second)
-	defer cancel()
-	result, err := preflight.ProbeImage(pctx, http.DefaultClient, image)
-	if err != nil {
-		log.Warn("image pull failure: registry probe result",
+// scheduleRegistryProbe runs the configured registry probe against the
+// failing reference in a tracked background goroutine and emits a
+// structured log line when it completes. The probe is purely diagnostic —
+// the typed ErrImagePullFailure is already fully populated by the time we
+// get here — so blocking the HTTP response on its 5-30s budget was wasted
+// client wait time. Running it async preserves the operator-facing log
+// signal at the cost of having the "registry probe result" line arrive
+// AFTER the 502 response in run.log. See ADR 0011.
+func (p *petriProvider) scheduleRegistryProbe(image string) {
+	p.tasks.Go("registry-probe:"+image, func() {
+		pctx, cancel := context.WithTimeout(context.Background(), registryProbeTimeout)
+		defer cancel()
+		result, err := p.probeImage(pctx, image)
+		if err != nil {
+			if errors.Is(pctx.Err(), context.DeadlineExceeded) {
+				p.log.Warn("image pull failure: registry probe abandoned",
+					"image", image,
+					"timeout", registryProbeTimeout.String(),
+					"probe_detail", err.Error(),
+				)
+				return
+			}
+			p.log.Warn("image pull failure: registry probe result",
+				"image", image,
+				"probe_outcome", "invalid-ref",
+				"probe_detail", err.Error(),
+			)
+			return
+		}
+		p.log.Warn("image pull failure: registry probe result",
 			"image", image,
-			"probe_outcome", "invalid-ref",
-			"probe_detail", err.Error(),
+			"probe_outcome", result.Outcome(),
+			"probe_detail", result.Detail(),
 		)
-		return
-	}
-	log.Warn("image pull failure: registry probe result",
-		"image", image,
-		"probe_outcome", result.Outcome(),
-		"probe_detail", result.Detail(),
-	)
+	})
 }
 
 // ── pod-list parsing ─────────────────────────────────────────────────────────

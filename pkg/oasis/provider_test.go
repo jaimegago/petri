@@ -8,11 +8,23 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jaimegago/petri/pkg/preflight"
 )
 
 func newTestProvider(mock *mockKubeClient) *petriProvider {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	return New(ProviderConfig{}, mock, log).(*petriProvider)
+	p := New(ProviderConfig{}, mock, log).(*petriProvider)
+	// Stub the registry probe so unit tests never make real HTTP calls.
+	// Tests that exercise the probe (async_test.go) override this field
+	// after construction.
+	p.probeImage = stubProbeImage
+	return p
+}
+
+func stubProbeImage(_ context.Context, _ string) (preflight.ImageProbeResult, error) {
+	return preflight.ImageProbeResult{ManifestOK: true}, nil
 }
 
 // ── Provision ─────────────────────────────────────────────────────────────────
@@ -341,8 +353,14 @@ func TestProvision(t *testing.T) {
 		if !strings.Contains(err.Error(), "frontend/web-app") {
 			t.Errorf("error should mention failed deployment: %v", err)
 		}
-		// Namespace should be cleaned up.
-		if len(mock.deletedNamespaces) == 0 {
+		// Cleanup runs in a background goroutine on the rollout-failure
+		// path (ADR 0011), so wait for it before asserting on the mock.
+		waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if !p.WaitAsyncTasks(waitCtx) {
+			t.Fatal("async cleanup did not finish within 2s")
+		}
+		if len(mock.deletedNamespacesSnapshot()) == 0 {
 			t.Error("expected namespace to be deleted on rollout failure")
 		}
 	})
