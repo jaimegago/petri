@@ -48,6 +48,60 @@ iptables synthetic-repro inside the kind node only catches the failure in
 R2 on the host (e.g. `pfctl` on macOS, `iptables` on Linux) before running
 `petri verify`.
 
+## /v1/provision returns 502: image pull failure
+
+When `petri serve` returns HTTP **502 Bad Gateway** from `/v1/provision`,
+the scenario's deployment referenced an image that kubelet couldn't pull.
+Petri detects this via a pod-event watcher that runs alongside the
+60-second rollout wait, and short-circuits the wait as soon as kubelet
+reports the failure (typically within ~3 seconds).
+
+The 502 response body is the standard `{status, message}` envelope plus
+structured fields:
+
+```json
+{
+  "status": "error",
+  "message": "image pull failure for example.invalid/x:1.0 in pod ns/web-app-abc-1: ImagePullBackOff: ...",
+  "image": "example.invalid/x:1.0",
+  "namespace": "ns",
+  "pod": "web-app-abc-1",
+  "reason": "ImagePullBackOff",
+  "kubelet_message": "Back-off pulling image \"example.invalid/x:1.0\""
+}
+```
+
+`reason` is one of: `ImagePullBackOff`, `ErrImagePull`, `ErrImageNeverPull`,
+`RegistryUnavailable`, `InvalidImageName`, `CreateContainerConfigError`,
+`ImageInspectError`, `SignatureValidationFailed`.
+
+`petri serve` also emits two structured WARN log lines you can grep in
+run.log:
+
+```
+msg="image pull failure detected" deployment=web-app namespace=ns image=... pod_name=web-app-abc-1 reason=ImagePullBackOff message="..."
+msg="image pull failure: registry probe result" image=... probe_outcome=manifest-fail probe_detail="..."
+```
+
+The follow-up "registry probe result" line runs the same registry probe
+that [`petri verify`](verify.md) uses, so you get an immediate answer to
+"is the registry itself unreachable, or is this kubelet-specific?" without
+having to manually re-run verify. `probe_outcome` is one of `pass`,
+`manifest-fail`, `perarch-fail`, `blob-tcp-fail`, `blob-http-fail`.
+
+When the failure is registry-side (`probe_outcome=manifest-fail` or
+`blob-tcp-fail`), see the [R2 / Cloudflare](#catching-the-r2--cloudflare-image-pull-failure)
+section above — that's the most common kind. When the probe passes but
+kubelet still fails, the cluster nodes have a different network view than
+the petri host (e.g. a kind node missing a private-registry credential,
+or an HTTP proxy on the host that the kind node doesn't honor).
+
+The 502 status is distinct from the 500 returned by readiness failures
+that are NOT image-pull related (failing liveness probe, scheduling
+pressure, etc.). Those keep the historical phrasing in their response
+body — `deployments did not become ready within 1m0s: ns/name` — so run.log
+parsers that grep for that string continue to work.
+
 ## Lab creation fails at Terraform apply
 
 ```bash

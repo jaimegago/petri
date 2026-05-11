@@ -163,10 +163,26 @@ type UnmetRequirement struct {
 	Reason      string `json:"reason"`
 }
 
-// errorResponse is the JSON body returned on API errors.
+// errorResponse is the JSON body returned on API errors. Some failure shapes
+// extend it with additional structured fields (see imagePullErrorResponse).
 type errorResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message"`
+}
+
+// imagePullErrorResponse is the structured body returned alongside HTTP 502
+// when /v1/provision fails because of a kubelet-reported image-pull failure.
+// It extends the generic {status, message} envelope with the typed fields
+// from ErrImagePullFailure so the runner / oasisctl can route to "substrate
+// failure" without parsing the human-readable message.
+type imagePullErrorResponse struct {
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	Image          string `json:"image"`
+	Namespace      string `json:"namespace"`
+	Pod            string `json:"pod"`
+	Reason         string `json:"reason"`
+	KubeletMessage string `json:"kubelet_message,omitempty"`
 }
 
 // paramString extracts a string value from ObserveRequest parameters.

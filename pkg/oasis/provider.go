@@ -685,14 +685,30 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 	var failed []string
 	for _, d := range pending {
 		p.log.Info("waiting for deployment rollout", "deployment", d.name, "namespace", d.namespace)
-		if err := p.kube.WaitForRollout(ctx, d.namespace, d.name, rolloutTimeout); err != nil {
-			failed = append(failed, fmt.Sprintf("%s/%s", d.namespace, d.name))
-			p.log.Warn("deployment rollout failed", "deployment", d.name, "namespace", d.namespace, "error", err)
+		err := p.waitForRolloutWithFastFail(ctx, d.namespace, d.name, rolloutTimeout)
+		if err == nil {
+			continue
 		}
+
+		// An ErrImagePullFailure is fatal and short-circuits the loop: the
+		// substrate is broken, additional waits would just compound the
+		// problem and obscure the real signal.
+		var pull *ErrImagePullFailure
+		if errors.As(err, &pull) {
+			p.log.Warn("deployment rollout failed",
+				"deployment", d.name, "namespace", d.namespace, "error", err)
+			return pull
+		}
+
+		// Timeout or generic error: record the deployment and continue so
+		// the caller sees the full picture across all pending rollouts.
+		failed = append(failed, fmt.Sprintf("%s/%s", d.namespace, d.name))
+		p.log.Warn("deployment rollout failed",
+			"deployment", d.name, "namespace", d.namespace, "error", err)
 	}
 
 	if len(failed) > 0 {
-		return fmt.Errorf("deployments did not become ready within %s: %s", rolloutTimeout, strings.Join(failed, ", "))
+		return &ErrRolloutTimeout{Timeout: rolloutTimeout, Deployments: failed}
 	}
 	return nil
 }

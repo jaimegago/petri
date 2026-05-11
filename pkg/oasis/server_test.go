@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -134,6 +135,85 @@ func TestServer_Provision(t *testing.T) {
 		}
 		if errResp.Status != "error" {
 			t.Errorf("error status = %q, want %q", errResp.Status, "error")
+		}
+	})
+
+	t.Run("ErrImagePullFailure returns 502 with structured body", func(t *testing.T) {
+		t.Parallel()
+		mock := &mockOASISProvider{err: &ErrImagePullFailure{
+			Image:     "example.invalid/x:1.0",
+			Namespace: "frontend",
+			Pod:       "web-app-abc-1",
+			Reason:    "ImagePullBackOff",
+			Message:   "Back-off pulling image",
+		}}
+		srv := NewServer(mock, noopLogger())
+		w := postJSON(t, srv.Handler(), "/v1/provision", ProvisionRequest{})
+
+		if w.Code != http.StatusBadGateway {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
+		}
+		var body imagePullErrorResponse
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if body.Status != "error" {
+			t.Errorf("status = %q, want %q", body.Status, "error")
+		}
+		if body.Image != "example.invalid/x:1.0" {
+			t.Errorf("image = %q", body.Image)
+		}
+		if body.Namespace != "frontend" {
+			t.Errorf("namespace = %q", body.Namespace)
+		}
+		if body.Pod != "web-app-abc-1" {
+			t.Errorf("pod = %q", body.Pod)
+		}
+		if body.Reason != "ImagePullBackOff" {
+			t.Errorf("reason = %q", body.Reason)
+		}
+		if body.KubeletMessage != "Back-off pulling image" {
+			t.Errorf("kubelet_message = %q", body.KubeletMessage)
+		}
+	})
+
+	t.Run("ErrRolloutTimeout returns 500 with historical phrasing", func(t *testing.T) {
+		t.Parallel()
+		mock := &mockOASISProvider{err: &ErrRolloutTimeout{
+			Timeout:     60 * time.Second,
+			Deployments: []string{"frontend/web-app"},
+		}}
+		srv := NewServer(mock, noopLogger())
+		w := postJSON(t, srv.Handler(), "/v1/provision", ProvisionRequest{})
+
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+		}
+		var body errorResponse
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if !strings.Contains(body.Message, "deployments did not become ready within 1m0s") {
+			t.Errorf("message = %q, missing historical phrasing", body.Message)
+		}
+	})
+
+	t.Run("ErrImagePullFailure 502 mapping survives error wrap", func(t *testing.T) {
+		t.Parallel()
+		// Provider returns the typed error wrapped by an outer fmt.Errorf —
+		// the same shape Provision uses to attach context. The handler must
+		// still classify it as a pull failure via errors.As.
+		mock := &mockOASISProvider{err: fmt.Errorf("waiting for deployments: %w", &ErrImagePullFailure{
+			Image:     "example.invalid/x:1.0",
+			Namespace: "ns",
+			Pod:       "pod-1",
+			Reason:    "ErrImagePull",
+		})}
+		srv := NewServer(mock, noopLogger())
+		w := postJSON(t, srv.Handler(), "/v1/provision", ProvisionRequest{})
+
+		if w.Code != http.StatusBadGateway {
+			t.Errorf("status = %d, want %d (wrapped typed error must still map to 502)", w.Code, http.StatusBadGateway)
 		}
 	})
 

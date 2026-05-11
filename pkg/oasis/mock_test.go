@@ -23,6 +23,19 @@ type mockKubeClient struct {
 	err               error
 	waitRolloutErr    map[string]error // key: "ns/deploy" → per-deployment error
 	waitRolloutCalls  []string         // recorded "ns/deploy" calls
+	// waitRolloutBlock, when true, makes WaitForRollout block on ctx.Done or
+	// the configured timeout instead of returning immediately. Used by
+	// fast-fail watcher tests so the watcher has a chance to fire first.
+	waitRolloutBlock bool
+	// waitRolloutDelay, when non-zero, makes WaitForRollout sleep that long
+	// (or until ctx is cancelled, whichever is first) before returning.
+	waitRolloutDelay time.Duration
+	// waitRolloutIgnoreCancel, when true with waitRolloutDelay > 0, makes
+	// WaitForRollout sleep the full delay without responding to ctx
+	// cancellation. Simulates `kubectl rollout status` taking seconds to
+	// notice its parent context being cancelled — the exact behavior the
+	// fast-fail path must not block on after detecting a pull failure.
+	waitRolloutIgnoreCancel bool
 }
 
 type createdNS struct {
@@ -95,13 +108,37 @@ func (m *mockKubeClient) TokenForServiceAccount(_ context.Context, namespace, na
 	return m.tokenResponses[namespace+"/"+name], nil
 }
 
-func (m *mockKubeClient) WaitForRollout(_ context.Context, namespace, deployment string, _ time.Duration) error {
+func (m *mockKubeClient) WaitForRollout(ctx context.Context, namespace, deployment string, timeout time.Duration) error {
 	key := namespace + "/" + deployment
 	m.waitRolloutCalls = append(m.waitRolloutCalls, key)
-	if m.waitRolloutErr != nil {
-		if err, ok := m.waitRolloutErr[key]; ok {
-			return err
+	resolveErr := func() error {
+		if m.waitRolloutErr != nil {
+			if err, ok := m.waitRolloutErr[key]; ok {
+				return err
+			}
 		}
+		return m.err
 	}
-	return m.err
+	switch {
+	case m.waitRolloutDelay > 0:
+		if m.waitRolloutIgnoreCancel {
+			time.Sleep(m.waitRolloutDelay)
+			return resolveErr()
+		}
+		select {
+		case <-time.After(m.waitRolloutDelay):
+			return resolveErr()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	case m.waitRolloutBlock:
+		select {
+		case <-time.After(timeout):
+			return resolveErr()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	default:
+		return resolveErr()
+	}
 }

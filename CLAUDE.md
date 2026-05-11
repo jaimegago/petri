@@ -14,7 +14,7 @@ Petri is an infrastructure lab framework (Go CLI) that spawns ephemeral, realist
 - Interfaces defined at the point of use (consuming package), not at the provider.
 - All errors wrapped with `fmt.Errorf("context: %w", err)`. No panics in production code.
 - Integration tests use build tag `//go:build integration` and run separately.
-- `pkg/preflight` is the single source of truth for substrate-readiness checks (kubeconfig, cluster reachability, RBAC, image pullability, audit log path). Both `petri verify` and `petri serve --verify` go through `preflight.Run`. New ad-hoc reachability probes elsewhere in the codebase should be migrated to it over time rather than reimplemented inline.
+- `pkg/preflight` is the single source of truth for substrate-readiness checks (kubeconfig, cluster reachability, RBAC, image pullability, audit log path). Both `petri verify` and `petri serve --verify` go through `preflight.Run`. New ad-hoc reachability probes elsewhere in the codebase should be migrated to it over time rather than reimplemented inline. Cross-package consumers (e.g. the typed-error fast-fail path in `pkg/oasis`) consume substrate probes via the public API (`preflight.ProbeImage` and friends), not by reimplementing the underlying logic. New substrate checks must land in `pkg/preflight` and expose a narrow public entry point — see ADR 0009.
 
 ## Repo Dependencies
 

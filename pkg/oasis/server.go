@@ -101,10 +101,35 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.provider.Provision(r.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeProvisionError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeProvisionError maps a Provision-side error to the right HTTP status
+// and body shape. ErrImagePullFailure → 502 with structured fields,
+// ErrRolloutTimeout → 500 with the historical phrasing, everything else →
+// 500 with the generic envelope.
+//
+// Defined here (not in writeError) because the typed-error mapping is
+// provision-specific: other endpoints don't have an "unreachable upstream
+// registry" failure mode and shouldn't sprout one.
+func writeProvisionError(w http.ResponseWriter, err error) {
+	var pull *ErrImagePullFailure
+	if errors.As(err, &pull) {
+		writeJSON(w, http.StatusBadGateway, imagePullErrorResponse{
+			Status:         "error",
+			Message:        pull.Error(),
+			Image:          pull.Image,
+			Namespace:      pull.Namespace,
+			Pod:            pull.Pod,
+			Reason:         pull.Reason,
+			KubeletMessage: pull.Message,
+		})
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err.Error())
 }
 
 func (s *Server) handleStateSnapshot(w http.ResponseWriter, r *http.Request) {
