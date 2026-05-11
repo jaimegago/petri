@@ -13,7 +13,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jaimegago/petri/pkg/preflight"
+	"golang.org/x/sync/errgroup"
 )
+
+// rolloutWaitConcurrency caps how many per-deployment rollout waits run in
+// parallel inside waitForHealthyDeployments. Real OASIS scenarios today
+// declare at most a handful of Deployments (the busiest is
+// infra.safety.be.zone-violation-001 at 2), so 8 covers all of them with
+// headroom while preventing a future 50-deployment scenario from spawning
+// 50 kubectl subprocesses and overwhelming the kube API. See ADR 0012.
+const rolloutWaitConcurrency = 8
 
 // OASISProvider defines the operations required by the OASIS environment provider spec.
 // All implementations must be safe for concurrent use.
@@ -728,33 +737,34 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 
 	p.log.Info("waiting for healthy deployments to roll out", "count", len(pending))
 
-	var failed []string
+	// Per-deployment waits run concurrently with first-failure-wins semantics.
+	// errgroup cancels its derived context the moment any goroutine returns a
+	// non-nil error; sibling waits exit promptly because
+	// waitForRolloutWithFastFail respects ctx cancellation. See ADR 0012.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(rolloutWaitConcurrency)
 	for _, d := range pending {
-		p.log.Info("waiting for deployment rollout", "deployment", d.name, "namespace", d.namespace)
-		err := p.waitForRolloutWithFastFail(ctx, d.namespace, d.name, rolloutTimeout)
-		if err == nil {
-			continue
-		}
-
-		// An ErrImagePullFailure is fatal and short-circuits the loop: the
-		// substrate is broken, additional waits would just compound the
-		// problem and obscure the real signal.
-		var pull *ErrImagePullFailure
-		if errors.As(err, &pull) {
-			p.log.Warn("deployment rollout failed",
-				"deployment", d.name, "namespace", d.namespace, "error", err)
-			return pull
-		}
-
-		// Timeout or generic error: record the deployment and continue so
-		// the caller sees the full picture across all pending rollouts.
-		failed = append(failed, fmt.Sprintf("%s/%s", d.namespace, d.name))
-		p.log.Warn("deployment rollout failed",
-			"deployment", d.name, "namespace", d.namespace, "error", err)
+		d := d
+		g.Go(func() error {
+			p.log.Info("waiting for deployment rollout", "deployment", d.name, "namespace", d.namespace)
+			err := p.waitForRolloutWithFastFail(gctx, d.namespace, d.name, rolloutTimeout)
+			if err != nil {
+				p.log.Warn("deployment rollout failed",
+					"deployment", d.name, "namespace", d.namespace, "error", err)
+			}
+			return err
+		})
 	}
 
-	if len(failed) > 0 {
-		return &ErrRolloutTimeout{Timeout: rolloutTimeout, Deployments: failed}
+	if err := g.Wait(); err != nil {
+		// The typed errors flow through unchanged: waitForRolloutWithFastFail
+		// already returns either *ErrImagePullFailure or a single-deployment
+		// *ErrRolloutTimeout. Aggregate timeouts that previously listed
+		// multiple deployments now carry exactly one entry in the typical
+		// failure case (the first goroutine to fail wins). Sibling failures
+		// are visible only via the per-deployment "deployment rollout failed"
+		// WARN line each watcher emits before returning.
+		return err
 	}
 	return nil
 }

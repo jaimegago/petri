@@ -138,6 +138,73 @@ pressure, etc.). Those keep the historical phrasing in their response
 body — `deployments did not become ready within 1m0s: ns/name` — so run.log
 parsers that grep for that string continue to work.
 
+### Multi-deployment scenarios: one timeout, several WARN lines
+
+As of [ADR 0012](decisions/0012-parallel-rollout-waits.md), petri waits
+on multiple deployments in parallel. The `ErrRolloutTimeout` response
+body will commonly list a **single** deployment rather than a
+comma-separated list, because the first goroutine to fail short-circuits
+the rest. Sibling failures still emit a per-deployment WARN line in
+`run.log` — in temporal order — so the full picture is recoverable
+from the log even when the HTTP response carries only one.
+
+```
+msg="deployment rollout failed" deployment=checkout-api namespace=payments error="..."
+msg="deployment rollout failed" deployment=web-app namespace=frontend error="..."
+```
+
+The grep string `"deployments did not become ready within"` still
+matches on the response body for the surviving error; only the trailing
+list shape changed.
+
+### Effective rollout-timeout budget: per-deployment, not per-scenario
+
+With parallel waits in place
+([ADR 0012](decisions/0012-parallel-rollout-waits.md)), the hardcoded
+60-second `rolloutTimeout` is now a **per-deployment** budget, not a
+per-scenario one. Before parallelization, a scenario with N deployments
+could consume up to N × 60s of wall clock during the healthy-rollout
+phase, and oasisctl's client-side request timeout was the practical
+ceiling. After parallelization, the wall-clock ceiling for that phase is
+always ~60s regardless of deployment count, up to the concurrency cap of
+8. Use this to set expectations when sizing client-side timeouts: budget
+~60s of substrate-wait headroom per scenario, plus the cost of
+non-rollout work (namespace creation, state injection, RBAC).
+
+### Per-deployment rollout floor on kind clusters
+
+On the kind-based local lab provisioner, a single Deployment rollout
+takes ~10-20s of wall clock even when the container image is already
+cached on the node. The time is spent on pod scheduling, Calico CNI
+sandbox setup, projected-volume mounts (service account token,
+`kube-root-ca.crt`), container start, and the Deployment controller
+waiting for at least one pod to reach Ready before reporting the
+rollout complete. This is the kind substrate's baseline, not a petri
+regression — a single-deployment scenario provisioning in ~15s is
+behaving normally. The 60s `rolloutTimeout` is sized around this
+floor: a healthy deployment lands well inside it, a stuck one
+exhausts it.
+
+### Parallelism diagnostic signature in run.log
+
+To confirm at a glance that parallel rollout waits are working as
+intended, look at the `"waiting for deployment rollout"` INFO lines in
+petri's log (typically `/tmp/petri-serve.log` or wherever the operator
+redirects stdout). For a multi-deployment scenario, all those lines
+should fire within a few milliseconds of each other:
+
+```
+2026-05-11T10:42:13.084 INFO waiting for deployment rollout deployment=app-a namespace=ns-a
+2026-05-11T10:42:13.084 INFO waiting for deployment rollout deployment=app-b namespace=ns-b
+2026-05-11T10:42:13.085 INFO waiting for deployment rollout deployment=app-c namespace=ns-c
+```
+
+If those lines are staggered by seconds in a multi-deployment scenario,
+that is a regression signal: parallelism has been disabled or broken by
+a refactor. The pre-ADR-0012 sequential implementation produced lines
+staggered by whatever each rollout took (often 10+ seconds apart),
+which is the shape to watch for.
+
 ## Lab creation fails at Terraform apply
 
 ```bash

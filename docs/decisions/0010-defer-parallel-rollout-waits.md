@@ -1,7 +1,10 @@
 # 0010. Parallel rollout waits are deferred to a separate change
 
 - Date: 2026-05-10
-- Status: accepted
+- Status: superseded by 0012
+
+> Superseded by [0012-parallel-rollout-waits.md](0012-parallel-rollout-waits.md),
+> which lands the parallel-wait change this ADR deferred.
 
 ## Context
 

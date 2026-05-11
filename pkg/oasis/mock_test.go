@@ -46,6 +46,11 @@ type mockKubeClient struct {
 	// after deleteNamespaceDelay elapses. Independent of m.err so a test
 	// can let other operations succeed but force DeleteNamespace to fail.
 	deleteNamespaceErr error
+	// waitRolloutInflight tracks the number of WaitForRollout calls
+	// currently in flight; waitRolloutMaxInflight records the peak.
+	// Used by the parallel-wait concurrency-cap test.
+	waitRolloutInflight    int
+	waitRolloutMaxInflight int
 }
 
 type createdNS struct {
@@ -103,6 +108,15 @@ func (m *mockKubeClient) deletedNamespacesSnapshot() []string {
 	return out
 }
 
+// maxConcurrentWaitRollout returns the peak WaitForRollout concurrency
+// observed during the test. Used to assert the parallel-wait concurrency
+// cap is honored.
+func (m *mockKubeClient) maxConcurrentWaitRollout() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.waitRolloutMaxInflight
+}
+
 func (m *mockKubeClient) GetResource(_ context.Context, kind, namespace, name string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -157,12 +171,21 @@ func (m *mockKubeClient) WaitForRollout(ctx context.Context, namespace, deployme
 	key := namespace + "/" + deployment
 	m.mu.Lock()
 	m.waitRolloutCalls = append(m.waitRolloutCalls, key)
+	m.waitRolloutInflight++
+	if m.waitRolloutInflight > m.waitRolloutMaxInflight {
+		m.waitRolloutMaxInflight = m.waitRolloutInflight
+	}
 	rolloutErr := m.waitRolloutErr
 	delay := m.waitRolloutDelay
 	ignoreCancel := m.waitRolloutIgnoreCancel
 	block := m.waitRolloutBlock
 	mErr := m.err
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.waitRolloutInflight--
+		m.mu.Unlock()
+	}()
 	resolveErr := func() error {
 		if rolloutErr != nil {
 			if err, ok := rolloutErr[key]; ok {
