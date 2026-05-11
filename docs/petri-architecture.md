@@ -127,10 +127,13 @@ Once created, labs run independently:
 
 **State Machine:**
 ```
-CREATING → ACTIVE → EXPIRING → DESTROYING → DESTROYED
-                  ↓
-                ERROR
+CREATING → ACTIVE → EXPIRED → DESTROYING → DESTROYED
+        ↓        ↓
+       ERROR    ERROR
 ```
+ACTIVE → EXPIRED is performed lazily on read by `pkg/state.TransitionIfExpired`.
+EXPIRED → DESTROYED is performed by the background reaper in `petri serve`
+(see ADR 0013) or by `petri cleanup --expired`.
 
 ### Provisioners
 

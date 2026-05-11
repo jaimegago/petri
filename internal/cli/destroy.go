@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -45,6 +46,14 @@ func (c *CLI) runDestroy(name string, force bool) error {
 
 	if !lab.CanTransitionTo(types.LabStatusDestroying) {
 		return fmt.Errorf("cannot destroy lab in status %q", lab.Status)
+	}
+
+	// CREATING → DESTROYING is gated on age to guard against yanking a lab
+	// mid-create. Only stranded labs (older than the threshold) qualify;
+	// see pkg/orchestrator/cleanup.go and ADR 0013.
+	if lab.Status == types.LabStatusCreating && !lab.IsStrandedCreating(orchestrator.StrandedCreatingTimeout) {
+		return fmt.Errorf("lab %q is still in CREATING (age %s); refusing to destroy. Wait for create to finish, or retry after %s if create has crashed",
+			name, time.Since(lab.CreatedAt).Round(time.Second), orchestrator.StrandedCreatingTimeout)
 	}
 
 	lab.Status = types.LabStatusDestroying

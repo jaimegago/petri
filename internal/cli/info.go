@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jaimegago/petri/pkg/config"
+	"github.com/jaimegago/petri/pkg/state"
 	"github.com/jaimegago/petri/pkg/types"
 )
 
@@ -31,12 +32,17 @@ func (c *CLI) runInfo(name string) error {
 		return err
 	}
 
-	lab, err := mgr.GetLabByName(context.Background(), name)
+	ctx := context.Background()
+	lab, err := mgr.GetLabByName(ctx, name)
 	if err != nil {
 		return fmt.Errorf("lab %q not found", name)
 	}
 
-	resources, err := mgr.ListResources(context.Background(), lab.ID)
+	if _, err := state.TransitionIfExpired(ctx, mgr, lab); err != nil {
+		c.log.Warn("failed to lazily transition lab to EXPIRED", "lab", lab.Name, "error", err)
+	}
+
+	resources, err := mgr.ListResources(ctx, lab.ID)
 	if err != nil {
 		return fmt.Errorf("listing resources: %w", err)
 	}

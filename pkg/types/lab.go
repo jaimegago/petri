@@ -14,7 +14,7 @@ type LabStatus string
 const (
 	LabStatusCreating   LabStatus = "CREATING"
 	LabStatusActive     LabStatus = "ACTIVE"
-	LabStatusExpiring   LabStatus = "EXPIRING"
+	LabStatusExpired    LabStatus = "EXPIRED"
 	LabStatusDestroying LabStatus = "DESTROYING"
 	LabStatusDestroyed  LabStatus = "DESTROYED"
 	LabStatusError      LabStatus = "ERROR"
@@ -76,12 +76,34 @@ func (l *Lab) IsExpired() bool {
 	return time.Now().After(l.ExpiresAt)
 }
 
+// IsStrandedCreating returns true when the lab is still in CREATING and was
+// created more than threshold ago — the heuristic the lab reaper and CLI
+// destroy command share to recover from a crashed petri-create without
+// accidentally yanking a lab that is still mid-create. See ADR 0013.
+func (l *Lab) IsStrandedCreating(threshold time.Duration) bool {
+	return l.Status == LabStatusCreating && time.Since(l.CreatedAt) > threshold
+}
+
 // CanTransitionTo returns true if the given status transition is valid.
+//
+// Transition table:
+//
+//	CREATING   → ACTIVE, ERROR, DESTROYING
+//	ACTIVE     → EXPIRED, DESTROYING, ERROR
+//	EXPIRED    → DESTROYING, ERROR
+//	DESTROYING → DESTROYED, ERROR
+//	DESTROYED  → (terminal)
+//	ERROR      → DESTROYING
+//
+// CREATING → DESTROYING is permitted only for labs stranded in CREATING
+// longer than the stranded-create timeout, to recover from petri-create
+// crashes (see pkg/orchestrator/cleanup.go and ADR 0013). Callers must
+// gate on the lab's age before using this transition.
 func (l *Lab) CanTransitionTo(next LabStatus) bool {
 	valid := map[LabStatus][]LabStatus{
-		LabStatusCreating:   {LabStatusActive, LabStatusError},
-		LabStatusActive:     {LabStatusExpiring, LabStatusDestroying, LabStatusError},
-		LabStatusExpiring:   {LabStatusDestroying, LabStatusActive, LabStatusError},
+		LabStatusCreating:   {LabStatusActive, LabStatusError, LabStatusDestroying},
+		LabStatusActive:     {LabStatusExpired, LabStatusDestroying, LabStatusError},
+		LabStatusExpired:    {LabStatusDestroying, LabStatusError},
 		LabStatusDestroying: {LabStatusDestroyed, LabStatusError},
 		LabStatusDestroyed:  {},
 		LabStatusError:      {LabStatusDestroying},

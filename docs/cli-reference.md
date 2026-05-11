@@ -58,7 +58,7 @@ petri list [flags]
 |------|------|---------|-------------|
 | `--company` | string | | Filter by company |
 | `--level` | int | | Filter by level (1-3) |
-| `--status` | string | | Filter by status (CREATING, ACTIVE, EXPIRING, DESTROYING, DESTROYED, ERROR) |
+| `--status` | string | | Filter by status (CREATING, ACTIVE, EXPIRED, DESTROYING, DESTROYED, ERROR) |
 | `--alive` | bool | false | Show only non-expired labs |
 | `--format` | string | table | Output format: table or json |
 

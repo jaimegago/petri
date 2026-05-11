@@ -34,7 +34,7 @@ func (c *CLI) newListCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&filterCompany, "company", "", "Filter by company")
 	cmd.Flags().IntVar(&filterLevel, "level", 0, "Filter by level (1-3)")
-	cmd.Flags().StringVar(&filterStatus, "status", "", "Filter by status (CREATING, ACTIVE, EXPIRING, DESTROYING, DESTROYED, ERROR)")
+	cmd.Flags().StringVar(&filterStatus, "status", "", "Filter by status (CREATING, ACTIVE, EXPIRED, DESTROYING, DESTROYED, ERROR)")
 	cmd.Flags().BoolVar(&aliveOnly, "alive", false, "Show only non-expired labs")
 	cmd.Flags().StringVar(&format, "format", "table", "Output format: table or json")
 
@@ -54,9 +54,16 @@ func (c *CLI) runList(company string, level int, status string, aliveOnly bool, 
 		IncludeExpired: !aliveOnly,
 	}
 
-	labs, err := mgr.ListLabs(context.Background(), filter)
+	ctx := context.Background()
+	labs, err := mgr.ListLabs(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("listing labs: %w", err)
+	}
+
+	for _, lab := range labs {
+		if _, terr := state.TransitionIfExpired(ctx, mgr, lab); terr != nil {
+			c.log.Warn("failed to lazily transition lab to EXPIRED", "lab", lab.Name, "error", terr)
+		}
 	}
 
 	if len(labs) == 0 {

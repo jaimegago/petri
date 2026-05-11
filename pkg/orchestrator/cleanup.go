@@ -7,13 +7,22 @@ import (
 	"time"
 
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
+	"github.com/jaimegago/petri/pkg/state"
 	"github.com/jaimegago/petri/pkg/types"
 )
 
+// StrandedCreatingTimeout is the age past CreatedAt after which a lab still
+// in CREATING is presumed stranded by a crashed petri-create and becomes
+// eligible for reaping (see ADR 0013). Generous because real creates can
+// take many minutes (kind cluster + apps + observability); comfortably
+// shorter than "user forgot for a day."
+const StrandedCreatingTimeout = 30 * time.Minute
+
 // StartCleanupLoop runs a background goroutine that periodically destroys labs
-// whose TTL has expired. It returns when ctx is cancelled.
+// whose TTL has expired and recovers labs stranded in CREATING. It returns
+// when ctx is cancelled.
 func (o *Orchestrator) StartCleanupLoop(ctx context.Context, interval, gracePeriod time.Duration) {
-	o.log.Info("Starting cleanup loop", "interval", interval, "grace_period", gracePeriod)
+	o.log.Info("lab reaper started", "interval", interval, "grace_period", gracePeriod)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -21,7 +30,7 @@ func (o *Orchestrator) StartCleanupLoop(ctx context.Context, interval, gracePeri
 	for {
 		select {
 		case <-ctx.Done():
-			o.log.Info("Cleanup loop stopped")
+			o.log.Info("lab reaper stopped")
 			return
 		case <-ticker.C:
 			o.runCleanup(ctx, gracePeriod)
@@ -29,31 +38,86 @@ func (o *Orchestrator) StartCleanupLoop(ctx context.Context, interval, gracePeri
 	}
 }
 
-// runCleanup finds expired labs and destroys them.
+// runCleanup finds expired and stranded labs and destroys them.
 func (o *Orchestrator) runCleanup(ctx context.Context, gracePeriod time.Duration) {
 	labs, err := o.deps.State.FindExpiredLabs(ctx, gracePeriod)
 	if err != nil {
-		o.log.Error("Cleanup: failed to find expired labs", "error", err)
+		o.log.Error("lab reaper: failed to find expired labs", "error", err)
 		return
+	}
+
+	stranded, err := o.findStrandedCreatingLabs(ctx)
+	if err != nil {
+		o.log.Error("lab reaper: failed to find stranded CREATING labs", "error", err)
+	} else if len(stranded) > 0 {
+		seen := map[string]bool{}
+		for _, l := range labs {
+			seen[l.ID.String()] = true
+		}
+		for _, l := range stranded {
+			if !seen[l.ID.String()] {
+				labs = append(labs, l)
+			}
+		}
 	}
 
 	if len(labs) == 0 {
 		return
 	}
 
-	o.log.Info("Cleanup: found expired labs", "count", len(labs))
+	o.log.Info("lab reaper: found labs to reap", "count", len(labs))
 
 	for _, lab := range labs {
 		o.destroyExpiredLab(ctx, lab)
 	}
 }
 
+// findStrandedCreatingLabs returns labs that have been in CREATING for longer
+// than StrandedCreatingTimeout. These are presumed to be victims of a
+// crashed petri-create invocation; the reaper will tear them down.
+func (o *Orchestrator) findStrandedCreatingLabs(ctx context.Context) ([]*types.Lab, error) {
+	all, err := o.deps.State.ListLabs(ctx, state.ListFilter{
+		Status:         types.LabStatusCreating,
+		IncludeExpired: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().Add(-StrandedCreatingTimeout)
+	var stranded []*types.Lab
+	for _, lab := range all {
+		if lab.CreatedAt.Before(cutoff) {
+			stranded = append(stranded, lab)
+		}
+	}
+	return stranded, nil
+}
+
 // destroyExpiredLab transitions a single expired lab through DESTROYING → DESTROYED.
 func (o *Orchestrator) destroyExpiredLab(ctx context.Context, lab *types.Lab) {
 	log := o.log.With("lab", lab.Name)
 
+	if lab.Status == types.LabStatusCreating {
+		if !lab.IsStrandedCreating(StrandedCreatingTimeout) {
+			log.Debug("lab reaper: CREATING lab still within stranded threshold; skipping",
+				"created_at", lab.CreatedAt.UTC().Format(time.RFC3339),
+			)
+			return
+		}
+		log.Info("lab reaper: cleaning up stranded CREATING lab",
+			"created_at", lab.CreatedAt.UTC().Format(time.RFC3339),
+			"age", time.Since(lab.CreatedAt).String(),
+		)
+	} else {
+		log.Info("lab reaper: destroying expired lab",
+			"status", string(lab.Status),
+			"expires_at", lab.ExpiresAt.UTC().Format(time.RFC3339),
+			"age_past_expiry", time.Since(lab.ExpiresAt).String(),
+		)
+	}
+
 	if !lab.CanTransitionTo(types.LabStatusDestroying) {
-		log.Warn("Cleanup: lab cannot be destroyed; skipping", "status", string(lab.Status))
+		log.Warn("lab reaper: lab cannot be destroyed; skipping", "status", string(lab.Status))
 		return
 	}
 

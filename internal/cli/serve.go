@@ -2,17 +2,21 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/jaimegago/petri/pkg/asynctasks"
 	"github.com/jaimegago/petri/pkg/chaos"
 	"github.com/jaimegago/petri/pkg/oasis"
 	"github.com/jaimegago/petri/pkg/preflight"
+	"github.com/jaimegago/petri/pkg/state"
 	"github.com/jaimegago/petri/pkg/types"
 )
 
@@ -23,7 +27,13 @@ type serveOptions struct {
 	auditLogPath   string
 	verify         bool
 	deep           bool
+	noReaper       bool
 }
+
+// reaperShutdownTimeout bounds how long petri serve will wait for the lab
+// reaper goroutine to exit after SIGTERM before forcing exit. Matches the
+// existing OASIS async-task shutdown discipline.
+const reaperShutdownTimeout = 30 * time.Second
 
 func (c *CLI) newServeCmd() *cobra.Command {
 	opts := &serveOptions{}
@@ -48,6 +58,7 @@ Typical workflow:
 	cmd.Flags().StringVar(&opts.auditLogPath, "audit-log-path", "", "path to Kubernetes audit log file for audit_log observations")
 	cmd.Flags().BoolVar(&opts.verify, "verify", false, "run preflight checks before binding the listener; abort on failure")
 	cmd.Flags().BoolVar(&opts.deep, "deep", false, "with --verify, also pull each verified image on the cluster (slower)")
+	cmd.Flags().BoolVar(&opts.noReaper, "no-reaper", false, "disable the background lab reaper goroutine (overrides oasis.disable_lab_reaper=false)")
 	return cmd
 }
 
@@ -80,6 +91,9 @@ func (c *CLI) runServe(opts *serveOptions) error {
 		"audit_log_path", auditLogPath,
 	)
 
+	tasks := asynctasks.New(c.log)
+	c.startLabReaper(ctx, tasks, opts.noReaper)
+
 	kube := chaos.NewKubeClient(labInfo.kubeconfigPath)
 	provider := oasis.New(oasis.ProviderConfig{
 		KubeconfigPath:   labInfo.kubeconfigPath,
@@ -90,10 +104,51 @@ func (c *CLI) runServe(opts *serveOptions) error {
 	}, kube, c.log)
 
 	srv := oasis.NewServer(provider, c.log)
-	if err := srv.ListenAndServe(ctx, opts.listen); err != nil {
-		return fmt.Errorf("OASIS server stopped: %w", err)
+	serveErr := srv.ListenAndServe(ctx, opts.listen)
+
+	// Wait for the reaper goroutine to honour ctx cancellation. We're past
+	// the HTTP listener at this point — the only remaining task to drain is
+	// the reaper itself.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), reaperShutdownTimeout)
+	defer drainCancel()
+	if !tasks.Wait(drainCtx) {
+		c.log.Warn("lab reaper did not exit within shutdown budget; abandoning",
+			"timeout", reaperShutdownTimeout.String(),
+		)
+	}
+
+	if serveErr != nil {
+		return fmt.Errorf("OASIS server stopped: %w", serveErr)
 	}
 	return nil
+}
+
+// startLabReaper spawns the background reaper goroutine when enabled. The
+// reaper runs StartCleanupLoop on cfg.OASIS.LabReaperInterval and exits on
+// ctx cancellation; its goroutine is tracked by `tasks` so runServe can
+// drain it on graceful shutdown.
+func (c *CLI) startLabReaper(ctx context.Context, tasks *asynctasks.Tasks, noReaperFlag bool) {
+	if noReaperFlag || c.cfg.OASIS.DisableLabReaper {
+		c.log.Info("lab reaper disabled by config/flag; expired labs will not be reaped during this serve session")
+		return
+	}
+	interval := c.cfg.OASIS.LabReaperInterval
+	if interval <= 0 {
+		// config.Load applies the default, but defend against direct callers
+		// who hand-craft a Config and forget to set it.
+		return
+	}
+	gracePeriod := c.cfg.Cleanup.GracePeriod
+
+	orch, err := c.buildOrchestrator(githubToken())
+	if err != nil {
+		c.log.Warn("lab reaper not started: orchestrator init failed", "error", err)
+		return
+	}
+
+	tasks.Go("lab-reaper", func() {
+		orch.StartCleanupLoop(ctx, interval, gracePeriod)
+	})
 }
 
 // runServeVerify runs preflight checks before binding the HTTP listener.
@@ -180,8 +235,15 @@ func (c *CLI) resolveServeLabInfo(ctx context.Context, kubeconfigFlag, labName s
 	if err != nil {
 		return serveLabInfo{}, fmt.Errorf("lab %q not found: %w", labName, err)
 	}
+
+	// Apply the lazy on-read expiry transition before checking Status, so
+	// EXPIRED ends up in the DB and the message we render reflects truth.
+	if _, terr := state.TransitionIfExpired(ctx, mgr, lab); terr != nil {
+		c.log.Warn("failed to lazily transition lab to EXPIRED", "lab", lab.Name, "error", terr)
+	}
+
 	if lab.Status != types.LabStatusActive {
-		return serveLabInfo{}, fmt.Errorf("lab %q is not active (status: %s); only active labs can serve OASIS scenarios", labName, lab.Status)
+		return serveLabInfo{}, serveLabStatusError(lab)
 	}
 	if lab.CloudProvider != types.CloudProviderLocal {
 		return serveLabInfo{}, fmt.Errorf("lab %q uses provider %q; petri serve currently requires a local (kind) lab", labName, lab.CloudProvider)
@@ -190,6 +252,25 @@ func (c *CLI) resolveServeLabInfo(ctx context.Context, kubeconfigFlag, labName s
 	kubeconfigPath := localKubeconfigPath(lab)
 	if kubeconfigPath == "" {
 		return serveLabInfo{}, fmt.Errorf("lab %q has no kubeconfig path in metadata; was it created successfully?", labName)
+	}
+
+	// Verify the substrate is reachable on disk. A missing kubeconfig file
+	// means the cluster was deleted out-of-band (e.g. `kind delete cluster`
+	// or a manual rm) while the lab record still claims ACTIVE — serving
+	// would silently hand the OASIS client a dead substrate. Refuse and
+	// mark the lab ERROR so future reads reflect the divergence.
+	if _, err := os.Stat(kubeconfigPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			lab.Status = types.LabStatusError
+			if lab.Metadata.ErrorMessage == "" {
+				lab.Metadata.ErrorMessage = fmt.Sprintf("kubeconfig file %q missing; cluster may have been deleted out-of-band", kubeconfigPath)
+			}
+			if uerr := mgr.UpdateLab(ctx, lab); uerr != nil {
+				c.log.Warn("failed to mark lab ERROR after kubeconfig miss", "lab", labName, "error", uerr)
+			}
+			return serveLabInfo{}, fmt.Errorf("lab %q is ACTIVE but kubeconfig file %q is missing. The cluster may have been deleted out-of-band. Lab record marked ERROR. Run 'petri destroy %s' to clean up the record", labName, kubeconfigPath, labName)
+		}
+		return serveLabInfo{}, fmt.Errorf("statting kubeconfig %q for lab %q: %w", kubeconfigPath, labName, err)
 	}
 
 	var auditLogPath string
@@ -206,4 +287,32 @@ func (c *CLI) resolveServeLabInfo(ctx context.Context, kubeconfigFlag, labName s
 		labLevel:       lab.Level,
 		oasisMode:      oasisMode,
 	}, nil
+}
+
+// serveLabStatusError returns a refusal error tailored to the lab's current
+// non-ACTIVE status, including a concrete next-step command the operator
+// can run. Serve must refuse rather than warn-and-continue: serving against
+// a non-ACTIVE substrate silently miscompares scenarios against a lab the
+// operator believes is healthy.
+func serveLabStatusError(lab *types.Lab) error {
+	switch lab.Status {
+	case types.LabStatusExpired:
+		return fmt.Errorf("lab %q is EXPIRED (past TTL since %s). Run 'petri destroy %s && petri create --name %s ...' to recreate, or 'petri cleanup --expired' to clean up all expired labs",
+			lab.Name, lab.ExpiresAt.UTC().Format(time.RFC3339), lab.Name, lab.Name)
+	case types.LabStatusDestroyed:
+		return fmt.Errorf("lab %q is DESTROYED. Run 'petri create --name %s ...' to create a fresh lab", lab.Name, lab.Name)
+	case types.LabStatusError:
+		msg := lab.Metadata.ErrorMessage
+		if msg == "" {
+			msg = "(no error detail recorded)"
+		}
+		return fmt.Errorf("lab %q is in ERROR state: %s. Run 'petri destroy %s' to clean up the record and 'petri create --name %s ...' to recreate", lab.Name, msg, lab.Name, lab.Name)
+	case types.LabStatusCreating:
+		return fmt.Errorf("lab %q is still CREATING (started %s). Wait for create to complete, then re-run 'petri serve --lab %s'",
+			lab.Name, lab.CreatedAt.UTC().Format(time.RFC3339), lab.Name)
+	case types.LabStatusDestroying:
+		return fmt.Errorf("lab %q is currently DESTROYING. Wait for destroy to complete, then create a fresh lab with 'petri create --name %s ...'", lab.Name, lab.Name)
+	default:
+		return fmt.Errorf("lab %q is not active (status: %s); only active labs can serve OASIS scenarios", lab.Name, lab.Status)
+	}
 }

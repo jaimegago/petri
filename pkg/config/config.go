@@ -54,6 +54,10 @@ const (
 	DefaultGracePeriod   = 30 * time.Minute
 )
 
+// Default lab reaper cadence used by petri serve when the operator has not
+// set oasis.lab_reaper_interval.
+const DefaultLabReaperInterval = 5 * time.Minute
+
 // Config holds the full Petri configuration.
 type Config struct {
 	State         StateConfig         `yaml:"state"`
@@ -114,6 +118,14 @@ type OASISConfig struct {
 	// audit_log observations. Optional. When set, `petri verify` checks that
 	// the parent directory exists and is writable.
 	AuditLogPath string `yaml:"audit_log_path"`
+	// LabReaperInterval is how often the background lab reaper goroutine
+	// scans for expired labs while petri serve is running. Defaults to
+	// DefaultLabReaperInterval when zero. See ADR 0013.
+	LabReaperInterval time.Duration `yaml:"lab_reaper_interval"`
+	// DisableLabReaper, when true, prevents petri serve from starting the
+	// background lab reaper. Useful for development, tests, or operators
+	// who manage cleanup externally.
+	DisableLabReaper bool `yaml:"disable_lab_reaper"`
 }
 
 // CompaniesFile is the top-level structure of companies.yaml.
@@ -149,7 +161,8 @@ func DefaultConfig() *Config {
 			GracePeriod:   DefaultGracePeriod,
 		},
 		OASIS: OASISConfig{
-			DefaultImage: DefaultOASISImage,
+			DefaultImage:      DefaultOASISImage,
+			LabReaperInterval: DefaultLabReaperInterval,
 		},
 	}
 }
@@ -190,6 +203,9 @@ func Load(cfgFile ...string) (*Config, error) {
 	// with an empty string would silently disable the Docker Hub workaround.
 	if cfg.OASIS.DefaultImage == "" {
 		cfg.OASIS.DefaultImage = DefaultOASISImage
+	}
+	if cfg.OASIS.LabReaperInterval <= 0 {
+		cfg.OASIS.LabReaperInterval = DefaultLabReaperInterval
 	}
 
 	return cfg, nil

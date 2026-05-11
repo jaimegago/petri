@@ -245,6 +245,34 @@ crontab -e
 # Add: */10 * * * * /usr/local/bin/petri cleanup --expired
 ```
 
+### Lab lifecycle and the background reaper
+
+`petri info` and `petri list` apply a lazy `ACTIVE → EXPIRED` transition
+when they encounter a stale-ACTIVE lab, so the rendered status always
+matches the truth. The eventual `EXPIRED → DESTROYED` step is the
+background reaper goroutine inside `petri serve` (default cadence: 5
+min, configurable via `oasis.lab_reaper_interval`, disable with
+`--no-reaper` or `oasis.disable_lab_reaper: true`).
+
+Stranded `CREATING` labs (a `petri create` that crashed mid-provision)
+are reaped automatically once the lab has been in `CREATING` for more
+than 30 minutes. `petri cleanup --expired` will also pick them up.
+
+See [ADR 0013](decisions/0013-lab-state-machine-hybrid-reaper.md) for
+design rationale.
+
+#### Manual repro
+
+1. `petri create --company acme --level 1 --local --name lifecycle-demo --ttl 1m`
+2. Wait 2 minutes.
+3. `petri info lifecycle-demo` — `Status: EXPIRED`. The DB record has
+   been updated.
+4. Start `petri serve --lab <another-active-lab>` and let TTL elapse
+   for `lifecycle-demo` while serve is running. Within
+   `oasis.lab_reaper_interval` (default 5 min), serve's log emits
+   `lab reaper: destroying expired lab` and the lab transitions to
+   `DESTROYED`.
+
 ## Can't connect to created cluster
 
 ```bash

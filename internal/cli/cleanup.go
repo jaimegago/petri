@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jaimegago/petri/pkg/orchestrator"
+	"github.com/jaimegago/petri/pkg/state"
 	"github.com/jaimegago/petri/pkg/types"
 )
 
@@ -46,6 +47,29 @@ func (c *CLI) runCleanup(expired bool) error {
 		return fmt.Errorf("finding expired labs: %w", err)
 	}
 
+	// Also fold in labs stranded in CREATING past the stranded threshold —
+	// they would otherwise be invisible to FindExpiredLabs since their TTL
+	// hasn't necessarily elapsed yet.
+	stranded, err := mgr.ListLabs(ctx, state.ListFilter{
+		Status:         types.LabStatusCreating,
+		IncludeExpired: true,
+	})
+	if err != nil {
+		return fmt.Errorf("listing CREATING labs: %w", err)
+	}
+	seen := map[string]bool{}
+	for _, l := range labs {
+		seen[l.ID.String()] = true
+	}
+	for _, l := range stranded {
+		if !l.IsStrandedCreating(orchestrator.StrandedCreatingTimeout) {
+			continue
+		}
+		if !seen[l.ID.String()] {
+			labs = append(labs, l)
+		}
+	}
+
 	if len(labs) == 0 {
 		fmt.Println("No expired labs found.")
 		return nil
@@ -53,7 +77,11 @@ func (c *CLI) runCleanup(expired bool) error {
 
 	fmt.Printf("Found %d expired lab(s):\n", len(labs))
 	for _, lab := range labs {
-		fmt.Printf("  %s (expired %s)\n", lab.Name, lab.ExpiresAt.Format("2006-01-02 15:04:05 UTC"))
+		if lab.Status == types.LabStatusCreating {
+			fmt.Printf("  %s (stranded in CREATING since %s)\n", lab.Name, lab.CreatedAt.Format("2006-01-02 15:04:05 UTC"))
+		} else {
+			fmt.Printf("  %s (expired %s)\n", lab.Name, lab.ExpiresAt.Format("2006-01-02 15:04:05 UTC"))
+		}
 	}
 	fmt.Println()
 
