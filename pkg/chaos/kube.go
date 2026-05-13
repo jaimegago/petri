@@ -39,6 +39,17 @@ type KubeClient interface {
 	CreateNamespace(ctx context.Context, name string, labels map[string]string) error
 	// DeleteNamespace deletes a namespace and all resources within it.
 	DeleteNamespace(ctx context.Context, name string) error
+	// DeleteNamespaceWithTimeout deletes a namespace with a kubectl-side
+	// --timeout flag. When the budget is exhausted kubectl exits non-zero
+	// but the in-kube deletion continues asynchronously. The OASIS
+	// provider uses this variant on the /v1/teardown path so a busy
+	// finaliser does not surface as an opaque 500. See ADR 0014.
+	DeleteNamespaceWithTimeout(ctx context.Context, name string, timeout time.Duration) error
+	// GetNamespacePhase returns the .status.phase of a namespace
+	// ("Active" / "Terminating" / "Unknown"). It returns ("", nil) when
+	// the namespace does not exist (404) and ("", err) for any other
+	// transport failure.
+	GetNamespacePhase(ctx context.Context, name string) (string, error)
 	// GetResource retrieves a Kubernetes resource as a JSON string.
 	GetResource(ctx context.Context, kind, namespace, name string) (string, error)
 	// ListResources retrieves all resources of a given kind in a namespace as a JSON list.
@@ -254,6 +265,53 @@ func (c *cliKubeClient) DeleteNamespace(ctx context.Context, name string) error 
 		return fmt.Errorf("deleting namespace %s: %w", name, err)
 	}
 	return nil
+}
+
+// DeleteNamespaceWithTimeout delegates to kubectl's own --timeout so the
+// process exits cleanly when the budget runs out instead of being SIGKILLed
+// by a Go context deadline. The in-kube deletion request still lands —
+// kubectl only gives up its wait — so callers can confirm by checking
+// GetNamespacePhase afterwards.
+func (c *cliKubeClient) DeleteNamespaceWithTimeout(ctx context.Context, name string, timeout time.Duration) error {
+	args := []string{
+		"delete", "namespace", name,
+		"--ignore-not-found",
+		"--timeout", formatKubectlDuration(timeout),
+	}
+	if err := c.runner.run(ctx, args); err != nil {
+		return fmt.Errorf("deleting namespace %s: %w", name, err)
+	}
+	return nil
+}
+
+// GetNamespacePhase reads .status.phase via jsonpath. `--ignore-not-found`
+// makes kubectl return empty stdout (and exit 0) when the namespace does
+// not exist, which we surface as ("", nil).
+func (c *cliKubeClient) GetNamespacePhase(ctx context.Context, name string) (string, error) {
+	out, err := c.runner.output(ctx, []string{
+		"get", "namespace", name,
+		"--ignore-not-found",
+		"-o", "jsonpath={.status.phase}",
+	})
+	if err != nil {
+		return "", fmt.Errorf("getting namespace %s phase: %w", name, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// formatKubectlDuration emits a kubectl-friendly duration string ("30s",
+// "5m"). kubectl rejects compound forms like "1m30s" on the --timeout
+// flag, so we collapse to whole minutes when possible and otherwise emit
+// seconds.
+func formatKubectlDuration(d time.Duration) string {
+	total := int(d.Seconds())
+	if total < 1 {
+		total = 1
+	}
+	if total >= 60 && total%60 == 0 {
+		return fmt.Sprintf("%dm", total/60)
+	}
+	return fmt.Sprintf("%ds", total)
 }
 
 func (c *cliKubeClient) GetResource(ctx context.Context, kind, namespace, name string) (string, error) {

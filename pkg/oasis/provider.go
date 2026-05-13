@@ -42,6 +42,18 @@ type KubeClient interface {
 	CreateNamespace(ctx context.Context, name string, labels map[string]string) error
 	// DeleteNamespace deletes a namespace and all resources within it.
 	DeleteNamespace(ctx context.Context, name string) error
+	// DeleteNamespaceWithTimeout deletes a namespace with a kubectl-side
+	// wall-clock budget. When kubectl hits the timeout, it exits non-zero
+	// and the in-kube deletion continues asynchronously; the caller must
+	// distinguish that from a genuine delete failure (RBAC, transport,
+	// etc.) by querying GetNamespacePhase afterwards. See ADR 0014.
+	DeleteNamespaceWithTimeout(ctx context.Context, name string, timeout time.Duration) error
+	// GetNamespacePhase returns the namespace's .status.phase string
+	// ("Active", "Terminating", or "Unknown"). It returns ("", nil) when
+	// the namespace does not exist (404). It returns ("", err) on any
+	// other failure. The Provision pre-check and the teardown
+	// in-progress confirmation both depend on this method.
+	GetNamespacePhase(ctx context.Context, name string) (string, error)
 	// GetResource retrieves a Kubernetes resource as a JSON string.
 	GetResource(ctx context.Context, kind, namespace, name string) (string, error)
 	// ListResources retrieves all resources of a kind in a namespace as a JSON list.
@@ -55,6 +67,11 @@ type KubeClient interface {
 	// WaitForRollout waits for a Deployment to complete its rollout.
 	WaitForRollout(ctx context.Context, namespace, deployment string, timeout time.Duration) error
 }
+
+// namespacePhaseTerminating is the .status.phase value kube reports while
+// a namespace's finalisers are running. The other observed values are
+// "Active" and (very rarely) "Unknown". Matched case-insensitively.
+const namespacePhaseTerminating = "Terminating"
 
 // ProviderConfig holds configuration for the OASIS provider.
 type ProviderConfig struct {
@@ -89,6 +106,7 @@ type petriProvider struct {
 	audit    AuditLogReader
 	log      *slog.Logger
 	tasks    *asyncTasks
+	teardown *teardownRegistry
 	// probeImage is the registry probe invoked from the async post-
 	// detection goroutine. Defaults to preflight.ProbeImage; tests inject
 	// a stub to control timing and outcome without doing real HTTP.
@@ -130,6 +148,7 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 		audit:      audit,
 		log:        log,
 		tasks:      newAsyncTasks(log),
+		teardown:   newTeardownRegistry(),
 		probeImage: defaultProbeImage,
 	}
 }
@@ -154,6 +173,14 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		"namespace", namespace,
 		"state_entries", len(req.Environment.State),
 	)
+
+	// 0. Pre-check: refuse to provision into a namespace that is already
+	// terminating. A single GET catches the cascade the prompt describes
+	// before we attempt CreateNamespace / ApplyYAML against the busy
+	// finaliser. Part 1 of ADR 0014.
+	if err := p.checkNamespacesNotTerminating(ctx, namespace, req.Environment.State); err != nil {
+		return ProvisionResponse{}, err
+	}
 
 	// 1. Create the scenario namespace.
 	if err := p.kube.CreateNamespace(ctx, namespace, map[string]string{
@@ -188,6 +215,18 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 
 	// 3. Apply all precondition state entries.
 	if err := p.injector.Apply(ctx, req.Environment.State, namespace); err != nil {
+		// Late-detection path: kubectl's stderr "because it is being
+		// terminated" is converted to *ErrNamespaceTerminating so the
+		// HTTP layer returns 409 instead of 500. The conflict came from
+		// kube; we don't try to clean up the doomed namespace ourselves.
+		// Part 2 of ADR 0014.
+		if termNS, ok := terminatingNamespaceFromErr(err, namespace, req.Environment.State); ok {
+			p.log.Warn("namespace late-detected as terminating during apply",
+				"namespace", termNS,
+				"env_id", envID,
+			)
+			return ProvisionResponse{}, &ErrNamespaceTerminating{Namespace: termNS}
+		}
 		// Sync cleanup: a partial state injection may matter for response
 		// semantics — the client may want to introspect what landed — so the
 		// caller currently waits for the namespace to be torn down before
@@ -270,7 +309,19 @@ func (p *petriProvider) StateSnapshot(ctx context.Context, req StateSnapshotRequ
 	return p.snapshotNamespace(ctx, env.ID, env.Namespace)
 }
 
-// Teardown destroys the environment by deleting its namespace.
+// teardownBudget bounds how long /v1/teardown waits for kubectl's delete
+// to finalise before declaring "asynchronous in progress." Picked at 30s
+// because (a) it matches the EstimatedRemainingSeconds hint the response
+// advertises and (b) it gives a healthy lab plenty of time to complete
+// while still letting a stuck finaliser surface as 202 rather than a
+// 5-minute hang.
+const teardownBudget = 30 * time.Second
+
+// Teardown destroys the environment by deleting its namespace. When
+// kubectl exhausts teardownBudget but the namespace is at least in
+// Terminating phase, Teardown returns *ErrTeardownInProgress instead of
+// surfacing a generic 500 — the in-kube deletion is healthy and will
+// complete asynchronously. See ADR 0014.
 func (p *petriProvider) Teardown(ctx context.Context, req TeardownRequest) (TeardownResponse, error) {
 	env, err := p.store.get(req.EnvironmentID)
 	if err != nil {
@@ -279,8 +330,40 @@ func (p *petriProvider) Teardown(ctx context.Context, req TeardownRequest) (Tear
 
 	p.log.Info("tearing down OASIS environment", "env_id", req.EnvironmentID, "namespace", env.Namespace)
 
-	if err := p.kube.DeleteNamespace(ctx, env.Namespace); err != nil {
-		return TeardownResponse{Status: "error", Error: err.Error()}, fmt.Errorf("deleting namespace: %w", err)
+	// Registry: refuse to spawn a duplicate kubectl invocation when
+	// another path is already deleting this namespace. Part 5 of ADR 0014.
+	if !p.teardown.tryAcquire(env.Namespace) {
+		return TeardownResponse{}, &ErrTeardownInProgress{
+			Namespace:                 env.Namespace,
+			EstimatedRemainingSeconds: defaultTeardownRetryAfterSeconds,
+		}
+	}
+	defer p.teardown.Release(env.Namespace)
+
+	start := time.Now()
+	deleteErr := p.kube.DeleteNamespaceWithTimeout(ctx, env.Namespace, teardownBudget)
+	if deleteErr != nil {
+		// kubectl gave up (or was cancelled). If kube has at least
+		// accepted the deletion, the namespace will be in Terminating
+		// phase — return 202 with a retry hint rather than masking the
+		// in-progress operation as a 500.
+		phase, phaseErr := p.kube.GetNamespacePhase(ctx, env.Namespace)
+		if phaseErr == nil && strings.EqualFold(phase, namespacePhaseTerminating) {
+			p.log.Warn("teardown in progress: returning 202",
+				"namespace", env.Namespace,
+				"env_id", req.EnvironmentID,
+				"kubectl_duration_ms", time.Since(start).Milliseconds(),
+			)
+			// Leave the environment registered: the client may poll
+			// /v1/teardown again, and a second call should observe the
+			// registry / phase rather than 404 on the env id. The store
+			// is cleared after a clean delete only.
+			return TeardownResponse{}, &ErrTeardownInProgress{
+				Namespace:                 env.Namespace,
+				EstimatedRemainingSeconds: defaultTeardownRetryAfterSeconds,
+			}
+		}
+		return TeardownResponse{Status: "error", Error: deleteErr.Error()}, fmt.Errorf("deleting namespace: %w", deleteErr)
 	}
 	p.store.delete(req.EnvironmentID)
 	return TeardownResponse{Status: "destroyed"}, nil
@@ -798,10 +881,24 @@ func asyncCleanupReason(err error) string {
 // goroutine uses a detached context (decoupled from the request ctx) so
 // cleanup outlives the response, and is registered with p.tasks so petri
 // serve's shutdown handler can wait for it.
+//
+// The async path also registers in the teardown registry (Part 5 of
+// ADR 0014) so a concurrent /v1/teardown for the same namespace surfaces
+// ErrTeardownInProgress immediately rather than spawning a duplicate
+// kubectl invocation. The registry slot is released in defer regardless
+// of how the goroutine exits.
 func (p *petriProvider) scheduleNamespaceCleanup(namespace, envID, reason string) {
 	p.log.Info("async cleanup: deleting namespace after provision failure",
 		"namespace", namespace, "env_id", envID, "reason", reason)
+	if !p.teardown.tryAcquire(namespace) {
+		// Another path is already deleting this namespace — skip
+		// spawning a duplicate goroutine.
+		p.log.Info("async cleanup: skipping, teardown already in flight",
+			"namespace", namespace, "env_id", envID, "reason", reason)
+		return
+	}
 	p.tasks.Go("namespace-cleanup:"+namespace, func() {
+		defer p.teardown.Release(namespace)
 		cctx, cancel := context.WithTimeout(context.Background(), asyncCleanupTimeout)
 		defer cancel()
 		start := time.Now()
@@ -826,6 +923,96 @@ func (p *petriProvider) scheduleNamespaceCleanup(namespace, envID, reason string
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	})
+}
+
+// checkNamespacesNotTerminating runs Part 1 of the namespace-cascade
+// prevention: a single GET per distinct namespace the request will touch.
+// If any of them is in Terminating phase, return *ErrNamespaceTerminating
+// before the apply loop starts. A 404 (empty phase) is normal — Provision
+// will create the namespace.
+func (p *petriProvider) checkNamespacesNotTerminating(ctx context.Context, namespace string, state []StateEntry) error {
+	seen := map[string]bool{}
+	check := func(ns string) error {
+		if ns == "" || seen[ns] {
+			return nil
+		}
+		seen[ns] = true
+		phase, err := p.kube.GetNamespacePhase(ctx, ns)
+		if err != nil {
+			// Probe failure is non-fatal: fall through and let the normal
+			// create/apply path surface the real error. Pre-checks must not
+			// invent failure modes their absence would not have triggered.
+			p.log.Warn("namespace pre-check probe failed",
+				"namespace", ns, "error", err.Error())
+			return nil
+		}
+		if strings.EqualFold(phase, namespacePhaseTerminating) {
+			p.log.Warn("namespace pre-check: terminating", "namespace", ns)
+			return &ErrNamespaceTerminating{Namespace: ns}
+		}
+		return nil
+	}
+	if err := check(namespace); err != nil {
+		return err
+	}
+	for _, e := range state {
+		if err := check(e.Namespace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// terminatingNamespaceFromErr inspects err's chain for kubectl's stable
+// "because it is being terminated" stderr substring. When found, it
+// returns the namespace it refers to so the caller can construct a typed
+// *ErrNamespaceTerminating. The namespace is recovered first from the
+// kubectl message itself (preferred) and falls back to scenarioNS for the
+// rare case kubectl elides the name. Returns ("", false) when the error
+// does not match this shape.
+func terminatingNamespaceFromErr(err error, scenarioNS string, state []StateEntry) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, namespaceTerminatingNeedle) {
+		return "", false
+	}
+	if ns := extractTerminatingNamespace(msg); ns != "" {
+		return ns, true
+	}
+	// Fall back to the request's distinct namespaces. If exactly one is
+	// referenced, attribute the failure to it; otherwise return the
+	// scenario namespace as a coarse but correct answer.
+	candidates := map[string]struct{}{scenarioNS: {}}
+	for _, e := range state {
+		if e.Namespace != "" {
+			candidates[e.Namespace] = struct{}{}
+		}
+	}
+	if len(candidates) == 1 {
+		return scenarioNS, true
+	}
+	return scenarioNS, true
+}
+
+// extractTerminatingNamespace pulls the namespace name out of kubectl's
+// "unable to create new content in namespace <ns> because it is being
+// terminated" stderr line. Returns "" when the line does not match the
+// expected shape.
+func extractTerminatingNamespace(msg string) string {
+	const marker = "in namespace "
+	idx := strings.Index(msg, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := msg[idx+len(marker):]
+	// Namespace runs up to the next whitespace, comma, or quote.
+	end := strings.IndexAny(rest, " \t\n,\"'")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
 }
 
 func (p *petriProvider) setupAgentRBAC(ctx context.Context, namespace string, scope AgentScope) error {

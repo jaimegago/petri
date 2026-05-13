@@ -205,6 +205,86 @@ a refactor. The pre-ADR-0012 sequential implementation produced lines
 staggered by whatever each rollout took (often 10+ seconds apart),
 which is the shape to watch for.
 
+## /v1/provision returns 409: namespace is terminating
+
+The 409 Conflict response from `/v1/provision` means the target namespace
+is in Kubernetes' `Terminating` phase — typically because the previous
+scenario's teardown is still finalising. This is **not** a petri failure;
+it is the cascade-prevention guard from ADR 0014 working as designed.
+The response body is:
+
+```json
+{
+  "status": "error",
+  "message": "namespace <ns> is terminating; reuse will fail until termination completes",
+  "namespace": "<ns>",
+  "retry_after_seconds": 30
+}
+```
+
+Clients (oasisctl, the OASIS runner, manual curl) should wait at least
+`retry_after_seconds` before retrying with the same namespace, or
+allocate a different namespace name.
+
+### Distinguishing "cascade prevented" from "real petri bug"
+
+When investigating a cluster of related verdicts, scan run.log for the
+status codes:
+
+- **409s and 202s appear, no 500s follow** — cascade-prevention is
+  working. One upstream failure was contained to one scenario verdict.
+  No petri-side action needed; investigate the root cause (broken
+  scenario template, registry outage, etc.).
+- **500s appear from /v1/provision or /v1/teardown** — petri-side bug.
+  The cascade-prevention guard did not fire. File against pkg/oasis.
+
+### Diagnostic signature
+
+The canonical "cascade prevented" sequence in run.log is:
+
+```
+... msg="teardown in progress: returning 202" namespace=<ns> kubectl_duration_ms=...
+... msg="namespace pre-check: terminating" namespace=<ns>
+```
+
+A 202 from `/v1/teardown` followed within seconds by a 409 from
+`/v1/provision` against the same namespace is the prevention working as
+designed. Both responses must come back with their typed shapes
+(`status`, `namespace`, `retry_after_seconds` / `estimated_remaining_seconds`);
+a generic `{status, message}` envelope at either of these positions is
+a regression.
+
+## /v1/teardown returns 202: deletion in progress
+
+The 202 Accepted response from `/v1/teardown` means `kubectl delete
+namespace` hit petri's wall-clock budget (30s) but the namespace is at
+least in `Terminating` phase — kube has accepted the delete request and
+is finalising. This is more honest than the pre-ADR-0014 500: the
+deletion did not fail, it just isn't finished yet.
+
+```json
+{
+  "status": "in_progress",
+  "message": "teardown in progress for namespace <ns>; finalisation typically completes within 30s",
+  "namespace": "<ns>",
+  "estimated_remaining_seconds": 30
+}
+```
+
+The client should treat 202 as "the namespace is not yet available for
+reuse but no operator action is required." A subsequent `/v1/teardown`
+against the same env id either:
+
+- returns 200 once kube finishes finalisation, or
+- returns 202 again with the registry-detected
+  `ErrTeardownInProgress` (no duplicate kubectl invocation is spawned —
+  see Part 5 of ADR 0014).
+
+If a `/v1/teardown` instead returns 500, the underlying error in the
+response body (`message` field) is a genuine kubectl failure (RBAC
+denial, transport error, etc.) — not a slow finaliser — and warrants
+investigation.
+
 ## Lab creation fails at Terraform apply
 
 ```bash

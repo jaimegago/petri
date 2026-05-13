@@ -98,6 +98,15 @@ func (m *mockKubeClient) DeleteNamespace(_ context.Context, name string) error {
 	return m.err
 }
 
+func (m *mockKubeClient) DeleteNamespaceWithTimeout(_ context.Context, name string, _ time.Duration) error {
+	m.record("delete_namespace_timeout:" + name)
+	return m.err
+}
+
+func (m *mockKubeClient) GetNamespacePhase(_ context.Context, _ string) (string, error) {
+	return "", m.err
+}
+
 func (m *mockKubeClient) GetResource(_ context.Context, kind, namespace, name string) (string, error) {
 	m.record("get_resource:" + kind + "/" + namespace + "/" + name)
 	return "{}", m.err

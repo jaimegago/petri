@@ -147,8 +147,9 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 
 // writeProvisionError maps a Provision-side error to the right HTTP status
 // and body shape. ErrImagePullFailure → 502 with structured fields,
-// ErrRolloutTimeout → 500 with the historical phrasing, everything else →
-// 500 with the generic envelope.
+// ErrNamespaceTerminating → 409 with retry hint, ErrRolloutTimeout → 500
+// with the historical phrasing, everything else → 500 with the generic
+// envelope.
 //
 // Defined here (not in writeError) because the typed-error mapping is
 // provision-specific: other endpoints don't have an "unreachable upstream
@@ -167,7 +168,34 @@ func writeProvisionError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	var term *ErrNamespaceTerminating
+	if errors.As(err, &term) {
+		writeJSON(w, http.StatusConflict, namespaceTerminatingResponse{
+			Status:            "error",
+			Message:           term.Error(),
+			Namespace:         term.Namespace,
+			RetryAfterSeconds: defaultTeardownRetryAfterSeconds,
+		})
+		return
+	}
 	writeError(w, http.StatusInternalServerError, err.Error())
+}
+
+// writeTeardownError maps a Teardown-side error to the right HTTP status
+// and body shape. ErrTeardownInProgress → 202 Accepted with retry hint;
+// everything else falls through to the shared httpStatusForErr mapping.
+func writeTeardownError(w http.ResponseWriter, err error) {
+	var inProgress *ErrTeardownInProgress
+	if errors.As(err, &inProgress) {
+		writeJSON(w, http.StatusAccepted, teardownInProgressResponse{
+			Status:                    "in_progress",
+			Message:                   inProgress.Error(),
+			Namespace:                 inProgress.Namespace,
+			EstimatedRemainingSeconds: inProgress.EstimatedRemainingSeconds,
+		})
+		return
+	}
+	writeError(w, httpStatusForErr(err), err.Error())
 }
 
 func (s *Server) handleStateSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +220,7 @@ func (s *Server) handleTeardown(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.provider.Teardown(r.Context(), req)
 	if err != nil {
-		writeError(w, httpStatusForErr(err), err.Error())
+		writeTeardownError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)

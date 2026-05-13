@@ -185,6 +185,30 @@ type imagePullErrorResponse struct {
 	KubeletMessage string `json:"kubelet_message,omitempty"`
 }
 
+// namespaceTerminatingResponse is the structured body returned alongside
+// HTTP 409 when /v1/provision targets a namespace whose deletion is still
+// finalising. The namespace field lets oasisctl route on the conflict
+// target without parsing the message; retry_after_seconds is a coarse
+// hint the caller may use or ignore. See ADR 0014.
+type namespaceTerminatingResponse struct {
+	Status            string `json:"status"`
+	Message           string `json:"message"`
+	Namespace         string `json:"namespace"`
+	RetryAfterSeconds int    `json:"retry_after_seconds"`
+}
+
+// teardownInProgressResponse is the structured body returned alongside
+// HTTP 202 when /v1/teardown's kubectl delete hit petri's wall-clock
+// budget but kube confirms the namespace is at least in Terminating
+// phase. Operationally this means "the deletion landed in kube; come
+// back later." See ADR 0014.
+type teardownInProgressResponse struct {
+	Status                    string `json:"status"`
+	Message                   string `json:"message"`
+	Namespace                 string `json:"namespace"`
+	EstimatedRemainingSeconds int    `json:"estimated_remaining_seconds"`
+}
+
 // paramString extracts a string value from ObserveRequest parameters.
 func paramString(params map[string]json.RawMessage, key string) string {
 	raw, ok := params[key]

@@ -23,8 +23,32 @@ type mockKubeClient struct {
 	clusterServerURL  string
 	clusterCAData     string
 	err               error
-	waitRolloutErr    map[string]error // key: "ns/deploy" → per-deployment error
-	waitRolloutCalls  []string         // recorded "ns/deploy" calls
+	// applyYAMLErr, when non-nil, is returned from ApplyYAML instead of
+	// the default success path. Lets tests simulate kubectl apply
+	// failures (e.g. the "namespace is being terminated" message) without
+	// the test having to also break unrelated operations.
+	applyYAMLErr error
+	// namespacePhases overrides the .status.phase returned by
+	// GetNamespacePhase for a given namespace name. Empty string means
+	// "namespace does not exist" (404) — matching the chaos.KubeClient
+	// contract for that method.
+	namespacePhases map[string]string
+	// getNamespacePhaseErr, when non-nil, is returned from
+	// GetNamespacePhase regardless of the namespacePhases override.
+	getNamespacePhaseErr error
+	// deleteNamespaceWithTimeoutCalls records every namespace passed to
+	// DeleteNamespaceWithTimeout; deleteNamespaceWithTimeoutBlock makes
+	// the next call block until the matching release channel is closed.
+	deleteNamespaceWithTimeoutCalls []string
+	// deleteNamespaceWithTimeoutBlock, when non-nil, is closed by the
+	// test to release a blocked DeleteNamespaceWithTimeout call. Used to
+	// reproduce the "two concurrent /v1/teardown" race for the registry.
+	deleteNamespaceWithTimeoutBlock chan struct{}
+	// deleteNamespaceWithTimeoutErr, when non-nil, is returned from
+	// DeleteNamespaceWithTimeout after the optional block elapses.
+	deleteNamespaceWithTimeoutErr error
+	waitRolloutErr                map[string]error // key: "ns/deploy" → per-deployment error
+	waitRolloutCalls              []string         // recorded "ns/deploy" calls
 	// waitRolloutBlock, when true, makes WaitForRollout block on ctx.Done or
 	// the configured timeout instead of returning immediately. Used by
 	// fast-fail watcher tests so the watcher has a chance to fire first.
@@ -62,6 +86,7 @@ func newMockKube() *mockKubeClient {
 	return &mockKubeClient{
 		resources:        make(map[string]string),
 		tokenResponses:   make(map[string]string),
+		namespacePhases:  make(map[string]string),
 		clusterServerURL: "https://127.0.0.1:6443",
 		clusterCAData:    "dGVzdC1jYQ==",
 	}
@@ -145,8 +170,65 @@ func (m *mockKubeClient) ApplyYAML(_ context.Context, manifest string) error {
 	if m.err != nil {
 		return m.err
 	}
+	if m.applyYAMLErr != nil {
+		return m.applyYAMLErr
+	}
 	m.appliedManifests = append(m.appliedManifests, manifest)
 	return nil
+}
+
+// DeleteNamespaceWithTimeout records the call and returns the configured
+// outcome. When deleteNamespaceWithTimeoutBlock is non-nil, the call
+// blocks until the channel is closed (or ctx fires); this lets tests
+// reproduce "two concurrent /v1/teardown calls" without real time.
+func (m *mockKubeClient) DeleteNamespaceWithTimeout(ctx context.Context, name string, _ time.Duration) error {
+	m.mu.Lock()
+	m.deleteNamespaceWithTimeoutCalls = append(m.deleteNamespaceWithTimeoutCalls, name)
+	block := m.deleteNamespaceWithTimeoutBlock
+	resultErr := m.deleteNamespaceWithTimeoutErr
+	mErr := m.err
+	m.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if mErr != nil {
+		return mErr
+	}
+	if resultErr != nil {
+		return resultErr
+	}
+	m.mu.Lock()
+	m.deletedNamespaces = append(m.deletedNamespaces, name)
+	m.mu.Unlock()
+	return nil
+}
+
+// GetNamespacePhase returns the override for a specific namespace (or
+// empty string when not set, matching the "does not exist" contract).
+func (m *mockKubeClient) GetNamespacePhase(_ context.Context, name string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getNamespacePhaseErr != nil {
+		return "", m.getNamespacePhaseErr
+	}
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.namespacePhases[name], nil
+}
+
+// deleteNamespaceWithTimeoutCallsSnapshot is a goroutine-safe getter for
+// the recorded DeleteNamespaceWithTimeout calls.
+func (m *mockKubeClient) deleteNamespaceWithTimeoutCallsSnapshot() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.deleteNamespaceWithTimeoutCalls))
+	copy(out, m.deleteNamespaceWithTimeoutCalls)
+	return out
 }
 
 func (m *mockKubeClient) GetClusterConfig(_ context.Context) (string, string, error) {
