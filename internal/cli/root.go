@@ -101,6 +101,7 @@ applications, IaC repositories with realistic git history, and observability sta
 		c.newCompletionCmd(),
 		c.newServeCmd(),
 		c.newVerifyCmd(),
+		c.newInjectCmd(),
 	)
 
 	return cmd

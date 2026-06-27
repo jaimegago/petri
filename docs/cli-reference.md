@@ -161,6 +161,66 @@ petri create --company=acme --level=1 --local --oasis --name=eval-lab
 petri serve --lab=eval-lab
 ```
 
+### `petri inject`
+
+Inject a single chaos fault into a named, running lab.
+
+```bash
+petri inject <fault-type> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--lab` | string | | Name of the target lab (primary target selector) |
+| `--kubeconfig` | string | | Explicit kubeconfig path (overrides `--lab`) |
+| `--target` | string | | Target resource as `namespace/kind/name` |
+| `--param` | string | | Fault parameter as `key=value` (repeatable) |
+| `--dry-run` | bool | false | Resolve and validate everything, print the plan, but do not mutate the cluster |
+
+`petri inject` is the **runtime** counterpart to Petri's **provision-time**
+born-into-state capability (`pkg/workloadstate`, documented in
+[workload-state.md](workload-state.md)): chaos perturbs a resource that is
+*already running*, whereas workloadstate synthesises a workload that *starts* in
+a named state. The command looks the fault up in the catalog and executes it
+once — it does **not** start the continuous random `ChaosRunner`.
+
+Exactly one of `--lab` or `--kubeconfig` selects the cluster; `--kubeconfig`
+wins when both are given. `--lab` is resolved through the same active-lab guard
+`petri serve` uses, so an EXPIRED/ERROR/CREATING lab is refused with a non-zero
+exit.
+
+**Target grammar.** `--target` is a `namespace/kind/name` triple, e.g.
+`apps/Deployment/boutique-frontend`. The kind and name pass through verbatim —
+the fault resolves and validates its own target (for pod-targeting faults the
+name may be a label selector such as `app=frontend`).
+
+**Accepted fault types** (sourced structurally from `chaos.DefaultFaults()`, so
+this list tracks the catalog):
+
+- `kill_pod`
+- `restart_deployment`
+- `cpu_pressure`
+- `memory_pressure`
+- `corrupt_configmap`
+- `revoke_serviceaccount`
+- `network_latency`
+- `scale_to_zero`
+
+Per-fault `--param` keys are documented by each fault in `pkg/chaos/faults.go`
+(e.g. `cpu_pressure` accepts `duration` and `workers`; `network_latency` accepts
+`latency_ms` and `jitter_ms`). Faults that take no parameters ignore `--param`.
+
+```bash
+# Roll-restart a Deployment in an active lab
+petri inject restart_deployment --lab eval-lab --target apps/Deployment/boutique-frontend
+
+# Apply 30s of CPU pressure with two workers to a pod
+petri inject cpu_pressure --lab eval-lab --target apps/Pod/api --param duration=30s --param workers=2
+
+# Preview without mutating the cluster
+petri inject kill_pod --kubeconfig ~/.kube/config --target apps/Pod/frontend --dry-run
+```
+
 ### `petri completion`
 
 Generate shell completion scripts.
