@@ -65,7 +65,7 @@ func startHealthyRegistry(t *testing.T) (*http.Client, string) {
 		switch {
 		case strings.Contains(r.URL.Path, "/manifests/"):
 			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-			fmt.Fprintf(w, `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":%q,"size":100}}`, digest)
+			_, _ = fmt.Fprintf(w, `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":%q,"size":100}}`, digest)
 		case strings.Contains(r.URL.Path, "/blobs/"):
 			w.Header().Set("Content-Length", "100")
 			w.WriteHeader(http.StatusOK)
@@ -197,7 +197,7 @@ func TestRunServeVerify_FailureAbortsBeforeListen(t *testing.T) {
 		t.Fatalf("Listen: %v", err)
 	}
 	addr := listener.Addr().String()
-	listener.Close() // free the port; serve must not bind it
+	_ = listener.Close() // free the port; serve must not bind it
 
 	opts := &serveOptions{
 		listen:       addr,
@@ -215,7 +215,7 @@ func TestRunServeVerify_FailureAbortsBeforeListen(t *testing.T) {
 	// Confirm nothing has bound the listen address.
 	conn, dialErr := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 	if dialErr == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Errorf("expected connection refused, got connection succeeded")
 	}
 
@@ -391,7 +391,7 @@ func runWithCapturedStdout(t *testing.T, fn func()) []byte {
 	}()
 
 	fn()
-	w.Close()
+	_ = w.Close()
 	os.Stdout = orig
 	return <-done
 }

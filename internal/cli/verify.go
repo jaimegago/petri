@@ -72,8 +72,8 @@ func (c *CLI) runVerify(ctx context.Context, opts *verifyOptions) error {
 		if err := preflight.RenderJSON(os.Stdout, report); err != nil {
 			return fmt.Errorf("encoding report: %w", err)
 		}
-	} else {
-		preflight.Render(os.Stdout, report)
+	} else if err := preflight.Render(os.Stdout, report); err != nil {
+		return fmt.Errorf("rendering report: %w", err)
 	}
 
 	if report.Failed() {

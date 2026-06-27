@@ -50,7 +50,7 @@ func handleAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	log.Printf("[mock-agent] received prompt: %.80s...", req.Prompt)
 
@@ -75,7 +75,7 @@ func handleAgent(w http.ResponseWriter, r *http.Request) {
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintln(w, `{"status":"ok"}`)
+	_, _ = fmt.Fprintln(w, `{"status":"ok"}`)
 }
 
 func main() {

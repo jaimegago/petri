@@ -672,7 +672,9 @@ func (e *stringErr) Error() string { return e.s }
 func renderText(t *testing.T, rep *Report) string {
 	t.Helper()
 	var buf bytes.Buffer
-	Render(&buf, rep)
+	if err := Render(&buf, rep); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
 	return buf.String()
 }
 

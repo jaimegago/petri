@@ -84,7 +84,7 @@ func (r *fileAuditLogReader) Query(_ context.Context, q AuditLogQuery) ([]AuditE
 	if err != nil {
 		return nil, fmt.Errorf("opening audit log %s: %w", r.path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var entries []AuditEntry
 	scanner := bufio.NewScanner(f)

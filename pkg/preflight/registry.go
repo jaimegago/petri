@@ -233,7 +233,7 @@ func getManifest(ctx context.Context, client *http.Client, ref imageRef, u strin
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		snip, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -264,7 +264,7 @@ func doWithBearer(ctx context.Context, client *http.Client, ref imageRef, method
 	}
 
 	challenge := resp.Header.Get("Www-Authenticate")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if !strings.HasPrefix(strings.ToLower(challenge), "bearer ") {
 		return nil, fmt.Errorf("%s %s: 401 with non-bearer challenge: %q", method, u, challenge)
 	}
@@ -297,7 +297,7 @@ func headBlob(ctx context.Context, client *http.Client, ref imageRef, u string) 
 	if err != nil {
 		return blobErrKindTCP, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return blobErrKindHTTP, fmt.Errorf("blob HEAD %s: status %d", u, resp.StatusCode)
 	}
@@ -348,7 +348,7 @@ func fetchBearerToken(ctx context.Context, client *http.Client, ref imageRef, ch
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		return "", fmt.Errorf("token endpoint %s: status %d: %s", tokenURL, resp.StatusCode, string(body))

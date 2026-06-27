@@ -176,7 +176,7 @@ func (c *CLI) runServeVerify(ctx context.Context, opts *serveOptions, labInfo se
 	}
 
 	if report.Failed() {
-		preflight.Render(c.serveVerifyReportWriter(), report)
+		_ = preflight.Render(c.serveVerifyReportWriter(), report)
 		c.log.Warn("preflight failed",
 			"failed_checks", failureCount(report),
 			"total_checks", len(report.Checks),

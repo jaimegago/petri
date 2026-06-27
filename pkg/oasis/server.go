@@ -325,7 +325,7 @@ func loggingMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 // ── JSON helpers ──────────────────────────────────────────────────────────────
 
 func decodeJSON(r *http.Request, v any) error {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		return fmt.Errorf("decoding request body: %w", err)
 	}

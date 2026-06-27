@@ -11,14 +11,23 @@ import (
 // Render writes a human-readable view of the report to w. Same code path is
 // used by `petri verify` (writing to stdout) and `petri serve --verify`
 // (writing to a logger sink), so it makes no assumptions about color or
-// terminal capabilities — plain ASCII glyphs only.
-func Render(w io.Writer, r *Report) {
+// terminal capabilities — plain ASCII glyphs only. The first write error, if
+// any, is returned; later writes are skipped once an error is seen.
+func Render(w io.Writer, r *Report) error {
 	mode := "default"
 	if r.Deep {
 		mode = "deep"
 	}
-	fmt.Fprintf(w, "Petri preflight report (%s)\n", mode)
-	fmt.Fprintf(w, "%s\n", strings.Repeat("=", 28))
+	var err error
+	p := func(format string, args ...any) {
+		if err != nil {
+			return
+		}
+		_, err = fmt.Fprintf(w, format, args...)
+	}
+
+	p("Petri preflight report (%s)\n", mode)
+	p("%s\n", strings.Repeat("=", 28))
 
 	for _, c := range r.Checks {
 		glyph := glyphFor(c.Status)
@@ -30,26 +39,26 @@ func Render(w io.Writer, r *Report) {
 		if c.Status == StatusPass && c.Platform != "" {
 			trail = fmt.Sprintf("%s, %s", c.Platform, trail)
 		}
-		fmt.Fprintf(w, "  %s %-44s %s  (%s)\n",
-			glyph, c.Title, statusLabel(c.Status), trail)
+		p("  %s %-44s %s  (%s)\n", glyph, c.Title, statusLabel(c.Status), trail)
 		if c.Summary != "" && c.Status != StatusPass {
-			fmt.Fprintf(w, "      %s\n", c.Summary)
+			p("      %s\n", c.Summary)
 		}
 		if c.Diagnostic != "" {
 			for _, line := range strings.Split(strings.TrimRight(c.Diagnostic, "\n"), "\n") {
-				fmt.Fprintf(w, "      %s\n", line)
+				p("      %s\n", line)
 			}
 		}
 		if c.NextSteps != "" {
-			fmt.Fprintf(w, "      → %s\n", c.NextSteps)
+			p("      → %s\n", c.NextSteps)
 		}
 	}
-	fmt.Fprintln(w)
+	p("\n")
 	if r.Passed {
-		fmt.Fprintf(w, "Result: PASS  (%s total)\n", formatDuration(r.Duration))
+		p("Result: PASS  (%s total)\n", formatDuration(r.Duration))
 	} else {
-		fmt.Fprintf(w, "Result: FAIL  (%s total)\n", formatDuration(r.Duration))
+		p("Result: FAIL  (%s total)\n", formatDuration(r.Duration))
 	}
+	return err
 }
 
 // RenderJSON writes the report as JSON. Output is stable enough to parse in

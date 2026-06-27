@@ -89,7 +89,7 @@ func (fr *fakeRegistry) start() *httptest.Server {
 				// the wild and the one registry.k8s.io serves).
 				w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.list.v2+json")
 				entries := []string{
-					fmt.Sprintf(`{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":500,"platform":{"os":"linux","architecture":"arm64"}}`),
+					`{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":500,"platform":{"os":"linux","architecture":"arm64"}}`,
 				}
 				if !fr.noLinuxAmd64 {
 					entries = append(entries, fmt.Sprintf(

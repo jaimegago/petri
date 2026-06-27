@@ -253,7 +253,7 @@ func buildNamespaceManifest(name string, labels map[string]string) string {
 			sb.WriteString("\n    ")
 			sb.WriteString(k)
 			sb.WriteString(": ")
-			sb.WriteString(fmt.Sprintf("%q", v))
+			fmt.Fprintf(&sb, "%q", v)
 		}
 	}
 	sb.WriteString("\n")
@@ -343,12 +343,14 @@ func (c *cliKubeClient) ApplyYAML(ctx context.Context, manifest string) error {
 	if err != nil {
 		return fmt.Errorf("creating temp manifest file: %w", err)
 	}
-	defer os.Remove(f.Name())
+	defer func() { _ = os.Remove(f.Name()) }()
 	if _, err := f.WriteString(manifest); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("writing manifest: %w", err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing manifest: %w", err)
+	}
 	if err := c.runner.run(ctx, []string{"apply", "-f", f.Name()}); err != nil {
 		return fmt.Errorf("applying manifest: %w", err)
 	}
