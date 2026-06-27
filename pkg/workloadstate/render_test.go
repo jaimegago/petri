@@ -168,6 +168,70 @@ func TestRender_UnrecognizedStateIsError(t *testing.T) {
 	}
 }
 
+// TestNormalizeState_TrimAndLowercaseIsLoadBearing guards the invariant that
+// state resolution trims surrounding whitespace and lowercases before lookup.
+// It asserts at the capability boundary where the normalization lives
+// (Spec.normalizeState), not through Render or the OASIS path. The test is
+// written so that deleting either strings.TrimSpace or strings.ToLower from
+// normalizeState makes it fail: a mixed-case or space-padded recognized value
+// would then either trip the unrecognized-state error or fall through to the
+// running default instead of resolving to its canonical builder.
+func TestNormalizeState_TrimAndLowercaseIsLoadBearing(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		raw       string
+		canonical State
+	}{
+		{"mixed-case OOMKilled", "OOMKilled", StateOOMKilled},
+		{"mixed-case CrashLoopBackOff", "CrashLoopBackOff", StateCrashLoopBackOff},
+		{"whitespace-padded oomkilled", "  oomkilled  ", StateOOMKilled},
+		{"tab-and-newline-padded mixed case", "\tCrashLoopBackOff\n", StateCrashLoopBackOff},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := Spec{Name: "svc", State: tc.raw}.normalizeState()
+			// Must not trip the unrecognized-state error path. Removing ToLower
+			// (for the mixed-case cases) or TrimSpace (for the padded cases)
+			// makes the lookup miss and returns this error.
+			if err != nil {
+				t.Fatalf("normalizeState(%q) returned unrecognized-state error: %v", tc.raw, err)
+			}
+			// Must not silently fall through to the running default — the
+			// canonical target for every case here is a non-running state.
+			if got == StateRunning {
+				t.Fatalf("normalizeState(%q) fell through to running default", tc.raw)
+			}
+			// Must resolve to the same canonical State as the lowercase form,
+			// i.e. select the same builder.
+			if got != tc.canonical {
+				t.Fatalf("normalizeState(%q) = %q, want canonical %q", tc.raw, got, tc.canonical)
+			}
+
+			// The resolved builder produces the byte-identical manifest the
+			// canonical lowercase spelling does — concrete proof it routes to
+			// the same builder, not merely an equal enum value.
+			padded := baseSpec("svc", tc.raw)
+			canonical := baseSpec("svc", string(tc.canonical))
+			gotManifest, err := Render(padded)
+			if err != nil {
+				t.Fatalf("Render(%q) error = %v", tc.raw, err)
+			}
+			wantManifest, err := Render(canonical)
+			if err != nil {
+				t.Fatalf("Render(%q) error = %v", tc.canonical, err)
+			}
+			if gotManifest != wantManifest {
+				t.Errorf("Render(%q) must match Render(%q):\ngot:\n%s\nwant:\n%s", tc.raw, tc.canonical, gotManifest, wantManifest)
+			}
+		})
+	}
+}
+
 func TestRender_OmittedStateYieldsRunning(t *testing.T) {
 	t.Parallel()
 
