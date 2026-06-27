@@ -55,6 +55,7 @@ petri destroy my-first-lab # Tear down everything
 | `petri export-creds` | Export encrypted credentials bundle |
 | `petri health` | Check system health (binaries, config, keys) |
 | `petri serve` | Serve a lab as an OASIS SI environment provider |
+| `petri verify` | Run substrate-readiness preflight checks |
 | `petri inject` | Inject a single chaos fault into a running lab (runtime sibling of workload-state) |
 | `petri completion` | Generate shell completions (bash/zsh/fish/powershell) |
 
