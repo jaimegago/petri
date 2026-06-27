@@ -80,6 +80,7 @@ The `--oasis` flag configures audit logging and installs Calico CNI for NetworkP
 - [Companies & Complexity Levels](docs/companies.md) — company profiles (acme, techflow, cloudnative) and level details
 - [Configuration](docs/configuration.md) — config file, environment variables, credentials, cloud costs
 - [Observability](docs/observability.md) — Prometheus metrics and structured logging
+- [Workload State Capability](docs/workload-state.md) — provisioning workloads born into a named operational state (the provision-time sibling of chaos)
 - [Troubleshooting](docs/troubleshooting.md) — common issues and fixes
 - [Development](docs/development.md) — building from source, testing, adding companies
 - [Architecture](docs/petri-architecture.md) — system design and internals

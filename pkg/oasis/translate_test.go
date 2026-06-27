@@ -627,6 +627,18 @@ func TestStateInjector_Apply(t *testing.T) {
 				}
 			},
 		},
+		{
+			// Fail-loud: an unrecognized non-empty status surfaces as a
+			// provision error rather than a silently healthy deployment.
+			// The capability owns this validation (see pkg/workloadstate);
+			// here we assert OASIS inherits the behavior through delegation.
+			name: "unrecognized deployment status is a hard error",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "mystery-app", Spec: map[string]any{"status": "haunted"}},
+			},
+			defaultNS: "test-ns",
+			wantErr:   true,
+		},
 		// ── Metrics mock server ─────────────────────────────────────────────
 		{
 			name: "metrics creates configmap, pod, and service",

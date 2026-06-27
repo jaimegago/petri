@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/jaimegago/petri/pkg/manifest"
+	"github.com/jaimegago/petri/pkg/workloadstate"
 )
 
 // stateInjector translates OASIS StateEntry objects into Kubernetes operations.
@@ -113,6 +116,11 @@ func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry) error
 	return si.kube.CreateNamespace(ctx, e.Name, labels)
 }
 
+// applyDeployment builds a workloadstate.Spec from the OASIS state entry and
+// delegates to the workload-state capability, which renders and applies the
+// born-into-state Deployment. The capability is fail-loud: a non-empty,
+// unrecognized status surfaces here as a provision error rather than a
+// silently healthy deployment. See ADR 0015.
 func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, namespace string) error {
 	replicas := 1
 	if v, ok := e.Spec["replicas"]; ok {
@@ -131,10 +139,12 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		}
 	}
 
-	status := "running"
+	// Raw status string; workloadstate normalizes case/aliases and treats an
+	// omitted or empty value as running.
+	status := ""
 	if v, ok := e.Spec["status"]; ok {
 		if s, ok := v.(string); ok {
-			status = strings.ToLower(s)
+			status = s
 		}
 	}
 
@@ -161,39 +171,37 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		matchLabels[k] = v
 	}
 
-	var manifest string
-	switch status {
-	case "crashloopbackoff":
-		configMapRef := ""
-		if v, ok := e.Spec["configMapRef"]; ok {
-			if s, ok := v.(string); ok {
-				configMapRef = s
-			}
+	configMapRef := ""
+	if v, ok := e.Spec["configMapRef"]; ok {
+		if s, ok := v.(string); ok {
+			configMapRef = s
 		}
-		manifest = buildCrashLoopDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, configMapRef, matchLabels, si.utilImage)
-	case "oomkilled":
-		manifest = buildOOMKilledDeployment(e.Name, namespace, replicas, e.Labels, e.Annotations, managedBy, matchLabels, si.utilImage)
-	case "pending":
-		manifest = buildPendingDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, matchLabels)
-	case "degraded":
-		manifest = buildDegradedDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, matchLabels)
-	case "elevated_error_rate", "elevated-error-rate":
-		errorRate := 50
-		if v, ok := e.Spec["error_rate"]; ok {
-			switch r := v.(type) {
-			case int:
-				errorRate = r
-			case float64:
-				errorRate = int(r)
-			}
-		}
-		manifest = buildElevatedErrorRateDeployment(e.Name, namespace, replicas, errorRate, e.Labels, e.Annotations, managedBy, matchLabels)
-	case "error":
-		manifest = buildErrorDeployment(e.Name, namespace, replicas, e.Labels, e.Annotations, managedBy, matchLabels)
-	default:
-		manifest = buildRunningDeployment(e.Name, namespace, image, replicas, e.Labels, e.Annotations, managedBy, matchLabels)
 	}
-	return si.kube.ApplyYAML(ctx, manifest)
+
+	errorRate := 0
+	if v, ok := e.Spec["error_rate"]; ok {
+		switch r := v.(type) {
+		case int:
+			errorRate = r
+		case float64:
+			errorRate = int(r)
+		}
+	}
+
+	return workloadstate.Provision(ctx, si.kube, workloadstate.Spec{
+		Name:         e.Name,
+		Namespace:    namespace,
+		Replicas:     replicas,
+		Image:        image,
+		Labels:       e.Labels,
+		Annotations:  e.Annotations,
+		ManagedBy:    managedBy,
+		MatchLabels:  matchLabels,
+		State:        status,
+		ConfigMapRef: configMapRef,
+		ErrorRate:    errorRate,
+		UtilImage:    si.utilImage,
+	})
 }
 
 func (si *stateInjector) applyConfigMap(ctx context.Context, e StateEntry, namespace string) error {
@@ -281,76 +289,12 @@ func (si *stateInjector) applyGitOpsApplication(ctx context.Context, e StateEntr
 }
 
 // ── YAML manifest builders ────────────────────────────────────────────────────
-
-func buildRunningDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string) string {
-	podLabels := mergeLabels(matchLabels, extraLabels)
-	allAnnotations := make(map[string]string, len(annotations))
-	for k, v := range annotations {
-		allAnnotations[k] = v
-	}
-	if managedBy != "" {
-		allAnnotations["app.kubernetes.io/managed-by"] = managedBy
-	}
-
-	var sb strings.Builder
-	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
-	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
-	if len(allAnnotations) > 0 {
-		sb.WriteString("  annotations:\n")
-		sb.WriteString(labelsToYAML(allAnnotations, 4))
-		sb.WriteString("\n")
-	}
-	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
-	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(matchLabels, 6))
-	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 8))
-	fmt.Fprintf(&sb, "\n    spec:\n      containers:\n      - name: app\n        image: %s\n        ports:\n        - containerPort: 80\n", image)
-	return sb.String()
-}
-
-func buildCrashLoopDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy, configMapRef string, matchLabels map[string]string, utilImage string) string {
-	podLabels := mergeLabels(matchLabels, extraLabels)
-	allAnnotations := make(map[string]string, len(annotations))
-	for k, v := range annotations {
-		allAnnotations[k] = v
-	}
-	if managedBy != "" {
-		allAnnotations["app.kubernetes.io/managed-by"] = managedBy
-	}
-
-	var sb strings.Builder
-	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
-	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
-	if len(allAnnotations) > 0 {
-		sb.WriteString("  annotations:\n")
-		sb.WriteString(labelsToYAML(allAnnotations, 4))
-		sb.WriteString("\n")
-	}
-	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
-	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(matchLabels, 6))
-	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 8))
-	sb.WriteString("\n    spec:\n      containers:\n      - name: app\n")
-
-	if configMapRef != "" {
-		// Reference a missing key from an existing ConfigMap to trigger CrashLoopBackOff.
-		fmt.Fprintf(&sb, "        image: %s\n", image)
-		fmt.Fprintf(&sb, "        env:\n        - name: MISSING_CONFIG_VALUE\n          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: __petri_missing_key__\n              optional: false\n", configMapRef)
-	} else {
-		// Simple exit-1 container to trigger CrashLoopBackOff. Sourced
-		// from registry.k8s.io rather than Docker Hub to avoid R2.
-		if utilImage == "" {
-			utilImage = defaultUtilImage
-		}
-		fmt.Fprintf(&sb, "        image: %s\n", utilImage)
-		sb.WriteString("        command: [\"sh\", \"-c\", \"echo CrashLoopBackOff simulation; exit 1\"]\n")
-	}
-	return sb.String()
-}
+//
+// Deployment manifests for born-into-state workloads (running and the
+// unhealthy states) are produced by pkg/workloadstate; applyDeployment builds
+// a workloadstate.Spec and delegates. The builders below cover the remaining
+// OASIS state-entry kinds (ConfigMap, Secret, Service, RBAC, Pod, observability
+// mocks, etc.).
 
 func buildConfigMapManifest(name, namespace string, data, labels, annotations map[string]string) string {
 	var sb strings.Builder
@@ -358,12 +302,12 @@ func buildConfigMapManifest(name, namespace string, data, labels, annotations ma
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(annotations) > 0 {
 		sb.WriteString("  annotations:\n")
-		sb.WriteString(labelsToYAML(annotations, 4))
+		sb.WriteString(manifest.LabelsToYAML(annotations, 4))
 		sb.WriteString("\n")
 	}
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
-		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
 	if len(data) > 0 {
@@ -381,7 +325,7 @@ func buildSecretManifest(name, namespace string, data, labels map[string]string)
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
-		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("type: Opaque\n")
@@ -481,7 +425,7 @@ func buildServiceAccountWithAnnotations(name, namespace string, annotations map[
 	fmt.Fprintf(&sb, "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: %s\n  namespace: %s\n", name, namespace)
 	if len(annotations) > 0 {
 		sb.WriteString("  annotations:\n")
-		sb.WriteString(labelsToYAML(annotations, 4))
+		sb.WriteString(manifest.LabelsToYAML(annotations, 4))
 		sb.WriteString("\n")
 	}
 	return sb.String()
@@ -513,30 +457,8 @@ users:
 `, serverURL, caData, namespace, token)
 }
 
-// ── YAML helper functions ─────────────────────────────────────────────────────
-
-func labelsToYAML(labels map[string]string, indent int) string {
-	if len(labels) == 0 {
-		return ""
-	}
-	prefix := strings.Repeat(" ", indent)
-	var lines []string
-	for k, v := range labels {
-		lines = append(lines, fmt.Sprintf("%s%s: %q", prefix, k, v))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func mergeLabels(base, extra map[string]string) map[string]string {
-	result := make(map[string]string, len(base)+len(extra))
-	for k, v := range base {
-		result[k] = v
-	}
-	for k, v := range extra {
-		result[k] = v
-	}
-	return result
-}
+// YAML label/annotation serialisation helpers live in pkg/manifest; the
+// builders below call manifest.LabelsToYAML / manifest.MergeLabels.
 
 // ── HPA manifest builder ─────────────────────────────────────────────────────
 
@@ -578,7 +500,7 @@ func buildHPAManifest(name, namespace string, spec map[string]any, labels map[st
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
-		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("spec:\n")
@@ -619,7 +541,7 @@ func buildPVCManifest(name, namespace string, spec map[string]any, labels map[st
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
-		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("spec:\n")
@@ -645,13 +567,13 @@ func buildPodManifest(name, namespace string, spec map[string]any, labels map[st
 		image = v
 	}
 
-	podLabels := mergeLabels(map[string]string{"app": name}, labels)
+	podLabels := manifest.MergeLabels(map[string]string{"app": name}, labels)
 
 	var sb strings.Builder
 	sb.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
+	sb.WriteString(manifest.LabelsToYAML(podLabels, 4))
 	sb.WriteString("\nspec:\n  containers:\n  - name: app\n")
 	fmt.Fprintf(&sb, "    image: %s\n", image)
 
@@ -701,7 +623,7 @@ func buildPodManifest(name, namespace string, spec map[string]any, labels map[st
 // discover them. The data field holds the dashboard JSON (panels, title, etc.).
 
 func buildDashboardConfigMap(name, namespace string, spec map[string]any, data, labels map[string]string) string {
-	allLabels := mergeLabels(map[string]string{
+	allLabels := manifest.MergeLabels(map[string]string{
 		"petri.io/dashboard": "true",
 		"grafana_dashboard":  "1",
 	}, labels)
@@ -720,7 +642,7 @@ func buildDashboardConfigMap(name, namespace string, spec map[string]any, data, 
 	sb.WriteString("apiVersion: v1\nkind: ConfigMap\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: dashboard-%s\n  namespace: %s\n", name, namespace)
 	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(allLabels, 4))
+	sb.WriteString(manifest.LabelsToYAML(allLabels, 4))
 	sb.WriteString("\ndata:\n")
 	for k, v := range dashData {
 		fmt.Fprintf(&sb, "  %s: %q\n", k, v)
@@ -757,168 +679,6 @@ func buildDashboardJSON(name string, spec map[string]any) string {
 // GitOps applications are stored as ConfigMaps with discovery labels. The data
 // fields capture sync_status, source_repo, and other application metadata that
 // the agent can query.
-
-// ── Advanced deployment status builders ──────────────────────────────────────
-
-// buildOOMKilledDeployment creates a deployment with a very low memory limit
-// so the OOM killer terminates the container, producing OOMKilled status.
-func buildOOMKilledDeployment(name, namespace string, replicas int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string, utilImage string) string {
-	if utilImage == "" {
-		utilImage = defaultUtilImage
-	}
-	podLabels := mergeLabels(matchLabels, extraLabels)
-	allAnnotations := mergeAnnotations(annotations, managedBy)
-
-	var sb strings.Builder
-	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
-	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
-	writeAnnotationsYAML(&sb, allAnnotations)
-	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
-	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(matchLabels, 6))
-	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 8))
-	sb.WriteString("\n    spec:\n      containers:\n      - name: app\n")
-	fmt.Fprintf(&sb, "        image: %s\n", utilImage)
-	sb.WriteString("        command: [\"sh\", \"-c\", \"dd if=/dev/zero of=/dev/null bs=1M\"]\n")
-	sb.WriteString("        resources:\n")
-	sb.WriteString("          limits:\n")
-	sb.WriteString("            memory: 4Mi\n")
-	return sb.String()
-}
-
-// buildPendingDeployment creates a deployment with impossibly high CPU requests
-// so pods stay in Pending with "Insufficient cpu" message.
-func buildPendingDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string) string {
-	podLabels := mergeLabels(matchLabels, extraLabels)
-	allAnnotations := mergeAnnotations(annotations, managedBy)
-
-	var sb strings.Builder
-	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
-	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
-	writeAnnotationsYAML(&sb, allAnnotations)
-	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
-	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(matchLabels, 6))
-	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 8))
-	fmt.Fprintf(&sb, "\n    spec:\n      containers:\n      - name: app\n        image: %s\n", image)
-	sb.WriteString("        resources:\n")
-	sb.WriteString("          requests:\n")
-	sb.WriteString("            cpu: \"100\"\n")
-	return sb.String()
-}
-
-// buildDegradedDeployment creates a deployment where one replica has a failing
-// readiness probe. It deploys with N replicas and a readiness probe that checks
-// an HTTP endpoint. A companion init container writes a health status file;
-// the probe uses exec to check it. One pod will fail readiness due to the probe
-// configuration targeting a path that returns errors.
-func buildDegradedDeployment(name, namespace, image string, replicas int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string) string {
-	if replicas < 2 {
-		replicas = 2 // Need at least 2 replicas for partial failure.
-	}
-	podLabels := mergeLabels(matchLabels, extraLabels)
-	allAnnotations := mergeAnnotations(annotations, managedBy)
-
-	var sb strings.Builder
-	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
-	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
-	writeAnnotationsYAML(&sb, allAnnotations)
-	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
-	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(matchLabels, 6))
-	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 8))
-	fmt.Fprintf(&sb, "\n    spec:\n      containers:\n      - name: app\n        image: %s\n        ports:\n        - containerPort: 80\n", image)
-	sb.WriteString("        readinessProbe:\n")
-	sb.WriteString("          httpGet:\n")
-	sb.WriteString("            path: /healthz\n")
-	sb.WriteString("            port: 80\n")
-	sb.WriteString("          initialDelaySeconds: 1\n")
-	sb.WriteString("          periodSeconds: 2\n")
-	sb.WriteString("          failureThreshold: 1\n")
-	return sb.String()
-}
-
-// buildElevatedErrorRateDeployment creates a deployment running a Python HTTP
-// server that returns HTTP 500 for a configurable percentage of requests.
-func buildElevatedErrorRateDeployment(name, namespace string, replicas, errorRate int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string) string {
-	podLabels := mergeLabels(matchLabels, extraLabels)
-	allAnnotations := mergeAnnotations(annotations, managedBy)
-
-	script := fmt.Sprintf(`import http.server,random
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if random.randint(1,100)<=%d:
-            self.send_response(500)
-        else:
-            self.send_response(200)
-        self.end_headers()
-    def log_message(self,*a):pass
-http.server.HTTPServer(("",8080),H).serve_forever()`, errorRate)
-
-	var sb strings.Builder
-	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
-	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
-	writeAnnotationsYAML(&sb, allAnnotations)
-	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
-	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(matchLabels, 6))
-	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 8))
-	sb.WriteString("\n    spec:\n      containers:\n      - name: app\n")
-	sb.WriteString("        image: python:3-alpine\n")
-	fmt.Fprintf(&sb, "        command: [\"python3\", \"-c\", %q]\n", script)
-	sb.WriteString("        ports:\n        - containerPort: 8080\n")
-	return sb.String()
-}
-
-// buildErrorDeployment creates a deployment with an invalid image reference
-// to produce an ErrImagePull / ImagePullBackOff error state.
-func buildErrorDeployment(name, namespace string, replicas int, extraLabels, annotations map[string]string, managedBy string, matchLabels map[string]string) string {
-	podLabels := mergeLabels(matchLabels, extraLabels)
-	allAnnotations := mergeAnnotations(annotations, managedBy)
-
-	var sb strings.Builder
-	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
-	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
-	writeAnnotationsYAML(&sb, allAnnotations)
-	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
-	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(matchLabels, 6))
-	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 8))
-	sb.WriteString("\n    spec:\n      containers:\n      - name: app\n")
-	sb.WriteString("        image: invalid-registry.example.com/does-not-exist:v0.0.0\n")
-	return sb.String()
-}
-
-// mergeAnnotations builds an annotation map with an optional managed-by entry.
-func mergeAnnotations(annotations map[string]string, managedBy string) map[string]string {
-	result := make(map[string]string, len(annotations)+1)
-	for k, v := range annotations {
-		result[k] = v
-	}
-	if managedBy != "" {
-		result["app.kubernetes.io/managed-by"] = managedBy
-	}
-	return result
-}
-
-// writeAnnotationsYAML writes the annotations block to a builder if non-empty.
-func writeAnnotationsYAML(sb *strings.Builder, annotations map[string]string) {
-	if len(annotations) > 0 {
-		sb.WriteString("  annotations:\n")
-		sb.WriteString(labelsToYAML(annotations, 4))
-		sb.WriteString("\n")
-	}
-}
 
 // ── Mock observability server builders ──────────────────────────────────────
 
@@ -1087,7 +847,7 @@ func buildLogsDeployment(name, namespace string, spec map[string]any, extraLabel
 	for k, v := range extraLabels {
 		matchLabels[k] = v
 	}
-	podLabels := mergeLabels(matchLabels, extraLabels)
+	podLabels := manifest.MergeLabels(matchLabels, extraLabels)
 
 	allAnnotations := make(map[string]string, len(annotations))
 	for k, v := range annotations {
@@ -1099,15 +859,15 @@ func buildLogsDeployment(name, namespace string, spec map[string]any, extraLabel
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(allAnnotations) > 0 {
 		sb.WriteString("  annotations:\n")
-		sb.WriteString(labelsToYAML(allAnnotations, 4))
+		sb.WriteString(manifest.LabelsToYAML(allAnnotations, 4))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 4))
+	sb.WriteString(manifest.LabelsToYAML(podLabels, 4))
 	fmt.Fprintf(&sb, "\nspec:\n  replicas: %d\n  selector:\n    matchLabels:\n", replicas)
-	sb.WriteString(labelsToYAML(matchLabels, 6))
+	sb.WriteString(manifest.LabelsToYAML(matchLabels, 6))
 	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
-	sb.WriteString(labelsToYAML(podLabels, 8))
+	sb.WriteString(manifest.LabelsToYAML(podLabels, 8))
 	fmt.Fprintf(&sb, "\n    spec:\n      containers:\n      - name: %s\n        image: %s\n        command: [\"sh\", \"-c\", %q]\n", containerName, utilImage, shellCmd)
 	return sb.String()
 }
@@ -1122,7 +882,7 @@ func buildMockServerConfigMap(name, namespace, dataKey, dataValue string, labels
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
-		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("data:\n")
@@ -1138,7 +898,7 @@ func buildMockServerPod(name, namespace, configMapName string, port int, script 
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
-		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("spec:\n  containers:\n  - name: server\n")
@@ -1372,7 +1132,7 @@ func buildEventManifests(name, namespace string, spec map[string]any) []string {
 // ── Runbook manifest builder ────────────────────────────────────────────────
 
 func buildRunbookConfigMap(name, namespace string, spec map[string]any, data, labels map[string]string) string {
-	allLabels := mergeLabels(map[string]string{
+	allLabels := manifest.MergeLabels(map[string]string{
 		"petri.io/runbook": "true",
 	}, labels)
 
@@ -1397,7 +1157,7 @@ func buildRunbookConfigMap(name, namespace string, spec map[string]any, data, la
 	sb.WriteString("apiVersion: v1\nkind: ConfigMap\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: runbook-%s\n  namespace: %s\n", name, namespace)
 	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(allLabels, 4))
+	sb.WriteString(manifest.LabelsToYAML(allLabels, 4))
 	sb.WriteString("\ndata:\n")
 	for k, v := range runbookData {
 		fmt.Fprintf(&sb, "  %s: %q\n", k, v)
@@ -1448,12 +1208,12 @@ func buildIngressManifest(name, namespace string, spec map[string]any, labels, a
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(annotations) > 0 {
 		sb.WriteString("  annotations:\n")
-		sb.WriteString(labelsToYAML(annotations, 4))
+		sb.WriteString(manifest.LabelsToYAML(annotations, 4))
 		sb.WriteString("\n")
 	}
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
-		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("spec:\n")
@@ -1495,13 +1255,13 @@ func buildNetworkPolicyManifest(name, namespace string, spec map[string]any, lab
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
-		sb.WriteString(labelsToYAML(labels, 4))
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("spec:\n")
 	sb.WriteString("  podSelector:\n")
 	sb.WriteString("    matchLabels:\n")
-	sb.WriteString(labelsToYAML(podSelector, 6))
+	sb.WriteString(manifest.LabelsToYAML(podSelector, 6))
 	sb.WriteString("\n")
 
 	// Policy types.
@@ -1638,7 +1398,7 @@ func hasKey(m map[string]any, key string) bool {
 }
 
 func buildGitOpsApplicationConfigMap(name, namespace string, spec map[string]any, labels map[string]string) string {
-	allLabels := mergeLabels(map[string]string{
+	allLabels := manifest.MergeLabels(map[string]string{
 		"petri.io/gitops-application": "true",
 		"app.kubernetes.io/part-of":   "argocd",
 	}, labels)
@@ -1668,7 +1428,7 @@ func buildGitOpsApplicationConfigMap(name, namespace string, spec map[string]any
 	sb.WriteString("apiVersion: v1\nkind: ConfigMap\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: gitops-app-%s\n  namespace: %s\n", name, namespace)
 	sb.WriteString("  labels:\n")
-	sb.WriteString(labelsToYAML(allLabels, 4))
+	sb.WriteString(manifest.LabelsToYAML(allLabels, 4))
 	sb.WriteString("\ndata:\n")
 	fmt.Fprintf(&sb, "  name: %q\n", name)
 	fmt.Fprintf(&sb, "  sync_status: %q\n", syncStatus)
