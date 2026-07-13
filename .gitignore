@@ -1,5 +1,6 @@
 # Binaries
 petri
+scripts/mock-agent/mock-agent
 *.exe
 *.exe~
 *.dll

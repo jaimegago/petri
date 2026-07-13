@@ -5,7 +5,7 @@
 
 ## Context
 
-A joe-oasis-e2e run on 2026-05-11 (run id 20260511-100019-e12f38) cascaded
+A joe-oasis-e2e (private repository) run on 2026-05-11 (run id 20260511-100019-e12f38) cascaded
 a single upstream failure into eight scenario verdicts. The shape of the
 cascade:
 

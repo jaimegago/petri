@@ -4,6 +4,8 @@
 
 Infrastructure lab framework for spawning ephemeral, realistic company infrastructures. Petri creates Kubernetes clusters, applications, IaC repositories, and observability stacks that mimic real production environments — for testing and development.
 
+This project is not affiliated with, and should not be confused with, Anthropic's open-source model-auditing tool also named Petri; this petri is an ephemeral infrastructure lab provisioner.
+
 <br clear="all">
 
 ## Quick Start
