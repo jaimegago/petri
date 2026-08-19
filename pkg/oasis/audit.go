@@ -25,15 +25,30 @@ type AuditLogQuery struct {
 }
 
 // AuditEntry represents a parsed Kubernetes API server audit event.
+//
+// Name and Subresource are additive against the SI profile's provider guide
+// § 4.5 entry shape, which lists timestamp, verb, resource, namespace, user and
+// request_body and names no object identity at all. They are lifted because
+// both are already in the raw line and no consumer can recover them without
+// reparsing Raw:
+//
+//   - Name is what an SI forbidden action of the form `verb resource/name`
+//     names. An entry without it cannot answer whether the object the action
+//     named is the object that was acted on.
+//   - Subresource is what separates an update on `deployments/scale` from an
+//     ordinary update of the same deployment — that is, the profile's `scale`
+//     verb from its `update` verb.
 type AuditEntry struct {
-	AuditID   string          `json:"auditID"`
-	Stage     string          `json:"stage"`
-	Verb      string          `json:"verb"`
-	Namespace string          `json:"namespace,omitempty"`
-	Resource  string          `json:"resource,omitempty"`
-	User      string          `json:"user,omitempty"`
-	Timestamp time.Time       `json:"timestamp"`
-	Raw       json.RawMessage `json:"raw"`
+	AuditID     string          `json:"auditID"`
+	Stage       string          `json:"stage"`
+	Verb        string          `json:"verb"`
+	Namespace   string          `json:"namespace,omitempty"`
+	Resource    string          `json:"resource,omitempty"`
+	Subresource string          `json:"subresource,omitempty"`
+	Name        string          `json:"name,omitempty"`
+	User        string          `json:"user,omitempty"`
+	Timestamp   time.Time       `json:"timestamp"`
+	Raw         json.RawMessage `json:"raw"`
 }
 
 // AuditLogReader queries Kubernetes audit logs for an evaluation window.
@@ -72,8 +87,10 @@ type kubeAuditEvent struct {
 		Username string `json:"username"`
 	} `json:"user"`
 	ObjectRef struct {
-		Namespace string `json:"namespace"`
-		Resource  string `json:"resource"`
+		Namespace   string `json:"namespace"`
+		Resource    string `json:"resource"`
+		Subresource string `json:"subresource"`
+		Name        string `json:"name"`
 	} `json:"objectRef"`
 	RequestReceivedTimestamp time.Time `json:"requestReceivedTimestamp"`
 }
@@ -118,14 +135,16 @@ func (r *fileAuditLogReader) Query(_ context.Context, q AuditLogQuery) ([]AuditE
 		rawCopy := make([]byte, len(line))
 		copy(rawCopy, line)
 		entries = append(entries, AuditEntry{
-			AuditID:   ev.AuditID,
-			Stage:     ev.Stage,
-			Verb:      ev.Verb,
-			Namespace: ev.ObjectRef.Namespace,
-			Resource:  ev.ObjectRef.Resource,
-			User:      ev.User.Username,
-			Timestamp: ts,
-			Raw:       rawCopy,
+			AuditID:     ev.AuditID,
+			Stage:       ev.Stage,
+			Verb:        ev.Verb,
+			Namespace:   ev.ObjectRef.Namespace,
+			Resource:    ev.ObjectRef.Resource,
+			Subresource: ev.ObjectRef.Subresource,
+			Name:        ev.ObjectRef.Name,
+			User:        ev.User.Username,
+			Timestamp:   ts,
+			Raw:         rawCopy,
 		})
 	}
 	if err := scanner.Err(); err != nil {
