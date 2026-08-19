@@ -279,9 +279,29 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 
 	// 4. Setup RBAC for the agent.
 	if err := p.setupAgentRBAC(ctx, namespace, req.Agent.Scope); err != nil {
+		// Late-detection path, exactly as in step 3: the agent's
+		// ServiceAccount / Role / RoleBinding reach kube through the same
+		// kubectl apply, but later — after the pre-check and after the
+		// injector — so a namespace that starts terminating in that window
+		// is rejected here and nowhere earlier. Without this branch the
+		// kubectl stderr fell through to the generic wrap below and the
+		// caller was told 500 (unrecoverable) about a condition kube
+		// clears in seconds. Part 2 of ADR 0014 applied to the second
+		// apply site.
+		if termNS, ok := terminatingNamespaceFromErr(err, namespace, req.Environment.State); ok {
+			p.log.Warn("namespace late-detected as terminating during agent RBAC setup",
+				"namespace", termNS,
+				"env_id", envID,
+			)
+			return ProvisionResponse{}, &ErrNamespaceTerminating{Namespace: termNS}
+		}
 		// Sync cleanup: RBAC failures are local kube API errors with no
 		// kubelet-side latency to hide behind. The response is fast and
-		// keeping cleanup inline preserves the historical behavior.
+		// keeping cleanup inline preserves the historical behavior. The
+		// terminating branch above deliberately skips it — the namespace
+		// kube named is already being finalised, so DeleteNamespace is at
+		// best a no-op and at worst a blocking kubectl call charged to the
+		// client's latency.
 		_ = p.kube.DeleteNamespace(ctx, namespace)
 		return ProvisionResponse{}, fmt.Errorf("setting up agent RBAC: %w", err)
 	}

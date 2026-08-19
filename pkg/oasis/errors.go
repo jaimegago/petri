@@ -118,7 +118,7 @@ func (e *ErrImagePullTimeout) Error() string {
 // to write resources into it will be rejected with the kubectl message
 // "...because it is being terminated".
 //
-// It surfaces from two call sites in /v1/provision:
+// It surfaces from three call sites in /v1/provision:
 //
 //  1. The pre-check at the top of Provision (single GET against the kube
 //     API). If the target namespace is already Terminating before any
@@ -130,6 +130,14 @@ func (e *ErrImagePullTimeout) Error() string {
 //     (e.g. a concurrent /v1/teardown finishes between the two checks),
 //     the kubectl stderr "because it is being terminated" is converted to
 //     this typed error so the same 409 mapping fires.
+//
+//  3. The same late detection on the agent-RBAC apply (step 4 of
+//     Provision). The ServiceAccount / Role / RoleBinding reach kube
+//     through the same kubectl path but later still, so a namespace whose
+//     deletion starts after the injector finishes is rejected there and
+//     nowhere earlier. That site had no classification until 2026-08-19
+//     and the condition surfaced as a 500 — a retryable state reported as
+//     unrecoverable.
 //
 // The HTTP layer maps it to 409 Conflict — the resource state conflicts
 // with the requested operation and the conflict is expected to clear once

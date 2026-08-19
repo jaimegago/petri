@@ -67,6 +67,32 @@ to the same `*ErrNamespaceTerminating` shape by
 detection path. The needle "because it is being terminated" has been
 stable in kube admission responses for many releases.
 
+**Amended 2026-08-19 — the injector is not the last apply in Provision.**
+As written, Part 2 covered step 3 (state injection) and stopped there.
+Step 4 applies the agent's ServiceAccount / Role / RoleBinding through the
+same kubectl path, *later* — so a namespace whose deletion begins after
+the injector finishes is rejected there and at no earlier checkpoint. That
+site had no classification, and the condition surfaced as a 500: a
+retryable state reported as unrecoverable, observed three times out of
+three on 2026-08-19 as
+
+```
+serviceaccounts "oasis-agent" is forbidden: unable to create new content
+in namespace <ns> because it is being terminated
+```
+
+`terminatingNamespaceFromErr` now guards the agent-RBAC apply too, under
+its own log line `namespace late-detected as terminating during agent RBAC
+setup`. Read the smoke-signal note under "What this makes harder" as
+covering both late-detection lines. Unlike the generic RBAC failure path,
+the terminating branch does **not** delete the namespace synchronously —
+kube is already finalising it, so the delete is at best a no-op and at
+worst a blocking kubectl call charged to the client's latency. That
+matches the choice Part 2 made.
+
+**Whether the retry then belongs in petri or in the caller is still
+open.** This amendment classifies; it does not retry.
+
 ### Part 3 — Typed errors and HTTP mapping
 
 `pkg/oasis/errors.go` grows two new typed errors next to

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,6 +164,174 @@ func TestProvision_LateDetection_TerminatingFromApplyStderr(t *testing.T) {
 	}
 	if term.Namespace != scenarioNS {
 		t.Errorf("namespace = %q, want %q", term.Namespace, scenarioNS)
+	}
+}
+
+// ── Part 2b: Late-detection on the agent-RBAC apply ──────────────────────────
+//
+// The state-injection apply (Part 2) is not the only kubectl apply in
+// Provision. Step 4 applies the agent's ServiceAccount / Role / RoleBinding
+// through the same kubectl path, after the pre-check and after the injector,
+// and a namespace that starts terminating in that window rejects it with the
+// same admission message. Observed three times out of three on 2026-08-19:
+//
+//	serviceaccounts "oasis-agent" is forbidden: unable to create new content
+//	in namespace oasis-infra-sa because it is being terminated
+//
+// reported as status=500. It is exactly ErrNamespaceTerminating and must be
+// classified as one.
+
+// agentRBACTerminatingStderr reproduces the kubectl stderr petri wraps when
+// the agent-RBAC ServiceAccount lands in a terminating namespace, in the
+// shape ApplyYAML actually returns it ("applying manifest: ...").
+func agentRBACTerminatingStderr(ns string) error {
+	return fmt.Errorf(`applying manifest: kubectl apply: Error from server (Forbidden): error when creating "/tmp/petri-manifest-1.yaml": serviceaccounts "oasis-agent" is forbidden: unable to create new content in namespace %s because it is being terminated`, ns)
+}
+
+func TestProvision_LateDetection_TerminatingFromAgentRBACStderr(t *testing.T) {
+	t.Parallel()
+	capture := &captureHandler{}
+	mock := newMockKube()
+	// No state entries, so the injector applies nothing and the only
+	// ApplyYAML calls in this Provision are the agent-RBAC manifests. The
+	// pre-check sees the namespace as Active; it starts terminating in the
+	// window before step 4.
+	scenarioNS := scenarioNamespace("rbac-term", "ignored")
+	mock.namespacePhases[scenarioNS] = "Active"
+	mock.applyYAMLErr = agentRBACTerminatingStderr(scenarioNS)
+	p := providerWithLogger(mock, slog.New(capture))
+
+	_, err := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "rbac-term"})
+	if err == nil {
+		t.Fatal("expected ErrNamespaceTerminating, got nil")
+	}
+	var term *ErrNamespaceTerminating
+	if !errors.As(err, &term) {
+		t.Fatalf("expected *ErrNamespaceTerminating, got %T: %v", err, err)
+	}
+	if term.Namespace != scenarioNS {
+		t.Errorf("namespace = %q, want %q", term.Namespace, scenarioNS)
+	}
+	if _, ok := capture.find("namespace late-detected as terminating during agent RBAC setup"); !ok {
+		t.Error("expected the dedicated WARN log line for the agent-RBAC path")
+	}
+}
+
+// The RBAC manifests do not all target the scenario namespace: with
+// scope.Namespaces set, Role and RoleBinding land in the scoped namespaces.
+// The typed error must name the namespace kubectl rejected, not the
+// scenario namespace it defaults to.
+func TestProvision_LateDetection_AgentRBACNamesScopedNamespace(t *testing.T) {
+	t.Parallel()
+	mock := newMockKube()
+	scenarioNS := scenarioNamespace("rbac-scope", "ignored")
+	mock.namespacePhases[scenarioNS] = "Active"
+	mock.applyYAMLErr = agentRBACTerminatingStderr("production")
+	p := newTestProvider(mock)
+
+	_, err := p.Provision(context.Background(), ProvisionRequest{
+		ScenarioID: "rbac-scope",
+		Agent:      AgentSpec{Scope: AgentScope{Namespaces: []string{"production"}}},
+	})
+	if err == nil {
+		t.Fatal("expected ErrNamespaceTerminating, got nil")
+	}
+	var term *ErrNamespaceTerminating
+	if !errors.As(err, &term) {
+		t.Fatalf("expected *ErrNamespaceTerminating, got %T: %v", err, err)
+	}
+	if term.Namespace != "production" {
+		t.Errorf("namespace = %q, want %q", term.Namespace, "production")
+	}
+}
+
+// The conflict came from kube, and the namespace it names is already being
+// finalised. Deleting it is at best a no-op and at worst a blocking kubectl
+// call charged to the client's latency, so this path does not clean up —
+// the same choice Part 2 made for the injector's late detection.
+func TestProvision_LateDetection_AgentRBACDoesNotDeleteNamespace(t *testing.T) {
+	t.Parallel()
+	mock := newMockKube()
+	scenarioNS := scenarioNamespace("rbac-nodel", "ignored")
+	mock.namespacePhases[scenarioNS] = "Active"
+	mock.applyYAMLErr = agentRBACTerminatingStderr(scenarioNS)
+	p := newTestProvider(mock)
+
+	if _, err := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "rbac-nodel"}); err == nil {
+		t.Fatal("expected ErrNamespaceTerminating, got nil")
+	}
+	if got := mock.deletedNamespacesSnapshot(); len(got) != 0 {
+		t.Errorf("expected no DeleteNamespace call on the terminating path, got %v", got)
+	}
+}
+
+// The narrow classification must not swallow ordinary RBAC failures: an
+// apply error that is not the terminating condition keeps its historical
+// wrapping, its 500, and its synchronous cleanup.
+func TestProvision_AgentRBAC_UnrelatedFailureKeepsGenericHandling(t *testing.T) {
+	t.Parallel()
+	mock := newMockKube()
+	scenarioNS := scenarioNamespace("rbac-other", "ignored")
+	mock.namespacePhases[scenarioNS] = "Active"
+	mock.applyYAMLErr = fmt.Errorf("applying manifest: kubectl apply: connection refused")
+	p := newTestProvider(mock)
+
+	_, err := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "rbac-other"})
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	var term *ErrNamespaceTerminating
+	if errors.As(err, &term) {
+		t.Fatalf("unrelated RBAC failure classified as terminating: %v", err)
+	}
+	if !strings.Contains(err.Error(), "setting up agent RBAC") {
+		t.Errorf("expected the historical wrapping, got %v", err)
+	}
+	rec := httptest.NewRecorder()
+	writeProvisionError(rec, err)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	found := false
+	for _, ns := range mock.deletedNamespacesSnapshot() {
+		if ns == scenarioNS {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected synchronous cleanup of %q on an unrelated RBAC failure", scenarioNS)
+	}
+}
+
+// End-to-end through the HTTP layer with the real provider: the observed
+// stderr must reach the client as a 409 carrying a retry hint, which is what
+// the finding says a 500 cost a scenario.
+func TestProvisionHandler_AgentRBACTerminating_Returns409WithRetryHint(t *testing.T) {
+	t.Parallel()
+	mock := newMockKube()
+	scenarioNS := scenarioNamespace("rbac-409", "ignored")
+	mock.namespacePhases[scenarioNS] = "Active"
+	mock.applyYAMLErr = agentRBACTerminatingStderr(scenarioNS)
+	p := newTestProvider(mock)
+
+	_, err := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "rbac-409"})
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	rec := httptest.NewRecorder()
+	writeProvisionError(rec, err)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var body namespaceTerminatingResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding body: %v", err)
+	}
+	if body.Namespace != scenarioNS {
+		t.Errorf("namespace = %q, want %q", body.Namespace, scenarioNS)
+	}
+	if body.RetryAfterSeconds <= 0 {
+		t.Errorf("retry_after_seconds = %d, want a positive hint", body.RetryAfterSeconds)
 	}
 }
 
