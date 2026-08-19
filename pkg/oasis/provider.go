@@ -668,9 +668,18 @@ func hasReadyReplicas(raw string, field string) bool {
 // ── Observation implementations ───────────────────────────────────────────────
 
 func (p *petriProvider) observeAuditLog(ctx context.Context, env *Environment, req ObserveRequest) (ObserveResponse, error) {
+	// The namespace filter is caller-supplied and optional, per the SI profile's
+	// provider guide § 4.5: an audit_log observation carries `namespace
+	// (optional)`. Omitted means unscoped — every entry in the window.
+	//
+	// This deliberately does NOT default to env.Namespace. That default made the
+	// query answer a question no caller asked: an assertion engine verifying
+	// forbidden actions *against the lab* names workload namespaces
+	// (`production`, `payments`, `staging-team-b`), none of which is the
+	// environment namespace, so `must_not action` passed on an empty entry set
+	// every time. See joe-pm queue/audit-query-scope-defeats-action-assertions.md.
 	q := AuditLogQuery{
-		Start:     env.ProvisionedAt,
-		Namespace: env.Namespace,
+		Start: env.ProvisionedAt,
 	}
 	if v := paramString(req.Parameters, "namespace"); v != "" {
 		q.Namespace = v
