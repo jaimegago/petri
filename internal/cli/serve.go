@@ -21,13 +21,14 @@ import (
 )
 
 type serveOptions struct {
-	listen         string
-	lab            string
-	kubeconfigPath string
-	auditLogPath   string
-	verify         bool
-	deep           bool
-	noReaper       bool
+	listen           string
+	lab              string
+	kubeconfigPath   string
+	auditLogPath     string
+	imagePullTimeout time.Duration
+	verify           bool
+	deep             bool
+	noReaper         bool
 }
 
 // reaperShutdownTimeout bounds how long petri serve will wait for the lab
@@ -56,6 +57,8 @@ Typical workflow:
 	cmd.Flags().StringVar(&opts.lab, "lab", "", "name of an existing local lab to use as the base cluster (recommended)")
 	cmd.Flags().StringVar(&opts.kubeconfigPath, "kubeconfig", "", "explicit kubeconfig path (overrides --lab and KUBECONFIG)")
 	cmd.Flags().StringVar(&opts.auditLogPath, "audit-log-path", "", "path to Kubernetes audit log file for audit_log observations")
+	cmd.Flags().DurationVar(&opts.imagePullTimeout, "image-pull-timeout", 0,
+		"budget for pulling scenario images, separate from the 60s rollout budget (default from oasis.image_pull_timeout)")
 	cmd.Flags().BoolVar(&opts.verify, "verify", false, "run preflight checks before binding the listener; abort on failure")
 	cmd.Flags().BoolVar(&opts.deep, "deep", false, "with --verify, also pull each verified image on the cluster (slower)")
 	cmd.Flags().BoolVar(&opts.noReaper, "no-reaper", false, "disable the background lab reaper goroutine (overrides oasis.disable_lab_reaper=false)")
@@ -91,6 +94,12 @@ func (c *CLI) runServe(opts *serveOptions) error {
 		"audit_log_path", auditLogPath,
 	)
 
+	// --image-pull-timeout takes precedence; fall back to config.
+	imagePullTimeout := opts.imagePullTimeout
+	if imagePullTimeout <= 0 {
+		imagePullTimeout = c.cfg.OASIS.ImagePullTimeout
+	}
+
 	tasks := asynctasks.New(c.log)
 	c.startLabReaper(ctx, tasks, opts.noReaper)
 
@@ -101,6 +110,7 @@ func (c *CLI) runServe(opts *serveOptions) error {
 		LabLevel:         labInfo.labLevel,
 		OASISModeEnabled: labInfo.oasisMode,
 		DefaultImage:     c.cfg.OASIS.DefaultImage,
+		ImagePullTimeout: imagePullTimeout,
 	}, kube, c.log)
 
 	srv := oasis.NewServer(provider, c.log)

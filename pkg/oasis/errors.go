@@ -70,6 +70,48 @@ func (e *ErrRolloutTimeout) Error() string {
 		e.Timeout, strings.Join(e.Deployments, ", "))
 }
 
+// ErrImagePullTimeout is returned when a Deployment's pods were still pulling
+// their images when the image-pull budget ran out. It is deliberately distinct
+// from both of its siblings:
+//
+//   - *ErrImagePullFailure means kubelet reported the pull as failed — bad
+//     reference, auth rejection, unreachable registry. Terminal; retrying
+//     changes nothing.
+//   - *ErrImagePullTimeout means the pull was still in progress when its own
+//     budget expired. Usually transient: the layers already fetched stay in
+//     the node's cache, so a retry resumes from further along.
+//   - *ErrRolloutTimeout means the images were resolved and the Deployment
+//     still did not converge. The residual bucket, and its budget is
+//     unaffected by anything here.
+//
+// The split exists because a first pull on a cold node and a genuinely stuck
+// rollout want opposite budgets — the pull wants patience, a stuck rollout
+// wants to fail fast — and a single 60s deadline charged both.
+type ErrImagePullTimeout struct {
+	// Timeout is the image-pull budget that was exhausted.
+	Timeout time.Duration
+	// Namespace and Deployment identify the workload still pulling.
+	Namespace  string
+	Deployment string
+	// Images lists the container images observed still pulling on the last
+	// scan before the budget expired. Empty when the final pod list could
+	// not be read.
+	Images []string
+}
+
+// Error deliberately does NOT reuse the ErrRolloutTimeout phrasing. Log
+// parsers grep for "deployments did not become ready within" to count rollout
+// failures, and a pull timeout is not one — sharing the string would refill
+// the very bucket this type was split out of.
+func (e *ErrImagePullTimeout) Error() string {
+	if len(e.Images) == 0 {
+		return fmt.Sprintf("image pull did not complete within %s: %s/%s",
+			e.Timeout, e.Namespace, e.Deployment)
+	}
+	return fmt.Sprintf("image pull did not complete within %s: %s/%s (still pulling: %s)",
+		e.Timeout, e.Namespace, e.Deployment, strings.Join(e.Images, ", "))
+}
+
 // ErrNamespaceTerminating indicates that an operation tried to use a
 // namespace that is in the Terminating phase. The substrate-side signal is
 // "the namespace exists but kube is finalising its deletion"; any attempt

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadCompanies(t *testing.T) {
@@ -132,5 +133,25 @@ func TestPetriDir(t *testing.T) {
 	expected := filepath.Join(home, ".petri")
 	if dir != expected {
 		t.Errorf("PetriDir() = %q, want %q", dir, expected)
+	}
+}
+
+// TestImagePullTimeoutDefaults pins that the image-pull budget is reachable as
+// configuration and falls back to a sane default rather than to zero. A zero
+// here would mean "no budget at all", which the provider treats as "use the
+// default" — but only because it guards for it, and this test is what keeps
+// that guard honest from the config side.
+func TestImagePullTimeoutDefaults(t *testing.T) {
+	if DefaultImagePullTimeout <= 0 {
+		t.Fatalf("DefaultImagePullTimeout = %s, must be positive", DefaultImagePullTimeout)
+	}
+	// The whole point of the split is that the pull budget is not the rollout
+	// budget. 60s is the rollout budget; a pull budget at or below it would
+	// reintroduce the cold-start failure this was written to remove.
+	if DefaultImagePullTimeout <= 60*time.Second {
+		t.Errorf("DefaultImagePullTimeout = %s, must exceed the 60s rollout budget", DefaultImagePullTimeout)
+	}
+	if got := DefaultConfig().OASIS.ImagePullTimeout; got != DefaultImagePullTimeout {
+		t.Errorf("DefaultConfig OASIS.ImagePullTimeout = %s, want %s", got, DefaultImagePullTimeout)
 	}
 }

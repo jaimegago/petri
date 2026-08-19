@@ -33,9 +33,10 @@ func podListJSON(deployment string, pods []podFixture) string {
 		Waiting *waiting `json:"waiting,omitempty"`
 	}
 	type containerStatus struct {
-		Name  string `json:"name"`
-		Image string `json:"image,omitempty"`
-		State state  `json:"state"`
+		Name    string `json:"name"`
+		Image   string `json:"image,omitempty"`
+		ImageID string `json:"imageID,omitempty"`
+		State   state  `json:"state"`
 	}
 	type spec struct {
 		Containers []container `json:"containers"`
@@ -67,8 +68,8 @@ func podListJSON(deployment string, pods []podFixture) string {
 			},
 			Spec: spec{Containers: []container{{Name: "app", Image: p.image}}},
 		}
-		if p.waitingReason != "" || p.phase != "" {
-			cs := containerStatus{Name: "app", Image: p.image}
+		if p.waitingReason != "" || p.phase != "" || p.imageID != "" {
+			cs := containerStatus{Name: "app", Image: p.image, ImageID: p.imageID}
 			if p.waitingReason != "" {
 				cs.State.Waiting = &waiting{Reason: p.waitingReason, Message: p.waitingMessage}
 			}
@@ -86,6 +87,10 @@ type podFixture struct {
 	phase          string
 	waitingReason  string
 	waitingMessage string
+	// imageID mirrors kubelet's runtime-reported image identifier. Empty
+	// means "not yet resolved on the node", which is what separates a pod
+	// that is still pulling from one that is waiting on something else.
+	imageID string
 	// ownerOverride lets a test plant a pod with an owner that does NOT
 	// match the deployment prefix (cross-contamination test).
 	ownerOverride string
@@ -110,7 +115,7 @@ func TestWaitForRolloutWithFastFail_ImagePullDetected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := time.Now()
-	err := p.waitForRolloutWithFastFail(ctx, "frontend", "web-app", 60*time.Second)
+	err := p.waitForRolloutWithFastFail(ctx, "frontend", "web-app", 60*time.Second, 5*time.Minute)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -165,7 +170,7 @@ func TestWaitForRolloutWithFastFail_DoesNotBlockOnSlowRollout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := time.Now()
-	err := p.waitForRolloutWithFastFail(ctx, "frontend", "web-app", 60*time.Second)
+	err := p.waitForRolloutWithFastFail(ctx, "frontend", "web-app", 60*time.Second, 5*time.Minute)
 	elapsed := time.Since(start)
 
 	var pull *ErrImagePullFailure
@@ -200,7 +205,7 @@ func TestWaitForRolloutWithFastFail_RolloutTimeoutNotShortCircuited(t *testing.T
 	})
 	p := newTestProvider(mock)
 
-	err := p.waitForRolloutWithFastFail(context.Background(), "frontend", "web-app", 1*time.Second)
+	err := p.waitForRolloutWithFastFail(context.Background(), "frontend", "web-app", 1*time.Second, 5*time.Minute)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -227,7 +232,7 @@ func TestWaitForRolloutWithFastFail_Success(t *testing.T) {
 	})
 	p := newTestProvider(mock)
 
-	if err := p.waitForRolloutWithFastFail(context.Background(), "frontend", "web-app", 60*time.Second); err != nil {
+	if err := p.waitForRolloutWithFastFail(context.Background(), "frontend", "web-app", 60*time.Second, 5*time.Minute); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
 }
@@ -245,7 +250,7 @@ func TestWaitForRolloutWithFastFail_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	doneCh := make(chan error, 1)
 	go func() {
-		doneCh <- p.waitForRolloutWithFastFail(ctx, "frontend", "web-app", 60*time.Second)
+		doneCh <- p.waitForRolloutWithFastFail(ctx, "frontend", "web-app", 60*time.Second, 5*time.Minute)
 	}()
 
 	time.Sleep(50 * time.Millisecond)

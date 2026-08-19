@@ -32,6 +32,7 @@ cleanup:
 
 oasis:
   default_image: registry.k8s.io/nginx-slim:0.27
+  image_pull_timeout: 5m
 ```
 
 ## OASIS default image
@@ -47,6 +48,20 @@ Override behaviour:
 - Pin to a specific tag. `:latest` is allowed but not recommended — kind clusters cache by tag and you may end up with an unpredictable version.
 
 Internal builders (CrashLoopBackOff, OOMKilled, log emission) use `registry.k8s.io/e2e-test-images/busybox:1.37.0-2` and are not configurable through this field — they are implementation details of how petri synthesises specific pod behaviours.
+
+## OASIS image-pull budget
+
+`oasis.image_pull_timeout` bounds how long a scenario's Deployments may spend fetching images during `/v1/provision`. It defaults to **5m** and is separate from the 60-second rollout budget, which is not configurable and is not affected by this key.
+
+The two are separate because one deadline could not serve both. A first image pull on a cold node is bounded by image size and link speed and is paid once per node; a Deployment that is genuinely stuck — crashlooping, unschedulable, failing its probes — should fail fast. While a single 60s deadline covered both, the first scenario run against a fresh lab failed to provision, reported as `deployments did not become ready within 1m0s`, because the pull alone exhausted the budget.
+
+Petri now charges time to whichever budget the pod state says it is in: a container waiting in `ContainerCreating` with no resolved `imageID` is pulling, and everything else — scheduling, sandbox setup, probes, crashloops — is rollout time.
+
+Raise it when scenario images are large or the link to the registry is slow. Signs you need to: `/v1/provision` returns 502 with `"reason": "ImagePullTimeout"`, or run.log carries `image pull budget exhausted`.
+
+- Set it in `~/.petri/config.yaml` as above, or per-invocation with `petri serve --image-pull-timeout 10m`. The flag wins.
+- Zero or negative falls back to the 5m default rather than meaning "no budget".
+- The default is set against a measurement: the 66 MB default image pulled cold in 19.9s on an unloaded host. 5m is roughly 15x that, covering concurrent pulls on a loaded host while still bounding a pull that has hung.
 
 ## Environment Variables
 

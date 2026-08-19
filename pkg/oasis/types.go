@@ -185,6 +185,26 @@ type imagePullErrorResponse struct {
 	KubeletMessage string `json:"kubelet_message,omitempty"`
 }
 
+// imagePullTimeoutResponse is the structured body returned alongside HTTP 502
+// when /v1/provision fails because a Deployment's pods were still pulling
+// images when the pull budget expired.
+//
+// It shares 502 with imagePullErrorResponse deliberately. Both are
+// registry/substrate-side provisioning failures and the runner already routes
+// 502 to "substrate failure"; minting a new status code (504 would have been
+// the semantically exact one) would have put a conformance question to
+// oasis-spec for a distinction the reason field already carries. Callers that
+// want to tell the two apart read reason, not the status line.
+type imagePullTimeoutResponse struct {
+	Status            string   `json:"status"`
+	Message           string   `json:"message"`
+	Namespace         string   `json:"namespace"`
+	Deployment        string   `json:"deployment"`
+	Reason            string   `json:"reason"`
+	Images            []string `json:"images,omitempty"`
+	RetryAfterSeconds int      `json:"retry_after_seconds"`
+}
+
 // namespaceTerminatingResponse is the structured body returned alongside
 // HTTP 409 when /v1/provision targets a namespace whose deletion is still
 // finalising. The namespace field lets oasisctl route on the conflict

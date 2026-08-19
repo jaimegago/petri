@@ -53,8 +53,17 @@ R2 on the host (e.g. `pfctl` on macOS, `iptables` on Linux) before running
 When `petri serve` returns HTTP **502 Bad Gateway** from `/v1/provision`,
 the scenario's deployment referenced an image that kubelet couldn't pull.
 Petri detects this via a pod-event watcher that runs alongside the
-60-second rollout wait, and short-circuits the wait as soon as kubelet
+rollout wait, and short-circuits the wait as soon as kubelet
 reports the failure (typically within ~3 seconds).
+
+**Two different conditions return 502**, distinguished by the `reason`
+field rather than the status line. `ImagePullBackOff` and its siblings
+mean kubelet reported the pull as *failed* — terminal, and no retry
+helps. `ImagePullTimeout` means the pull was still *running* when the
+image-pull budget expired; the layers already fetched stay in the node
+cache, so a retry resumes from further along. See
+[Image pull budget](#image-pull-budget-separate-from-the-rollout-budget)
+below.
 
 The 502 response body is the standard `{status, message}` envelope plus
 structured fields:
@@ -157,11 +166,45 @@ The grep string `"deployments did not become ready within"` still
 matches on the response body for the surviving error; only the trailing
 list shape changed.
 
+### Image pull budget, separate from the rollout budget
+
+The 60-second rollout budget covers only the time a Deployment spends
+converging **after** its images are resolved on the node. Fetching the
+images has its own budget, `oasis.image_pull_timeout`, defaulting to 5m
+and settable with `petri serve --image-pull-timeout`.
+
+They are separate because they want opposite things. A first pull on a
+cold node is bounded by image size and link speed; a stuck rollout
+should fail fast. While one 60s deadline served both, the first scenario
+of every cold run failed to provision — reported as
+`deployments did not become ready within 1m0s`, which named the wrong
+cause. Raising the 60s would have bought the pull at the cost of every
+genuinely stuck rollout taking longer to fail, so the budgets were split
+instead.
+
+Petri decides which budget the passing seconds belong to from pod state:
+a container waiting in `ContainerCreating` with no resolved `imageID` is
+pulling; anything else — scheduling pressure, sandbox setup, probes,
+crashloops — is rollout time. An unschedulable pod reports no container
+status at all and is therefore charged to the rollout budget, so it
+still fails in ~60s rather than borrowing the pull budget on top.
+
+When the pull budget is what expired, run.log carries:
+
+```
+msg="image pull budget exhausted" deployment=payment-gateway namespace=production pull_budget=5m0s images=...
+```
+
+and the 502 body carries `"reason": "ImagePullTimeout"`. That string is
+deliberately not the rollout phrasing — parsers that count rollout
+failures by grepping `"deployments did not become ready within"` must
+not pick up pull timeouts.
+
 ### Effective rollout-timeout budget: per-deployment, not per-scenario
 
 With parallel waits in place
 ([ADR 0012](decisions/0012-parallel-rollout-waits.md)), the hardcoded
-60-second `rolloutTimeout` is now a **per-deployment** budget, not a
+60-second rollout budget is a **per-deployment** budget, not a
 per-scenario one. Before parallelization, a scenario with N deployments
 could consume up to N × 60s of wall clock during the healthy-rollout
 phase, and oasisctl's client-side request timeout was the practical

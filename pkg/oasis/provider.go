@@ -24,6 +24,31 @@ import (
 // 50 kubectl subprocesses and overwhelming the kube API. See ADR 0012.
 const rolloutWaitConcurrency = 8
 
+// defaultRolloutTimeout bounds how long a Deployment may take to converge
+// once its images are resolved on the node. It is unchanged at 60s and is
+// meant to stay a fast failure: a crashlooping container, an unschedulable
+// pod or a failing probe should surface in about a minute, not in five.
+//
+// It used to bound the image pull as well, which is what broke. A cold node
+// pulling a first image blew straight through it and the scenario was failed
+// as a rollout timeout. The pull now has its own budget below, so this one
+// covers only what its name says.
+const defaultRolloutTimeout = 60 * time.Second
+
+// defaultImagePullTimeout bounds how long a Deployment's pods may spend
+// fetching images before petri gives up. Overridable per deployment via
+// ProviderConfig.ImagePullTimeout (oasis.image_pull_timeout, or
+// `petri serve --image-pull-timeout`).
+//
+// Five minutes is set against a measurement rather than a guess: the default
+// OASIS image is 66 MB and pulled cold in 19.9s on an unloaded host on
+// 2026-08-19. The failures this replaces exceeded 60s, with several
+// deployments pulling concurrently on a host at load average 22. Five minutes
+// is roughly 15x the measured single-image pull, which covers that
+// concurrency and a slower link besides, while still bounding a pull that has
+// genuinely hung.
+const defaultImagePullTimeout = 5 * time.Minute
+
 // OASISProvider defines the operations required by the OASIS environment provider spec.
 // All implementations must be safe for concurrent use.
 type OASISProvider interface {
@@ -91,6 +116,10 @@ type ProviderConfig struct {
 	// values fall back to defaultOASISImage so the provider never
 	// silently pulls from Docker Hub.
 	DefaultImage string
+	// ImagePullTimeout bounds the time a Deployment's pods may spend
+	// fetching images, separately from the rollout budget. Zero or
+	// negative falls back to defaultImagePullTimeout.
+	ImagePullTimeout time.Duration
 }
 
 // defaultOASISImage mirrors config.DefaultOASISImage so the oasis package
@@ -793,7 +822,10 @@ func (p *petriProvider) observeStateDiff(ctx context.Context, env *Environment, 
 // etc.) and deployments with no status field are skipped — they represent
 // intentionally unhealthy states that would always time out.
 func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries []StateEntry, namespace string) error {
-	const rolloutTimeout = 60 * time.Second
+	pullTimeout := p.cfg.ImagePullTimeout
+	if pullTimeout <= 0 {
+		pullTimeout = defaultImagePullTimeout
+	}
 
 	type pendingDeploy struct {
 		name      string
@@ -837,7 +869,7 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 		d := d
 		g.Go(func() error {
 			p.log.Info("waiting for deployment rollout", "deployment", d.name, "namespace", d.namespace)
-			err := p.waitForRolloutWithFastFail(gctx, d.namespace, d.name, rolloutTimeout)
+			err := p.waitForRolloutWithFastFail(gctx, d.namespace, d.name, defaultRolloutTimeout, pullTimeout)
 			if err != nil {
 				p.log.Warn("deployment rollout failed",
 					"deployment", d.name, "namespace", d.namespace, "error", err)
@@ -873,6 +905,10 @@ func asyncCleanupReason(err error) string {
 	var pull *ErrImagePullFailure
 	if errors.As(err, &pull) {
 		return "image-pull-failure"
+	}
+	var pullTimeout *ErrImagePullTimeout
+	if errors.As(err, &pullTimeout) {
+		return "image-pull-timeout"
 	}
 	var timeout *ErrRolloutTimeout
 	if errors.As(err, &timeout) {

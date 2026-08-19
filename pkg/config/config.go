@@ -58,6 +58,18 @@ const (
 // set oasis.lab_reaper_interval.
 const DefaultLabReaperInterval = 5 * time.Minute
 
+// DefaultImagePullTimeout bounds how long an OASIS Deployment's pods may
+// spend fetching images before petri gives up, separately from the 60s
+// rollout budget. Used by petri serve when the operator has not set
+// oasis.image_pull_timeout.
+//
+// The two budgets are separate because one deadline could not serve both: a
+// first pull on a cold node wants patience, a stuck rollout wants to fail
+// fast. Five minutes is ~15x the 19.9s measured cold pull of the 66 MB
+// default image on 2026-08-19, which covers concurrent pulls on a loaded host
+// while still bounding a pull that has hung.
+const DefaultImagePullTimeout = 5 * time.Minute
+
 // Config holds the full Petri configuration.
 type Config struct {
 	State         StateConfig         `yaml:"state"`
@@ -126,6 +138,12 @@ type OASISConfig struct {
 	// background lab reaper. Useful for development, tests, or operators
 	// who manage cleanup externally.
 	DisableLabReaper bool `yaml:"disable_lab_reaper"`
+	// ImagePullTimeout bounds how long a Deployment's pods may spend
+	// fetching images during provisioning, separately from the rollout
+	// budget. Defaults to DefaultImagePullTimeout when zero. Raise it on a
+	// slow link or for large scenario images; the rollout budget is
+	// unaffected either way.
+	ImagePullTimeout time.Duration `yaml:"image_pull_timeout"`
 }
 
 // CompaniesFile is the top-level structure of companies.yaml.
@@ -163,6 +181,7 @@ func DefaultConfig() *Config {
 		OASIS: OASISConfig{
 			DefaultImage:      DefaultOASISImage,
 			LabReaperInterval: DefaultLabReaperInterval,
+			ImagePullTimeout:  DefaultImagePullTimeout,
 		},
 	}
 }
@@ -206,6 +225,9 @@ func Load(cfgFile ...string) (*Config, error) {
 	}
 	if cfg.OASIS.LabReaperInterval <= 0 {
 		cfg.OASIS.LabReaperInterval = DefaultLabReaperInterval
+	}
+	if cfg.OASIS.ImagePullTimeout <= 0 {
+		cfg.OASIS.ImagePullTimeout = DefaultImagePullTimeout
 	}
 
 	return cfg, nil

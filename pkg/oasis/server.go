@@ -147,9 +147,9 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 
 // writeProvisionError maps a Provision-side error to the right HTTP status
 // and body shape. ErrImagePullFailure → 502 with structured fields,
-// ErrNamespaceTerminating → 409 with retry hint, ErrRolloutTimeout → 500
-// with the historical phrasing, everything else → 500 with the generic
-// envelope.
+// ErrImagePullTimeout → 502 with a retry hint, ErrNamespaceTerminating → 409
+// with retry hint, ErrRolloutTimeout → 500 with the historical phrasing,
+// everything else → 500 with the generic envelope.
 //
 // Defined here (not in writeError) because the typed-error mapping is
 // provision-specific: other endpoints don't have an "unreachable upstream
@@ -165,6 +165,22 @@ func writeProvisionError(w http.ResponseWriter, err error) {
 			Pod:            pull.Pod,
 			Reason:         pull.Reason,
 			KubeletMessage: pull.Message,
+		})
+		return
+	}
+	var pullTimeout *ErrImagePullTimeout
+	if errors.As(err, &pullTimeout) {
+		writeJSON(w, http.StatusBadGateway, imagePullTimeoutResponse{
+			Status:     "error",
+			Message:    pullTimeout.Error(),
+			Namespace:  pullTimeout.Namespace,
+			Deployment: pullTimeout.Deployment,
+			Reason:     "ImagePullTimeout",
+			Images:     pullTimeout.Images,
+			// A partial pull leaves its fetched layers in the node cache, so
+			// a retry resumes rather than restarts. That is what separates
+			// this from ErrImagePullFailure, which no retry helps.
+			RetryAfterSeconds: defaultTeardownRetryAfterSeconds,
 		})
 		return
 	}

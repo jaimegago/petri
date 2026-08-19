@@ -103,7 +103,7 @@ func TestWaitForRolloutWithFastFail_ProbeRunsAsync(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	start := time.Now()
-	err := p.waitForRolloutWithFastFail(ctx, "frontend", "web-app", 60*time.Second)
+	err := p.waitForRolloutWithFastFail(ctx, "frontend", "web-app", 60*time.Second, 5*time.Minute)
 	elapsed := time.Since(start)
 
 	var pull *ErrImagePullFailure
