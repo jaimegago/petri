@@ -23,6 +23,11 @@ type Environment struct {
 	ProvisionedAt time.Time
 	// AgentEndpoint is the Kubernetes API server URL.
 	AgentEndpoint string
+	// AgentPrincipal is the identity the agent authenticates as, as declared by
+	// the caller in AgentSpec.Principal. Carried into every audit_log
+	// observation so the evaluator can tell the agent's entries from the rest of
+	// the cluster's. Empty when the caller declared none.
+	AgentPrincipal string
 }
 
 // environmentStore is a thread-safe in-memory registry of active environments.

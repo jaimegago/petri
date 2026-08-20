@@ -28,6 +28,24 @@ type AgentSpec struct {
 	Mode  string     `json:"mode,omitempty"`
 	Tools []string   `json:"tools,omitempty"`
 	Scope AgentScope `json:"scope,omitempty"`
+
+	// Principal is the identity the agent will authenticate to the cluster as,
+	// as it appears in an audit event's user.username — for example
+	// "system:serviceaccount:default:joe-oasis-e2e".
+	//
+	// The caller declares it because the caller is the only party that knows
+	// it. petri provisions a ServiceAccount for the agent, but the harness is
+	// free to run the agent under a different credential and does: what OASIS
+	// measures is the agent's own governance, not the reach of the credential
+	// underneath it, so the harness mints its own identity and hands petri only
+	// the coordinates. petri would be guessing if it answered from what it
+	// provisioned.
+	//
+	// Empty is honest and supported: the audit_log observation then carries no
+	// agent_principal, and an evaluator that cannot establish the actor marks
+	// its assertions vacuous instead of attributing the cluster's traffic to
+	// the agent.
+	Principal string `json:"principal,omitempty"`
 }
 
 // AgentScope defines the namespaces and zones the agent is scoped to.

@@ -333,6 +333,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		BeforeSnapshot: beforeSnapshot,
 		ProvisionedAt:  time.Now(),
 		AgentEndpoint:  serverURL,
+		AgentPrincipal: req.Agent.Principal,
 	}
 	p.store.put(env)
 
@@ -726,7 +727,7 @@ func (p *petriProvider) observeAuditLog(ctx context.Context, env *Environment, r
 		// Return evidence_source.status=unreachable with empty entries
 		// instead of propagating as a 500. The runner will see unreachable
 		// and route to PROVIDER_FAILURE per spec/01-core.md §3.7.
-		data, _ := json.Marshal(map[string]any{"entries": []AuditEntry{}})
+		data, _ := json.Marshal(auditObservationData(env, []AuditEntry{}))
 		return ObserveResponse{
 			EnvironmentID:   env.ID,
 			Timestamp:       time.Now(),
@@ -741,7 +742,7 @@ func (p *petriProvider) observeAuditLog(ctx context.Context, env *Environment, r
 	if err != nil {
 		return ObserveResponse{}, fmt.Errorf("querying audit log: %w", err)
 	}
-	data, err := json.Marshal(map[string]any{"entries": entries})
+	data, err := json.Marshal(auditObservationData(env, entries))
 	if err != nil {
 		return ObserveResponse{}, fmt.Errorf("marshalling audit entries: %w", err)
 	}
@@ -755,6 +756,28 @@ func (p *petriProvider) observeAuditLog(ctx context.Context, env *Environment, r
 			Status: "available",
 		},
 	}, nil
+}
+
+// auditObservationData builds the audit_log observation payload: every entry
+// captured, and the agent's principal declared beside them.
+//
+// The observation is annotated, never narrowed. petri does not filter the
+// entries to the agent even though it now knows which are the agent's, because
+// a caller past this boundary cannot recover what a filter discarded — the
+// difference between "the log was empty" and "the agent did nothing" is exactly
+// what a safety verdict rests on, and it survives only if both the entries and
+// the identity travel together. Selecting is the evaluator's to do, per its own
+// per-check classification.
+//
+// agent_principal is omitted when the caller declared none, which an evaluator
+// reads as "the actor cannot be established" rather than as a licence to match
+// every principal.
+func auditObservationData(env *Environment, entries []AuditEntry) map[string]any {
+	data := map[string]any{"entries": entries}
+	if env != nil && env.AgentPrincipal != "" {
+		data["agent_principal"] = env.AgentPrincipal
+	}
+	return data
 }
 
 func (p *petriProvider) observeResourceState(ctx context.Context, env *Environment, req ObserveRequest) (ObserveResponse, error) {
