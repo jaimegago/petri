@@ -511,13 +511,33 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 		// preflight matches a declared version against the profile's constraint
 		// with an exact prerelease-class comparison and provider-iter >= required-iter,
 		// so an older iteration never satisfies a newer requirement. SI 0.3.0-rc1
-		// requires >= 1.0.0-rc1.11; rc1.5 is kept so a consumer still pinned to the
-		// older profile keeps passing.
+		// requires >= 1.0.0-rc1.12; the older iterations are kept so a consumer
+		// still pinned to an older profile keeps passing.
+		//
+		// rc1.12 is declared because it requires nothing of a provider that
+		// rc1.11 did not. Its own bump commit is the evidence: the only change
+		// to the SI profile's provider-conformance-requirements.yaml is the
+		// constraint string, and the `requirements:` list is untouched. What
+		// rc1.12 carries — §3.6.3 vacuity reporting, machine-readable category
+		// data, nine retargeted v0.4 references — is evaluator-side. So this is
+		// petri saying what it already implements, not claiming something new.
+		//
+		// This list is the third site a core version bump has to touch, after
+		// oasisctl's pin and its assertions. It was missed on 2026-08-20 and
+		// nothing caught it until a live run: the mismatch surfaces only at the
+		// provider conformance handshake, which no unit test exercises against
+		// a real oasisctl.
 		coreSpecVersionRC1_5  = "1.0.0-rc1.5"
 		coreSpecVersionRC1_11 = "1.0.0-rc1.11"
+		coreSpecVersionRC1_12 = "1.0.0-rc1.12"
 	)
 
-	coreSpecVersions := []string{coreSpecVersion, coreSpecVersionRC1_5, coreSpecVersionRC1_11}
+	coreSpecVersions := []string{
+		coreSpecVersion,
+		coreSpecVersionRC1_5,
+		coreSpecVersionRC1_11,
+		coreSpecVersionRC1_12,
+	}
 
 	resp := ConformanceResponse{
 		Provider:              providerName,

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/jaimegago/petri/pkg/preflight"
 )
@@ -793,7 +796,7 @@ func TestConformance_SIProfile_RequirementKeysPresent(t *testing.T) {
 	if len(req.OASISCoreSpecVersion) == 0 {
 		t.Error("oasis_core_spec_version should not be empty")
 	}
-	wantVersions := map[string]bool{"0.4.0": false, "1.0.0-rc1.5": false, "1.0.0-rc1.11": false}
+	wantVersions := map[string]bool{"0.4.0": false, "1.0.0-rc1.5": false, "1.0.0-rc1.11": false, "1.0.0-rc1.12": false}
 	for _, v := range req.OASISCoreSpecVersion {
 		if _, ok := wantVersions[v]; ok {
 			wantVersions[v] = true
@@ -1059,4 +1062,91 @@ func TestObserveAuditLog_QueryScope(t *testing.T) {
 			t.Errorf("query Namespace = %q, want %q", rec.got.Namespace, "production")
 		}
 	})
+}
+
+// TestConformance_SatisfiesVendoredProfileRequirement reads the SI profile's
+// own machine-readable constraint out of the vendored spec and checks that
+// petri declares a core spec version satisfying it.
+//
+// It exists because of a live failure on 2026-08-20. oasisctl advanced its
+// spec pin to 1.0.0-rc1.12; petri still declared rc1.11 as its newest, and the
+// provider conformance handshake rejected every scenario in the run:
+//
+//	oasis_core_spec_version must include a version compatible with
+//	"1.0.0-rc1.12", provider declared [0.4.0 1.0.0-rc1.5 1.0.0-rc1.11]
+//
+// Nothing caught it earlier because petri's own tests asserted a hardcoded
+// list against itself, which is a tautology — the declaration and the
+// expectation moved together or not at all. The constraint the declaration has
+// to satisfy lives in another repository, so the test has to read it from
+// there. `docs/oasis-spec` is that repository, vendored as a submodule, and
+// advancing the submodule is now what makes this test demand a new version.
+func TestConformance_SatisfiesVendoredProfileRequirement(t *testing.T) {
+	const requirementsPath = "../../docs/oasis-spec/profiles/software-infrastructure/provider-conformance-requirements.yaml"
+
+	raw, err := os.ReadFile(requirementsPath)
+	if err != nil {
+		t.Skipf("vendored spec not checked out (%v); run: git submodule update --init", err)
+	}
+
+	var doc struct {
+		OASISCoreDependency string `yaml:"oasis_core_dependency"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parsing %s: %v", requirementsPath, err)
+	}
+	required := strings.TrimPrefix(strings.TrimSpace(doc.OASISCoreDependency), ">=")
+	if required == "" {
+		t.Fatal("profile declares no oasis_core_dependency")
+	}
+
+	p := &petriProvider{}
+	resp, err := p.Conformance(context.Background(), "oasis-profile-software-infrastructure")
+	if err != nil {
+		t.Fatalf("Conformance: %v", err)
+	}
+
+	for _, declared := range resp.OASISCoreSpecVersions {
+		if satisfiesCoreVersion(declared, required) {
+			return
+		}
+	}
+	t.Errorf("no declared core spec version satisfies the SI profile's %q; declared %v.\n"+
+		"The vendored spec advanced and pkg/oasis/provider.go did not — add the new "+
+		"iteration to coreSpecVersions once petri actually implements it.",
+		doc.OASISCoreDependency, resp.OASISCoreSpecVersions)
+}
+
+// satisfiesCoreVersion implements the comparison provider.go's own comment
+// describes and oasisctl's preflight performs: an exact prerelease-class match
+// with provider-iteration >= required-iteration. It is deliberately narrow —
+// it answers the `1.0.0-rc1.N` line and nothing else, because that is the only
+// shape the SI profile has ever required, and a general semver range parser
+// here would be untested machinery guarding a single string.
+func satisfiesCoreVersion(declared, required string) bool {
+	if declared == required {
+		return true
+	}
+	dBase, dIter, ok := splitRC1(declared)
+	if !ok {
+		return false
+	}
+	rBase, rIter, ok := splitRC1(required)
+	if !ok {
+		return false
+	}
+	return dBase == rBase && dIter >= rIter
+}
+
+// splitRC1 parses `X.Y.Z-rc1.N` into its `X.Y.Z-rc1` class and its N.
+func splitRC1(v string) (base string, iter int, ok bool) {
+	i := strings.LastIndex(v, ".")
+	if i < 0 || !strings.Contains(v, "-rc") {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(v[i+1:])
+	if err != nil {
+		return "", 0, false
+	}
+	return v[:i], n, true
 }
