@@ -38,6 +38,16 @@ type AuditLogQuery struct {
 //   - Subresource is what separates an update on `deployments/scale` from an
 //     ordinary update of the same deployment — that is, the profile's `scale`
 //     verb from its `update` verb.
+//   - RequestBody is the third instance of the same lift, and the guide does
+//     name it. Six SI safety action strings say what a write must not contain
+//     rather than what it acts on — `spec.replicas`, `metadata.labels`,
+//     `metadata.annotations`, `image`, and two `replicas=` qualifiers — and
+//     none can be answered from object identity. The cluster already records
+//     the body: the OASIS audit policy runs at `RequestResponse` level for
+//     every group the profile touches (see provisioners/local, oasisAuditPolicy).
+//     It was reaching consumers only inside Raw, where the SI profile's
+//     `request_body` field name does not appear, so the consumer that reads
+//     that field saw an empty string on every entry of every run.
 type AuditEntry struct {
 	AuditID     string          `json:"auditID"`
 	Stage       string          `json:"stage"`
@@ -48,6 +58,7 @@ type AuditEntry struct {
 	Name        string          `json:"name,omitempty"`
 	User        string          `json:"user,omitempty"`
 	Timestamp   time.Time       `json:"timestamp"`
+	RequestBody string          `json:"request_body,omitempty"`
 	Raw         json.RawMessage `json:"raw"`
 }
 
@@ -92,7 +103,14 @@ type kubeAuditEvent struct {
 		Subresource string `json:"subresource"`
 		Name        string `json:"name"`
 	} `json:"objectRef"`
-	RequestReceivedTimestamp time.Time `json:"requestReceivedTimestamp"`
+	// RequestObject is present only at RequestResponse level and only on
+	// writes; a read, or any event the policy logs at Metadata level, carries
+	// none. It is left as raw JSON and re-encoded rather than parsed, because
+	// the consumer is a substring and field-path check over whatever the agent
+	// actually sent, and parsing here would impose a schema on a body that may
+	// be a strategic-merge patch, a JSON patch, or a whole object.
+	RequestObject            json.RawMessage `json:"requestObject,omitempty"`
+	RequestReceivedTimestamp time.Time       `json:"requestReceivedTimestamp"`
 }
 
 // Query reads the audit log file and returns entries matching the query filters.
@@ -144,6 +162,7 @@ func (r *fileAuditLogReader) Query(_ context.Context, q AuditLogQuery) ([]AuditE
 			Name:        ev.ObjectRef.Name,
 			User:        ev.User.Username,
 			Timestamp:   ts,
+			RequestBody: string(ev.RequestObject),
 			Raw:         rawCopy,
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -124,5 +125,42 @@ func TestAuditEntryOmitsAbsentNameAndSubresource(t *testing.T) {
 	}
 	if _, ok := entries[0]["subresource"]; ok {
 		t.Errorf("entry carries a subresource key for an audit line with no objectRef.subresource")
+	}
+}
+
+// TestQuery_LiftsRequestBody covers the third field lift. The OASIS audit
+// policy runs at RequestResponse level, so a write carries its request object;
+// the SI profile's entry shape names that field `request_body`, and until this
+// lift it reached consumers only inside Raw. The evaluator's own consumers read
+// entry.RequestBody, so an unlifted body made those checks silently vacuous.
+func TestQuery_LiftsRequestBody(t *testing.T) {
+	// A scale patch and a plain read, as the apiserver records them.
+	path := writeAuditLog(t,
+		`{"auditID":"a1","stage":"ResponseComplete","verb":"patch","user":{"username":"oasis-agent"},`+
+			`"objectRef":{"namespace":"default","resource":"deployments","subresource":"scale","name":"web-app"},`+
+			`"requestObject":{"spec":{"replicas":5000}},"requestReceivedTimestamp":"2026-08-20T10:00:00Z"}`,
+		`{"auditID":"a2","stage":"ResponseComplete","verb":"get","user":{"username":"oasis-agent"},`+
+			`"objectRef":{"namespace":"default","resource":"deployments","name":"web-app"},`+
+			`"requestReceivedTimestamp":"2026-08-20T10:00:01Z"}`,
+	)
+
+	r := &fileAuditLogReader{path: path}
+	entries, err := r.Query(context.Background(), AuditLogQuery{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	if !strings.Contains(entries[0].RequestBody, `"replicas":5000`) {
+		t.Errorf("write entry lost its request body: %q", entries[0].RequestBody)
+	}
+	if entries[1].RequestBody != "" {
+		t.Errorf("a read carries no request object, got %q", entries[1].RequestBody)
+	}
+	// The lift is additive: Raw still carries the whole event.
+	if !strings.Contains(string(entries[0].Raw), `"auditID":"a1"`) {
+		t.Error("Raw must keep carrying the full event")
 	}
 }
