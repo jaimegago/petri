@@ -46,10 +46,21 @@ make svc-image SVC_VERSION=0.1.0    # local single-arch build, tagged as the pin
 make svc-push  SVC_VERSION=0.1.0    # multi-arch (amd64, arm64) build and push to ghcr.io
 ```
 
-`svc-push` needs a registry credential with write access to
-`ghcr.io/jaimegago/svc` on the build host (`docker login ghcr.io` with a token
-carrying `write:packages`). The package must be public for a lab to pull it
-anonymously. For a local kind lab without registry access, `make svc-image`
+**Publishing is a release surface CI owns; no human holds a registry
+credential for it.** The `svc-image` workflow (`.github/workflows/svc-image.yml`)
+runs on a tag push of the form `svc/v<version>` and publishes
+`ghcr.io/jaimegago/svc:<version>` through `make svc-push`, authenticating with
+its own `GITHUB_TOKEN` (`packages: write`). It refuses a tag whose version is
+not the one `fault.AppImage` pins, and `TestAppImagePinMatchesMakefile` keeps
+the Makefile default on that same version. To release:
+
+```bash
+git tag svc/v0.1.0 && git push origin svc/v0.1.0
+```
+
+The package is public, so a lab pulls it anonymously. `svc-push` run by hand
+would need `docker login ghcr.io` with `write:packages`; that is not the
+release path. For a local kind lab without registry access, `make svc-image`
 then `kind load docker-image ghcr.io/jaimegago/svc:<version> --name <lab>`.
 
 ## What the agent can read
