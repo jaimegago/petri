@@ -112,8 +112,19 @@ type Spec struct {
 	// outside the recognised set is rejected by Render/Provision.
 	State string
 
+	// Env is the container environment as the scenario declares it. When
+	// non-empty it is rendered onto the container verbatim, and it takes
+	// precedence over ConfigMapRef for crashloopbackoff: the scenario's own
+	// key names are what the agent under evaluation reads, so a synthetic
+	// substitute would name a key the scenario does not score on.
+	Env []EnvVar
+
 	// ConfigMapRef selects the ConfigMap-key variant of crashloopbackoff:
 	// when set, the container references a missing key in this ConfigMap.
+	//
+	// It synthesises the key name (see missingKeyPlaceholder), so the cause
+	// it materialises is not one the scenario declares. Env is the conformant
+	// route and supersedes it; no OASIS SI scenario sets configMapRef.
 	ConfigMapRef string
 	// ErrorRate is the percentage [1,100] of requests that return 5xx for
 	// elevated_error_rate. Values < 1 default to 50.
@@ -122,6 +133,28 @@ type Spec struct {
 	// exit-1 / busy loop (crashloopbackoff exit-1 variant, oomkilled). When
 	// empty it falls back to DefaultUtilImage.
 	UtilImage string
+}
+
+// EnvVar is one container environment variable. Exactly one source applies:
+// a literal Value, or a ConfigMapKeyRef sourcing it from a ConfigMap key. A
+// ConfigMapKeyRef renders as a required reference, so a missing key stops the
+// container from starting rather than leaving the variable unset — that is
+// what makes a deliberately omitted key visible to an agent as a named cause.
+type EnvVar struct {
+	// Name is the environment variable name.
+	Name string
+	// Value is a literal value. Ignored when ConfigMapKeyRef is set.
+	Value string
+	// ConfigMapKeyRef sources the value from a ConfigMap key.
+	ConfigMapKeyRef *ConfigMapKeySelector
+}
+
+// ConfigMapKeySelector names a ConfigMap and a key within it.
+type ConfigMapKeySelector struct {
+	// Name is the ConfigMap metadata.name.
+	Name string
+	// Key is the key within the ConfigMap's data.
+	Key string
 }
 
 // KubeClient is the narrow cluster surface workloadstate needs: it applies a

@@ -178,6 +178,11 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		}
 	}
 
+	env, err := parseContainerEnv(e.Spec["containers"])
+	if err != nil {
+		return fmt.Errorf("deployment %q: %w", e.Name, err)
+	}
+
 	errorRate := 0
 	if v, ok := e.Spec["error_rate"]; ok {
 		switch r := v.(type) {
@@ -198,10 +203,107 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		ManagedBy:    managedBy,
 		MatchLabels:  matchLabels,
 		State:        status,
+		Env:          env,
 		ConfigMapRef: configMapRef,
 		ErrorRate:    errorRate,
 		UtilImage:    si.utilImage,
 	})
+}
+
+// parseContainerEnv reads the container environment a scenario declares on a
+// deployment state entry's `containers` list, returning the first container's
+// `env` as workloadstate EnvVars.
+//
+// Only the first container is read. Rendering is single-container (see
+// writeDeploymentHead), so a second declared container has nowhere to go, and
+// reading it would silently merge two environments into one.
+//
+// A malformed declaration is an error rather than a skipped entry. A declared
+// environment variable that quietly materialises as nothing is the defect this
+// parser exists to remove, and dropping one on a type assertion would
+// reintroduce it one layer down.
+func parseContainerEnv(raw any) ([]workloadstate.EnvVar, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	containers, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%q must be a list", "containers")
+	}
+	if len(containers) == 0 {
+		return nil, nil
+	}
+	first, ok := containers[0].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("containers[0] must be a mapping")
+	}
+	rawEnv, ok := first["env"]
+	if !ok || rawEnv == nil {
+		return nil, nil
+	}
+	entries, ok := rawEnv.([]any)
+	if !ok {
+		return nil, fmt.Errorf("containers[0].env must be a list")
+	}
+
+	out := make([]workloadstate.EnvVar, 0, len(entries))
+	for i, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("containers[0].env[%d] must be a mapping", i)
+		}
+		name, ok := entry["name"].(string)
+		if !ok || name == "" {
+			return nil, fmt.Errorf("containers[0].env[%d] must declare a non-empty %q", i, "name")
+		}
+		ev := workloadstate.EnvVar{Name: name}
+
+		if vf, present := entry["valueFrom"]; present && vf != nil {
+			ref, err := parseConfigMapKeyRef(vf)
+			if err != nil {
+				return nil, fmt.Errorf("containers[0].env[%d] (%s): %w", i, name, err)
+			}
+			ev.ConfigMapKeyRef = ref
+			out = append(out, ev)
+			continue
+		}
+
+		value, ok := entry["value"]
+		if !ok {
+			return nil, fmt.Errorf("containers[0].env[%d] (%s) must declare %q or %q", i, name, "value", "valueFrom")
+		}
+		ev.Value = fmt.Sprintf("%v", value)
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
+// parseConfigMapKeyRef reads an env entry's `valueFrom`. Only
+// `configMapKeyRef` is supported; `secretKeyRef` and the other Kubernetes
+// sources are not declared by the SI profile and are rejected rather than
+// ignored.
+func parseConfigMapKeyRef(raw any) (*workloadstate.ConfigMapKeySelector, error) {
+	valueFrom, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%q must be a mapping", "valueFrom")
+	}
+	rawRef, ok := valueFrom["configMapKeyRef"]
+	if !ok {
+		return nil, fmt.Errorf("%q supports only %q", "valueFrom", "configMapKeyRef")
+	}
+	ref, ok := rawRef.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%q must be a mapping", "configMapKeyRef")
+	}
+	name, ok := ref["name"].(string)
+	if !ok || name == "" {
+		return nil, fmt.Errorf("%q must declare a non-empty %q", "configMapKeyRef", "name")
+	}
+	key, ok := ref["key"].(string)
+	if !ok || key == "" {
+		return nil, fmt.Errorf("%q must declare a non-empty %q", "configMapKeyRef", "key")
+	}
+	return &workloadstate.ConfigMapKeySelector{Name: name, Key: key}, nil
 }
 
 func (si *stateInjector) applyConfigMap(ctx context.Context, e StateEntry, namespace string) error {

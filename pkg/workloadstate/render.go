@@ -16,6 +16,13 @@ const DefaultUtilImage = "registry.k8s.io/e2e-test-images/busybox:1.37.0-2"
 // StateElevatedErrorRate when Spec.ErrorRate is unset.
 const defaultErrorRate = 50
 
+// missingKeyPlaceholder is the synthetic key name the ConfigMapRef variant of
+// crashloopbackoff references. It is deliberately unmistakable: a scenario
+// that reaches this path has not declared the container environment, so no
+// real key name is available and the cause the agent reads names nothing the
+// scenario scores on. Spec.Env is the conformant route.
+const missingKeyPlaceholder = "__petri_missing_key__"
+
 // Render produces the Deployment manifest for spec. It is a pure function: no
 // cluster access, deterministic for a given spec (modulo Go map iteration
 // order in label/annotation blocks, matching the existing builders). It
@@ -38,6 +45,13 @@ func Render(spec Spec) (string, error) {
 	utilImage := spec.UtilImage
 	if utilImage == "" {
 		utilImage = DefaultUtilImage
+	}
+
+	if len(spec.Env) > 0 && !stateRunsCallerImage(state) {
+		return "", fmt.Errorf(
+			"workload %q: state %q synthesises its own container, so a declared container environment would not be rendered; declared env is supported for %s",
+			spec.Name, state, callerImageStatesList(),
+		)
 	}
 
 	switch state {
@@ -89,30 +103,88 @@ func renderRunning(spec Spec, replicas int, matchLabels map[string]string) strin
 	var sb strings.Builder
 	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: 80\n", spec.Image)
+	writeEnvYAML(&sb, spec.Env)
 	return sb.String()
 }
 
 // renderCrashLoop materialises a Deployment that lands in CrashLoopBackOff.
-// With a ConfigMapRef it references a missing key in that ConfigMap (the
-// container otherwise uses spec.Image); without one it runs an exit-1 loop on
-// the util image.
+// Three variants, in precedence order: declared Env is rendered verbatim (the
+// container uses spec.Image); otherwise a ConfigMapRef references a synthetic
+// missing key in that ConfigMap; otherwise it runs an exit-1 loop on the util
+// image.
+//
+// Declared Env wins because the agent under evaluation reads the cluster: the
+// key names it finds there must be the ones the scenario declares and scores
+// on, not a placeholder this package invented.
 func renderCrashLoop(spec Spec, replicas int, matchLabels map[string]string, utilImage string) string {
 	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
 	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
 
 	var sb strings.Builder
 	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
-	if spec.ConfigMapRef != "" {
+	switch {
+	case len(spec.Env) > 0:
+		fmt.Fprintf(&sb, "        image: %s\n", spec.Image)
+		writeEnvYAML(&sb, spec.Env)
+	case spec.ConfigMapRef != "":
 		// Reference a missing key from an existing ConfigMap to trigger CrashLoopBackOff.
 		fmt.Fprintf(&sb, "        image: %s\n", spec.Image)
-		fmt.Fprintf(&sb, "        env:\n        - name: MISSING_CONFIG_VALUE\n          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: __petri_missing_key__\n              optional: false\n", spec.ConfigMapRef)
-	} else {
+		fmt.Fprintf(&sb, "        env:\n        - name: MISSING_CONFIG_VALUE\n          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: %s\n              optional: false\n", spec.ConfigMapRef, missingKeyPlaceholder)
+	default:
 		// Simple exit-1 container to trigger CrashLoopBackOff. Sourced from
 		// registry.k8s.io rather than Docker Hub to avoid R2.
 		fmt.Fprintf(&sb, "        image: %s\n", utilImage)
 		sb.WriteString("        command: [\"sh\", \"-c\", \"echo CrashLoopBackOff simulation; exit 1\"]\n")
 	}
 	return sb.String()
+}
+
+// callerImageStates are the states whose container runs Spec.Image, and so the
+// states a declared container environment can be rendered onto. The remaining
+// three synthesise their own image or command to produce the named failure
+// (oomkilled allocates memory, error references a bad image,
+// elevated_error_rate runs an HTTP server), and an injected required
+// ConfigMap reference would stop the container before it could fail the way
+// the scenario asked for.
+var callerImageStates = []State{StateRunning, StateCrashLoopBackOff, StatePending, StateDegraded}
+
+// stateRunsCallerImage reports whether state renders Spec.Image.
+func stateRunsCallerImage(state State) bool {
+	for _, s := range callerImageStates {
+		if s == state {
+			return true
+		}
+	}
+	return false
+}
+
+// callerImageStatesList renders callerImageStates for an error message.
+func callerImageStatesList() string {
+	names := make([]string, len(callerImageStates))
+	for i, s := range callerImageStates {
+		names[i] = string(s)
+	}
+	return strings.Join(names, ", ")
+}
+
+// writeEnvYAML writes the container `env:` block for the declared environment.
+// A ConfigMapKeyRef is written with `optional: false` so an absent key stops
+// the container from starting and the kubelet reports the key by name; a
+// literal value is written as `value:`.
+func writeEnvYAML(sb *strings.Builder, env []EnvVar) {
+	if len(env) == 0 {
+		return
+	}
+	sb.WriteString("        env:\n")
+	for _, e := range env {
+		fmt.Fprintf(sb, "        - name: %s\n", e.Name)
+		if e.ConfigMapKeyRef != nil {
+			fmt.Fprintf(sb, "          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: %s\n              optional: false\n",
+				e.ConfigMapKeyRef.Name, e.ConfigMapKeyRef.Key)
+			continue
+		}
+		fmt.Fprintf(sb, "          value: %q\n", e.Value)
+	}
 }
 
 // renderOOMKilled materialises a Deployment whose container allocates memory
@@ -143,6 +215,7 @@ func renderPending(spec Spec, replicas int, matchLabels map[string]string) strin
 	sb.WriteString("        resources:\n")
 	sb.WriteString("          requests:\n")
 	sb.WriteString("            cpu: \"100\"\n")
+	writeEnvYAML(&sb, spec.Env)
 	return sb.String()
 }
 
@@ -165,6 +238,7 @@ func renderDegraded(spec Spec, replicas int, matchLabels map[string]string) stri
 	sb.WriteString("          initialDelaySeconds: 1\n")
 	sb.WriteString("          periodSeconds: 2\n")
 	sb.WriteString("          failureThreshold: 1\n")
+	writeEnvYAML(&sb, spec.Env)
 	return sb.String()
 }
 

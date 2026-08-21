@@ -97,6 +97,127 @@ func TestStateInjector_Apply(t *testing.T) {
 			},
 		},
 		{
+			// DA-1 verbatim: this is the shape oasisctl forwards after
+			// TranslateState puts every non-top-level field under "spec".
+			name: "crashloop deployment renders declared container env",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "notification-service", Spec: map[string]any{
+					"status": "CrashLoopBackOff",
+					"containers": []any{
+						map[string]any{
+							"name": "notification-service",
+							"env": []any{
+								map[string]any{
+									"name":      "SMTP_HOST",
+									"valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "smtp-config", "key": "SMTP_HOST"}},
+								},
+								map[string]any{
+									"name":      "SMTP_PORT",
+									"valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "smtp-config", "key": "SMTP_PORT"}},
+								},
+							},
+						},
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if len(manifests) == 0 {
+					t.Fatal("expected applied manifests")
+				}
+				m := manifests[0]
+				for _, want := range []string{"key: SMTP_HOST", "key: SMTP_PORT", "optional: false"} {
+					if !strings.Contains(m, want) {
+						t.Errorf("manifest missing %q: %s", want, m)
+					}
+				}
+				if strings.Contains(m, "__petri_missing_key__") {
+					t.Errorf("declared env must not render a synthetic key: %s", m)
+				}
+			},
+		},
+		{
+			name: "declared literal env renders as value",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api", Spec: map[string]any{
+					"containers": []any{
+						map[string]any{"env": []any{map[string]any{"name": "APP_PORT", "value": "8080"}}},
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if !strings.Contains(manifests[0], "name: APP_PORT") {
+					t.Errorf("manifest missing declared literal env: %s", manifests[0])
+				}
+			},
+		},
+		{
+			name: "env entry without a name is an error, not a silent drop",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api", Spec: map[string]any{
+					"containers": []any{
+						map[string]any{"env": []any{map[string]any{"value": "8080"}}},
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			wantErr:   true,
+		},
+		{
+			name: "env entry with neither value nor valueFrom is an error",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api", Spec: map[string]any{
+					"containers": []any{
+						map[string]any{"env": []any{map[string]any{"name": "APP_PORT"}}},
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			wantErr:   true,
+		},
+		{
+			name: "valueFrom other than configMapKeyRef is rejected",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api", Spec: map[string]any{
+					"containers": []any{
+						map[string]any{"env": []any{map[string]any{
+							"name":      "DB_PASSWORD",
+							"valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "db", "key": "PASSWORD"}},
+						}}},
+					},
+				}},
+			},
+			defaultNS: "test-ns",
+			wantErr:   true,
+		},
+		{
+			name: "containers that is not a list is an error",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api", Spec: map[string]any{"containers": "notification-service"}},
+			},
+			defaultNS: "test-ns",
+			wantErr:   true,
+		},
+		{
+			name: "containers without env leaves the environment empty",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api", Spec: map[string]any{
+					"status":     "CrashLoopBackOff",
+					"containers": []any{map[string]any{"name": "api", "resources": map[string]any{}}},
+				}},
+			},
+			defaultNS: "test-ns",
+			checkApply: func(t *testing.T, manifests []string) {
+				t.Helper()
+				if !strings.Contains(manifests[0], "exit 1") {
+					t.Errorf("no declared env and no configMapRef should fall back to exit-1: %s", manifests[0])
+				}
+			},
+		},
+		{
 			name: "crashloop deployment with configmap ref",
 			entries: []StateEntry{
 				{Kind: "Deployment", Name: "api", Spec: map[string]any{

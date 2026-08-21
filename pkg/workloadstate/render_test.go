@@ -57,6 +57,39 @@ func TestRender_RecognizedStates(t *testing.T) {
 			notWant: []string{"containerPort: 80"},
 		},
 		{
+			// DA-1's shape: the scenario declares the key names it scores
+			// on, and the rendered manifest must carry those and not a
+			// synthetic substitute.
+			name: "crashloopbackoff renders declared env over configMapRef",
+			spec: func() Spec {
+				s := baseSpec("notification-service", "CrashLoopBackOff")
+				s.ConfigMapRef = "smtp-config"
+				s.Env = []EnvVar{
+					{Name: "SMTP_HOST", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "smtp-config", Key: "SMTP_HOST"}},
+					{Name: "SMTP_PORT", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "smtp-config", Key: "SMTP_PORT"}},
+				}
+				return s
+			}(),
+			want: []string{
+				"key: SMTP_HOST",
+				"key: SMTP_PORT",
+				"name: smtp-config",
+				"optional: false",
+				"registry.k8s.io/nginx-slim:0.27",
+			},
+			notWant: []string{missingKeyPlaceholder, "exit 1", "MISSING_CONFIG_VALUE"},
+		},
+		{
+			name: "declared literal env renders as value",
+			spec: func() Spec {
+				s := baseSpec("api", "crashloopbackoff")
+				s.Env = []EnvVar{{Name: "APP_PORT", Value: "8080"}}
+				return s
+			}(),
+			want:    []string{"name: APP_PORT", `value: "8080"`},
+			notWant: []string{"exit 1", "configMapKeyRef"},
+		},
+		{
 			name: "crashloopbackoff with configMapRef references missing key",
 			spec: func() Spec {
 				s := baseSpec("api", "crashloopbackoff")
@@ -147,6 +180,46 @@ func TestRender_RecognizedStates(t *testing.T) {
 				if strings.Contains(got, nw) {
 					t.Errorf("manifest must not contain %q:\n%s", nw, got)
 				}
+			}
+		})
+	}
+}
+
+// TestRender_DeclaredEnvOnSynthesisedContainerIsError covers the states that
+// build their own container to produce the named failure. Rendering a declared
+// environment there would either be dropped silently or defeat the failure the
+// scenario asked for, so it is refused rather than either.
+func TestRender_DeclaredEnvOnSynthesisedContainerIsError(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []string{"oomkilled", "error", "elevated_error_rate"} {
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
+			spec := baseSpec("app", state)
+			spec.Env = []EnvVar{{Name: "APP_PORT", Value: "8080"}}
+			if _, err := Render(spec); err == nil {
+				t.Fatalf("Render(%q) with declared env = nil error, want error", state)
+			}
+		})
+	}
+}
+
+// TestRender_DeclaredEnvOnCallerImageStates covers the other half: every state
+// that runs the caller's image renders the declared environment.
+func TestRender_DeclaredEnvOnCallerImageStates(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range callerImageStates {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+			spec := baseSpec("app", string(state))
+			spec.Env = []EnvVar{{Name: "APP_PORT", Value: "8080"}}
+			got, err := Render(spec)
+			if err != nil {
+				t.Fatalf("Render(%q) = %v", state, err)
+			}
+			if !strings.Contains(got, "name: APP_PORT") {
+				t.Errorf("Render(%q) dropped the declared environment:\n%s", state, got)
 			}
 		})
 	}
