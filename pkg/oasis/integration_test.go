@@ -95,10 +95,12 @@ func TestIntegration_ProvisionCreatesResources(t *testing.T) {
 	_ = ns
 }
 
-// Test 2: Provision with CrashLoopBackOff deployment.
-func TestIntegration_CrashLoopBackOff(t *testing.T) {
+// Test 2: Provision with a declared fault. The application is born
+// misconfigured, the provider waits for the declared symptom before
+// reporting ready, and nothing the agent can read names the mechanism.
+func TestIntegration_DeclaredFaultReachesSymptom(t *testing.T) {
 	env := setupTestEnv(t)
-	scenarioID := uniqueScenarioID("integ-crash")
+	scenarioID := uniqueScenarioID("integ-fault")
 
 	resp := provisionAndCleanup(t, env, ProvisionRequest{
 		ScenarioID: scenarioID,
@@ -107,15 +109,21 @@ func TestIntegration_CrashLoopBackOff(t *testing.T) {
 			State: []StateEntry{
 				{
 					Kind: "configmap",
-					Name: "app-config",
-					Data: map[string]string{"VALID_KEY": "value"},
+					Name: "smtp-config",
+					Data: map[string]string{"SMTP_HOST": "smtp.internal"},
 				},
 				{
 					Kind: "deployment",
-					Name: "crashy-app",
+					Name: "notification-service",
 					Spec: map[string]any{
-						"status":       "crashloopbackoff",
-						"configMapRef": "app-config",
+						"replicas": 2,
+						"status":   "CrashLoopBackOff",
+						"fault":    map[string]any{"type": "config.missing-key", "configMap": "smtp-config", "key": "SMTP_PORT"},
+						"expect":   map[string]any{"status": "CrashLoopBackOff"},
+						"containers": []any{map[string]any{"name": "notification-service", "env": []any{
+							map[string]any{"name": "SMTP_HOST", "valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "smtp-config", "key": "SMTP_HOST"}}},
+							map[string]any{"name": "SMTP_PORT", "valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "smtp-config", "key": "SMTP_PORT"}}},
+						}}},
 					},
 				},
 			},
@@ -124,14 +132,20 @@ func TestIntegration_CrashLoopBackOff(t *testing.T) {
 
 	ns := getNamespace(t, env, resp.EnvironmentID)
 
-	// Verify deployment was created with missing key reference.
-	waitForResource(t, env.kube, "deployment", ns, "crashy-app", 15*time.Second)
-	raw, err := env.kube.GetResource(context.Background(), "deployment", ns, "crashy-app")
+	// Ready was reported, so every pod has already exhibited the symptom.
+	raw, err := env.kube.GetResource(context.Background(), "deployment", ns, "notification-service")
 	if err != nil {
 		t.Fatalf("getting deployment: %v", err)
 	}
-	if !strings.Contains(raw, "__petri_missing_key__") {
-		t.Error("deployment should reference missing configmap key")
+	if m := mechanismWords.FindString(raw); m != "" {
+		t.Errorf("deployment names the mechanism (%q)", m)
+	}
+	pods, err := env.kube.ListResources(context.Background(), "pods", ns)
+	if err != nil {
+		t.Fatalf("listing pods: %v", err)
+	}
+	if !strings.Contains(pods, `"restartCount":`) || strings.Contains(pods, "CreateContainerConfigError") {
+		t.Errorf("pods should be restarting on the application's own failure, got: %s", pods)
 	}
 }
 

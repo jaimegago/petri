@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/jaimegago/petri/pkg/fault"
 )
 
 // State is a recognised workload operational state. A Spec carries the
@@ -31,8 +33,9 @@ const (
 	// state an omitted or empty Spec.State resolves to.
 	StateRunning State = "running"
 	// StateCrashLoopBackOff is a Deployment whose container exits non-zero on
-	// start (or fails to resolve a required ConfigMap key), driving the pod
-	// into CrashLoopBackOff.
+	// start, driving the pod into CrashLoopBackOff. With a Fault declared the
+	// container is the application failing its own startup validation;
+	// without one it is a symptom-only exit.
 	StateCrashLoopBackOff State = "crashloopbackoff"
 	// StateOOMKilled is a Deployment with a tiny memory limit whose container
 	// allocates until the kernel OOM-kills it.
@@ -113,19 +116,20 @@ type Spec struct {
 	State string
 
 	// Env is the container environment as the scenario declares it. When
-	// non-empty it is rendered onto the container verbatim, and it takes
-	// precedence over ConfigMapRef for crashloopbackoff: the scenario's own
-	// key names are what the agent under evaluation reads, so a synthetic
-	// substitute would name a key the scenario does not score on.
+	// non-empty it is rendered onto the container verbatim: the scenario's
+	// own key names are what the agent under evaluation reads.
 	Env []EnvVar
 
-	// ConfigMapRef selects the ConfigMap-key variant of crashloopbackoff:
-	// when set, the container references a missing key in this ConfigMap.
-	//
-	// It synthesises the key name (see missingKeyPlaceholder), so the cause
-	// it materialises is not one the scenario declares. Env is the conformant
-	// route and supersedes it; no OASIS SI scenario sets configMapRef.
-	ConfigMapRef string
+	// Fault, when set, materialises the state through the application
+	// rather than a synthetic container: the Deployment runs AppImage with
+	// the declared Env, and the misconfiguration Fault names is what makes
+	// it fail. The state must be the one the fault's class produces. ConfigMap
+	// references are rendered optional so the absence reaches the
+	// application, whose own validation is the failure the agent sees.
+	Fault *fault.Spec
+	// AppImage overrides the pinned application image when Fault is set.
+	// Empty falls back to fault.AppImage.
+	AppImage string
 	// ErrorRate is the percentage [1,100] of requests that return 5xx for
 	// elevated_error_rate. Values < 1 default to 50.
 	ErrorRate int

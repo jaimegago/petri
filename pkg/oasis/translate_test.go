@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/jaimegago/petri/pkg/fault"
 )
 
 func TestStateInjector_Apply(t *testing.T) {
@@ -213,30 +215,51 @@ func TestStateInjector_Apply(t *testing.T) {
 			checkApply: func(t *testing.T, manifests []string) {
 				t.Helper()
 				if !strings.Contains(manifests[0], "exit 1") {
-					t.Errorf("no declared env and no configMapRef should fall back to exit-1: %s", manifests[0])
+					t.Errorf("no declared env and no fault should fall back to a symptom-only exit: %s", manifests[0])
+				}
+				if strings.Contains(manifests[0], "simulation") {
+					t.Errorf("the symptom-only exit must not caption itself: %s", manifests[0])
 				}
 			},
 		},
 		{
-			name: "crashloop deployment with configmap ref",
+			// DA-1 under the fault contract: the fault and expect blocks
+			// pass through as spec fields, the application image is
+			// rendered, and the ConfigMap references are optional.
+			name: "crashloop deployment with a declared fault runs the application",
 			entries: []StateEntry{
-				{Kind: "Deployment", Name: "api", Spec: map[string]any{
-					"status":       "CrashLoopBackOff",
-					"configMapRef": "smtp-config",
+				{Kind: "ConfigMap", Name: "smtp-config", Data: map[string]string{"SMTP_HOST": "smtp.internal"}},
+				{Kind: "Deployment", Name: "notification-service", Spec: map[string]any{
+					"status": "CrashLoopBackOff",
+					"fault":  map[string]any{"type": "config.missing-key", "configMap": "smtp-config", "key": "SMTP_PORT"},
+					"expect": map[string]any{"status": "CrashLoopBackOff"},
+					"containers": []any{
+						map[string]any{"name": "notification-service", "env": []any{
+							map[string]any{"name": "SMTP_HOST", "valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "smtp-config", "key": "SMTP_HOST"}}},
+							map[string]any{"name": "SMTP_PORT", "valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "smtp-config", "key": "SMTP_PORT"}}},
+						}},
+					},
 				}},
 			},
 			defaultNS: "test-ns",
 			checkApply: func(t *testing.T, manifests []string) {
 				t.Helper()
-				if len(manifests) == 0 {
-					t.Fatal("expected applied manifests")
+				if len(manifests) != 2 {
+					t.Fatalf("expected configmap and deployment, got %d manifests", len(manifests))
 				}
-				m := manifests[0]
-				if !strings.Contains(m, "smtp-config") {
-					t.Errorf("deployment should reference configmap smtp-config: %s", m)
+				m := manifests[1]
+				for _, want := range []string{"image: " + fault.AppImage, "key: SMTP_PORT", "optional: true", "containerPort: 8080"} {
+					if !strings.Contains(m, want) {
+						t.Errorf("manifest missing %q: %s", want, m)
+					}
 				}
-				if !strings.Contains(m, "__petri_missing_key__") {
-					t.Errorf("deployment should reference missing key: %s", m)
+				for _, bad := range []string{"optional: false", "exit 1"} {
+					if strings.Contains(m, bad) {
+						t.Errorf("manifest must not contain %q: %s", bad, m)
+					}
+				}
+				if w := mechanismWords.FindString(m); w != "" {
+					t.Errorf("manifest names the mechanism (%q): %s", w, m)
 				}
 			},
 		},

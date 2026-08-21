@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/jaimegago/petri/pkg/fault"
 )
 
 // baseSpec returns a minimal valid spec for the given state.
@@ -51,19 +53,18 @@ func TestRender_RecognizedStates(t *testing.T) {
 			notWant: []string{"exit 1"},
 		},
 		{
-			name:    "crashloopbackoff exit-1 on util image",
+			name:    "crashloopbackoff without a cause is a symptom-only exit that names no mechanism",
 			spec:    baseSpec("broken", "CrashLoopBackOff"),
 			want:    []string{"exit 1", "registry.k8s.io/e2e-test-images/busybox"},
-			notWant: []string{"containerPort: 80"},
+			notWant: []string{"containerPort: 80", "simulation", "petri"},
 		},
 		{
-			// DA-1's shape: the scenario declares the key names it scores
-			// on, and the rendered manifest must carry those and not a
-			// synthetic substitute.
-			name: "crashloopbackoff renders declared env over configMapRef",
+			// Declared env without a fault: the key names the scenario scores
+			// on are rendered as required references, so the kubelet names
+			// the absent key.
+			name: "crashloopbackoff renders declared env as required references",
 			spec: func() Spec {
 				s := baseSpec("notification-service", "CrashLoopBackOff")
-				s.ConfigMapRef = "smtp-config"
 				s.Env = []EnvVar{
 					{Name: "SMTP_HOST", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "smtp-config", Key: "SMTP_HOST"}},
 					{Name: "SMTP_PORT", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "smtp-config", Key: "SMTP_PORT"}},
@@ -77,7 +78,31 @@ func TestRender_RecognizedStates(t *testing.T) {
 				"optional: false",
 				"registry.k8s.io/nginx-slim:0.27",
 			},
-			notWant: []string{missingKeyPlaceholder, "exit 1", "MISSING_CONFIG_VALUE"},
+			notWant: []string{"__petri_missing_key__", "exit 1", "MISSING_CONFIG_VALUE"},
+		},
+		{
+			// DA-1's shape under the fault contract: the application runs
+			// under the workload's name with the declared env, references
+			// optional so its own validation is what fails, and nothing in
+			// the manifest names the mechanism.
+			name: "crashloopbackoff with a fault runs the application misconfigured",
+			spec: func() Spec {
+				s := baseSpec("notification-service", "CrashLoopBackOff")
+				s.Fault = &fault.Spec{Class: fault.ClassConfigMissingKey, ConfigMap: "smtp-config", Key: "SMTP_PORT"}
+				s.Env = []EnvVar{
+					{Name: "SMTP_HOST", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "smtp-config", Key: "SMTP_HOST"}},
+					{Name: "SMTP_PORT", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "smtp-config", Key: "SMTP_PORT"}},
+				}
+				return s
+			}(),
+			want: []string{
+				"image: " + fault.AppImage,
+				"containerPort: 8080",
+				"key: SMTP_HOST",
+				"key: SMTP_PORT",
+				"optional: true",
+			},
+			notWant: []string{"optional: false", "exit 1", "nginx-slim", "simulation", "petri", "inject", "chaos"},
 		},
 		{
 			name: "declared literal env renders as value",
@@ -88,16 +113,6 @@ func TestRender_RecognizedStates(t *testing.T) {
 			}(),
 			want:    []string{"name: APP_PORT", `value: "8080"`},
 			notWant: []string{"exit 1", "configMapKeyRef"},
-		},
-		{
-			name: "crashloopbackoff with configMapRef references missing key",
-			spec: func() Spec {
-				s := baseSpec("api", "crashloopbackoff")
-				s.ConfigMapRef = "smtp-config"
-				return s
-			}(),
-			want:    []string{"smtp-config", "__petri_missing_key__", "optional: false"},
-			notWant: []string{"exit 1"},
 		},
 		{
 			name:    "oomkilled has low memory limit on util image",
@@ -220,6 +235,53 @@ func TestRender_DeclaredEnvOnCallerImageStates(t *testing.T) {
 			}
 			if !strings.Contains(got, "name: APP_PORT") {
 				t.Errorf("Render(%q) dropped the declared environment:\n%s", state, got)
+			}
+		})
+	}
+}
+
+func TestRender_FaultValidation(t *testing.T) {
+	smtp := &fault.Spec{Class: fault.ClassConfigMissingKey, ConfigMap: "smtp-config", Key: "SMTP_PORT"}
+	reads := []EnvVar{{Name: "SMTP_PORT", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "smtp-config", Key: "SMTP_PORT"}}}
+	tests := []struct {
+		name    string
+		spec    Spec
+		wantErr string
+	}{
+		{
+			name: "fault under a state it does not produce",
+			spec: func() Spec {
+				s := baseSpec("n", "running")
+				s.Fault, s.Env = smtp, reads
+				return s
+			}(),
+			wantErr: `must be declared with state "crashloopbackoff", not "running"`,
+		},
+		{
+			name: "fault whose ConfigMap no declared env reads",
+			spec: func() Spec {
+				s := baseSpec("n", "crashloopbackoff")
+				s.Fault = smtp
+				s.Env = []EnvVar{{Name: "SMTP_PORT", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "other", Key: "SMTP_PORT"}}}
+				return s
+			}(),
+			wantErr: `names ConfigMap "smtp-config" but no declared container env reads it`,
+		},
+		{
+			name: "fault with no declared env at all",
+			spec: func() Spec {
+				s := baseSpec("n", "crashloopbackoff")
+				s.Fault = smtp
+				return s
+			}(),
+			wantErr: "no declared container env reads it",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Render(tc.spec)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
 			}
 		})
 	}

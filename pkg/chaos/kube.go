@@ -28,6 +28,10 @@ type KubeClient interface {
 	GetConfigMap(ctx context.Context, namespace, name string) (map[string]string, error)
 	// UpdateConfigMap replaces the data map of an existing ConfigMap.
 	UpdateConfigMap(ctx context.Context, namespace, name string, data map[string]string) error
+	// DeleteConfigMapKey removes one key from a ConfigMap's data. A merge
+	// patch cannot remove a key, so this is a JSON-patch remove; it fails
+	// when the key is absent.
+	DeleteConfigMapKey(ctx context.Context, namespace, name, key string) error
 	// ListServiceAccountSecrets returns the names of token Secrets bound to a ServiceAccount.
 	// In Kubernetes 1.24+ with auto-generated tokens this list may be empty.
 	ListServiceAccountSecrets(ctx context.Context, namespace, name string) ([]string, error)
@@ -198,6 +202,23 @@ func (c *cliKubeClient) UpdateConfigMap(ctx context.Context, namespace, name str
 		return fmt.Errorf("patching configmap %s/%s: %w", namespace, name, err)
 	}
 	return nil
+}
+
+func (c *cliKubeClient) DeleteConfigMapKey(ctx context.Context, namespace, name, key string) error {
+	patch, err := json.Marshal([]map[string]string{{"op": "remove", "path": "/data/" + jsonPointerEscape(key)}})
+	if err != nil {
+		return fmt.Errorf("marshalling configmap key patch: %w", err)
+	}
+	args := []string{"patch", "configmap", name, "-n", namespace, "--type=json", fmt.Sprintf("-p=%s", patch)}
+	if err := c.runner.run(ctx, args); err != nil {
+		return fmt.Errorf("removing key %s from configmap %s/%s: %w", key, namespace, name, err)
+	}
+	return nil
+}
+
+// jsonPointerEscape escapes a key for use as a JSON Pointer token (RFC 6901).
+func jsonPointerEscape(key string) string {
+	return strings.NewReplacer("~", "~0", "/", "~1").Replace(key)
 }
 
 type serviceAccountJSON struct {

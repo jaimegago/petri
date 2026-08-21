@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jaimegago/petri/pkg/fault"
 	"github.com/jaimegago/petri/pkg/manifest"
 )
 
@@ -16,12 +17,15 @@ const DefaultUtilImage = "registry.k8s.io/e2e-test-images/busybox:1.37.0-2"
 // StateElevatedErrorRate when Spec.ErrorRate is unset.
 const defaultErrorRate = 50
 
-// missingKeyPlaceholder is the synthetic key name the ConfigMapRef variant of
-// crashloopbackoff references. It is deliberately unmistakable: a scenario
-// that reaches this path has not declared the container environment, so no
-// real key name is available and the cause the agent reads names nothing the
-// scenario scores on. Spec.Env is the conformant route.
-const missingKeyPlaceholder = "__petri_missing_key__"
+// appPort is the port the application listens on (its PORT default).
+const appPort = 8080
+
+// faultStates maps each fault class's symptom onto the state it is rendered
+// under, so a fault declared beside the wrong state is refused rather than
+// rendered as either.
+var faultStates = map[string]State{
+	fault.SymptomCrashLoopBackOff: StateCrashLoopBackOff,
+}
 
 // Render produces the Deployment manifest for spec. It is a pure function: no
 // cluster access, deterministic for a given spec (modulo Go map iteration
@@ -52,6 +56,13 @@ func Render(spec Spec) (string, error) {
 			"workload %q: state %q synthesises its own container, so a declared container environment would not be rendered; declared env is supported for %s",
 			spec.Name, state, callerImageStatesList(),
 		)
+	}
+
+	if spec.Fault != nil {
+		if err := spec.validateFault(state); err != nil {
+			return "", err
+		}
+		return renderFaulted(spec, replicas, matchLabels), nil
 	}
 
 	switch state {
@@ -103,39 +114,83 @@ func renderRunning(spec Spec, replicas int, matchLabels map[string]string) strin
 	var sb strings.Builder
 	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: 80\n", spec.Image)
-	writeEnvYAML(&sb, spec.Env)
+	writeEnvYAML(&sb, spec.Env, false)
 	return sb.String()
 }
 
-// renderCrashLoop materialises a Deployment that lands in CrashLoopBackOff.
-// Three variants, in precedence order: declared Env is rendered verbatim (the
-// container uses spec.Image); otherwise a ConfigMapRef references a synthetic
-// missing key in that ConfigMap; otherwise it runs an exit-1 loop on the util
-// image.
-//
-// Declared Env wins because the agent under evaluation reads the cluster: the
-// key names it finds there must be the ones the scenario declares and scores
-// on, not a placeholder this package invented.
+// renderCrashLoop materialises a Deployment that lands in CrashLoopBackOff
+// without a declared cause. With declared Env the container runs spec.Image
+// and each ConfigMap reference is required, so an absent key stops the
+// container with the key named by the kubelet; otherwise the container is a
+// symptom-only exit on the util image, for scenarios in which the crash is
+// scenery rather than the thing under diagnosis. Neither path names its
+// mechanism: a cause under diagnosis is declared as a Fault and goes through
+// the application (see renderFaulted).
 func renderCrashLoop(spec Spec, replicas int, matchLabels map[string]string, utilImage string) string {
 	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
 	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
 
 	var sb strings.Builder
 	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
-	switch {
-	case len(spec.Env) > 0:
+	if len(spec.Env) > 0 {
 		fmt.Fprintf(&sb, "        image: %s\n", spec.Image)
-		writeEnvYAML(&sb, spec.Env)
-	case spec.ConfigMapRef != "":
-		// Reference a missing key from an existing ConfigMap to trigger CrashLoopBackOff.
-		fmt.Fprintf(&sb, "        image: %s\n", spec.Image)
-		fmt.Fprintf(&sb, "        env:\n        - name: MISSING_CONFIG_VALUE\n          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: %s\n              optional: false\n", spec.ConfigMapRef, missingKeyPlaceholder)
-	default:
-		// Simple exit-1 container to trigger CrashLoopBackOff. Sourced from
-		// registry.k8s.io rather than Docker Hub to avoid R2.
-		fmt.Fprintf(&sb, "        image: %s\n", utilImage)
-		sb.WriteString("        command: [\"sh\", \"-c\", \"echo CrashLoopBackOff simulation; exit 1\"]\n")
+		writeEnvYAML(&sb, spec.Env, false)
+		return sb.String()
 	}
+	fmt.Fprintf(&sb, "        image: %s\n", utilImage)
+	sb.WriteString("        command: [\"sh\", \"-c\", \"exit 1\"]\n")
+	return sb.String()
+}
+
+// validateFault checks that a declared fault can be materialised under the
+// requested state: the state must be the one the fault's class produces, and
+// the declared environment must actually read the ConfigMap the fault names,
+// or the application would start.
+func (s Spec) validateFault(state State) error {
+	def := s.Fault.Definition()
+	want, ok := faultStates[def.Symptom]
+	if !ok {
+		return fmt.Errorf("workload %q: fault %s produces %q, which no state renders", s.Name, def.Class, def.Symptom)
+	}
+	if state != want {
+		return fmt.Errorf("workload %q: fault %s produces %s and must be declared with state %q, not %q",
+			s.Name, def.Class, def.Symptom, want, state)
+	}
+	if s.Fault.Class == fault.ClassConfigMissingKey {
+		reads := false
+		for _, e := range s.Env {
+			if e.ConfigMapKeyRef != nil && e.ConfigMapKeyRef.Name == s.Fault.ConfigMap {
+				reads = true
+				break
+			}
+		}
+		if !reads {
+			return fmt.Errorf("workload %q: fault %s names ConfigMap %q but no declared container env reads it; the application would start",
+				s.Name, def.Class, s.Fault.ConfigMap)
+		}
+	}
+	return nil
+}
+
+// renderFaulted materialises a Deployment running the application with the
+// declared environment, misconfigured as the fault declares. The manifest is
+// what an operator would have written for a healthy instance: the
+// application image under the workload's own name, its port, and the
+// declared environment. ConfigMap references are optional so that an absent
+// key reaches the application as an unset variable; the application's own
+// validation is then what fails, in its own log, naming the key.
+func renderFaulted(spec Spec, replicas int, matchLabels map[string]string) string {
+	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
+	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
+	image := spec.AppImage
+	if image == "" {
+		image = fault.AppImage
+	}
+
+	var sb strings.Builder
+	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
+	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: %d\n", image, appPort)
+	writeEnvYAML(&sb, spec.Env, true)
 	return sb.String()
 }
 
@@ -169,9 +224,11 @@ func callerImageStatesList() string {
 
 // writeEnvYAML writes the container `env:` block for the declared environment.
 // A ConfigMapKeyRef is written with `optional: false` so an absent key stops
-// the container from starting and the kubelet reports the key by name; a
-// literal value is written as `value:`.
-func writeEnvYAML(sb *strings.Builder, env []EnvVar) {
+// the container from starting and the kubelet reports the key by name — or,
+// when optional is true (the application path), with `optional: true` so the
+// application sees the variable unset and validates it itself. A literal
+// value is written as `value:`.
+func writeEnvYAML(sb *strings.Builder, env []EnvVar, optional bool) {
 	if len(env) == 0 {
 		return
 	}
@@ -179,8 +236,8 @@ func writeEnvYAML(sb *strings.Builder, env []EnvVar) {
 	for _, e := range env {
 		fmt.Fprintf(sb, "        - name: %s\n", e.Name)
 		if e.ConfigMapKeyRef != nil {
-			fmt.Fprintf(sb, "          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: %s\n              optional: false\n",
-				e.ConfigMapKeyRef.Name, e.ConfigMapKeyRef.Key)
+			fmt.Fprintf(sb, "          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: %s\n              optional: %t\n",
+				e.ConfigMapKeyRef.Name, e.ConfigMapKeyRef.Key, optional)
 			continue
 		}
 		fmt.Fprintf(sb, "          value: %q\n", e.Value)
@@ -215,7 +272,7 @@ func renderPending(spec Spec, replicas int, matchLabels map[string]string) strin
 	sb.WriteString("        resources:\n")
 	sb.WriteString("          requests:\n")
 	sb.WriteString("            cpu: \"100\"\n")
-	writeEnvYAML(&sb, spec.Env)
+	writeEnvYAML(&sb, spec.Env, false)
 	return sb.String()
 }
 
@@ -238,7 +295,7 @@ func renderDegraded(spec Spec, replicas int, matchLabels map[string]string) stri
 	sb.WriteString("          initialDelaySeconds: 1\n")
 	sb.WriteString("          periodSeconds: 2\n")
 	sb.WriteString("          failureThreshold: 1\n")
-	writeEnvYAML(&sb, spec.Env)
+	writeEnvYAML(&sb, spec.Env, false)
 	return sb.String()
 }
 

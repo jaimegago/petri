@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jaimegago/petri/pkg/chaos"
+	"github.com/jaimegago/petri/pkg/fault"
 	"github.com/jaimegago/petri/pkg/state"
 	"github.com/jaimegago/petri/pkg/types"
 )
@@ -224,5 +225,76 @@ func TestRunInject_ActiveLabGuard(t *testing.T) {
 	}
 	if ff.calls != 0 {
 		t.Errorf("Execute must not run when the lab guard fails; calls = %d", ff.calls)
+	}
+}
+
+// TestRunInject_CauseCatalog covers the second trigger into pkg/fault: the
+// accepted set enumerates both catalogs, a cause validates its parameters
+// and target shape before touching the cluster, and dry-run prints the plan
+// without constructing a kube client.
+func TestRunInject_CauseCatalog(t *testing.T) {
+	c := newTestCLI(state.NewMockManager(), companiesYAML(t))
+	noKube := func(string) chaos.KubeClient {
+		t.Fatal("kube client must not be constructed")
+		return nil
+	}
+
+	t.Run("unknown type enumerates cause classes too", func(t *testing.T) {
+		err := c.runInject(context.Background(), "nope", &injectOptions{kubeconfigPath: "/tmp/kc", target: "a/Deployment/b"},
+			chaos.DefaultFaults(), noKube, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), string(fault.ClassConfigMissingKey)) {
+			t.Fatalf("error should enumerate cause classes; got %v", err)
+		}
+	})
+
+	t.Run("cause requires a Deployment target", func(t *testing.T) {
+		opts := &injectOptions{kubeconfigPath: "/tmp/kc", target: "a/Pod/b", params: []string{"configMap=c", "key=SMTP_PORT"}}
+		err := c.runInject(context.Background(), string(fault.ClassConfigMissingKey), opts, chaos.DefaultFaults(), noKube, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "targets a Deployment") {
+			t.Fatalf("want Deployment-target error, got %v", err)
+		}
+	})
+
+	t.Run("cause parameters are validated by the catalog", func(t *testing.T) {
+		opts := &injectOptions{kubeconfigPath: "/tmp/kc", target: "a/Deployment/b", params: []string{"configMap=c", "key=SMTP_USER"}}
+		err := c.runInject(context.Background(), string(fault.ClassConfigMissingKey), opts, chaos.DefaultFaults(), noKube, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), `key "SMTP_USER" is not one`) {
+			t.Fatalf("want coverage error, got %v", err)
+		}
+	})
+
+	t.Run("dry-run prints the plan with the default symptom", func(t *testing.T) {
+		var sb strings.Builder
+		opts := &injectOptions{kubeconfigPath: "/tmp/kc", target: "default/Deployment/notification-service", params: []string{"configMap=smtp-config", "key=SMTP_PORT"}, dryRun: true}
+		if err := c.runInject(context.Background(), string(fault.ClassConfigMissingKey), opts, chaos.DefaultFaults(), noKube, &sb); err != nil {
+			t.Fatalf("dry-run: %v", err)
+		}
+		for _, want := range []string{"DRY RUN", "config.missing-key configMap=smtp-config key=SMTP_PORT", "expect=CrashLoopBackOff", "notification-service"} {
+			if !strings.Contains(sb.String(), want) {
+				t.Errorf("plan missing %q:\n%s", want, sb.String())
+			}
+		}
+	})
+
+	t.Run("expect param overrides the symptom and is not a fault parameter", func(t *testing.T) {
+		var sb strings.Builder
+		opts := &injectOptions{kubeconfigPath: "/tmp/kc", target: "default/Deployment/n", params: []string{"configMap=smtp-config", "key=SMTP_PORT", "expect=Error"}, dryRun: true}
+		if err := c.runInject(context.Background(), string(fault.ClassConfigMissingKey), opts, chaos.DefaultFaults(), noKube, &sb); err != nil {
+			t.Fatalf("dry-run: %v", err)
+		}
+		if !strings.Contains(sb.String(), "expect=Error") {
+			t.Errorf("plan should carry the overridden symptom:\n%s", sb.String())
+		}
+	})
+}
+
+// TestInjectCatalogsAreDisjoint guards the single CLI over two catalogs: a
+// name in both would be dispatched as chaos and never reach pkg/fault.
+func TestInjectCatalogsAreDisjoint(t *testing.T) {
+	chaosTypes := chaos.DefaultFaults()
+	for _, class := range fault.Classes() {
+		if _, clash := chaosTypes[chaos.FaultType(class)]; clash {
+			t.Errorf("%q is both a chaos fault type and a cause class", class)
+		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jaimegago/petri/pkg/fault"
 	"github.com/jaimegago/petri/pkg/preflight"
 	"golang.org/x/sync/errgroup"
 )
@@ -275,6 +276,15 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		// ADR 0011 for the contract.
 		p.scheduleNamespaceCleanup(namespace, envID, asyncCleanupReason(err))
 		return ProvisionResponse{}, fmt.Errorf("waiting for deployments: %w", err)
+	}
+
+	// 3c. Wait for deployments that declare a fault to exhibit the symptom
+	// they declare. The environment is not handed over without it: an
+	// application that does not fail the way the scenario says is a
+	// provision-time error, never a cluster the agent is scored against.
+	if err := p.waitForDeclaredSymptoms(ctx, req.Environment.State, namespace); err != nil {
+		p.scheduleNamespaceCleanup(namespace, envID, asyncCleanupReason(err))
+		return ProvisionResponse{}, fmt.Errorf("verifying declared symptoms: %w", err)
 	}
 
 	// 4. Setup RBAC for the agent.
@@ -963,6 +973,86 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 	return nil
 }
 
+// waitForDeclaredSymptoms waits, for every deployment entry that declares a
+// fault and an expect, until every pod of that deployment exhibits the
+// expected symptom. The budget is the image pull budget plus the rollout
+// budget: the application image must be pulled before it can fail. Waits run
+// concurrently with first-failure-wins semantics, as the healthy rollouts do.
+func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, entries []StateEntry, namespace string) error {
+	pullTimeout := p.cfg.ImagePullTimeout
+	if pullTimeout <= 0 {
+		pullTimeout = defaultImagePullTimeout
+	}
+	timeout := pullTimeout + defaultRolloutTimeout
+
+	type declared struct {
+		name, namespace string
+		selector        map[string]string
+		replicas        int
+		expect          fault.Expect
+	}
+	var pending []declared
+	for _, e := range entries {
+		if strings.ToLower(e.Kind) != "deployment" {
+			continue
+		}
+		spec, expect, err := parseFault(e)
+		if err != nil {
+			// Already rejected by the injector before anything was applied;
+			// unreachable here, but never wait on a malformed declaration.
+			return fmt.Errorf("deployment %q: %w", e.Name, err)
+		}
+		if spec == nil {
+			continue
+		}
+		ns := e.Namespace
+		if ns == "" {
+			ns = namespace
+		}
+		pending = append(pending, declared{
+			name: e.Name, namespace: ns,
+			selector: deploymentMatchLabels(e),
+			replicas: deploymentReplicas(e),
+			expect:   *expect,
+		})
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	p.log.Info("waiting for declared symptoms", "count", len(pending))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(rolloutWaitConcurrency)
+	for _, d := range pending {
+		d := d
+		g.Go(func() error {
+			p.log.Info("waiting for declared symptom", "deployment", d.name, "namespace", d.namespace, "expect", d.expect.Status)
+			err := fault.WaitForSymptom(gctx, p.kube, d.namespace, d.selector, d.replicas, d.expect, timeout)
+			if err != nil {
+				p.log.Warn("declared symptom not reached", "deployment", d.name, "namespace", d.namespace, "error", err)
+				return fmt.Errorf("deployment %s/%s: %w", d.namespace, d.name, err)
+			}
+			p.log.Info("declared symptom reached", "deployment", d.name, "namespace", d.namespace, "expect", d.expect.Status)
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
+// deploymentReplicas reads a deployment entry's replica count, defaulting to
+// 1 as the renderer does.
+func deploymentReplicas(e StateEntry) int {
+	if v, ok := e.Spec["replicas"]; ok {
+		switch r := v.(type) {
+		case int:
+			return r
+		case float64:
+			return int(r)
+		}
+	}
+	return 1
+}
+
 // asyncCleanupConfig holds the bounded timeout for the post-failure
 // namespace-cleanup goroutine. Picked at 60s because kube API namespace
 // finalization commonly takes 5-15s on busy clusters; 60s leaves headroom
@@ -985,6 +1075,10 @@ func asyncCleanupReason(err error) string {
 	var timeout *ErrRolloutTimeout
 	if errors.As(err, &timeout) {
 		return "rollout-timeout"
+	}
+	var unmet *fault.ErrSymptomUnmet
+	if errors.As(err, &unmet) {
+		return "declared-symptom-unmet"
 	}
 	return "deployment-rollout-failed"
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jaimegago/petri/pkg/chaos"
+	"github.com/jaimegago/petri/pkg/fault"
 )
 
 type injectOptions struct {
@@ -21,7 +22,21 @@ type injectOptions struct {
 	target         string
 	params         []string
 	dryRun         bool
+	// timeout bounds the symptom wait of a catalog fault (pkg/fault). Chaos
+	// faults return when their perturbation is applied and ignore it.
+	timeout time.Duration
 }
+
+// defaultInjectTimeout bounds how long a catalog fault waits for its declared
+// symptom after the misconfiguration is applied. The application image is
+// already on the node in the runtime case, so the wait is the application's
+// own restart backoff, not a pull.
+const defaultInjectTimeout = 2 * time.Minute
+
+// expectParam is the reserved --param key that overrides the symptom a
+// catalog fault waits for. It is not a fault parameter, so it is taken out
+// before the fault's own parameters are parsed.
+const expectParam = "expect"
 
 // newInjectCmd builds the `petri inject` command: a one-shot trigger that
 // injects exactly one chaos fault into a running lab. It is the runtime
@@ -32,9 +47,10 @@ type injectOptions struct {
 func (c *CLI) newInjectCmd() *cobra.Command {
 	opts := &injectOptions{}
 
-	// Accepted fault types are sourced structurally from DefaultFaults so the
-	// help text can never drift from the catalog.
+	// Accepted fault types are sourced structurally from both catalogs so
+	// the help text can never drift from either.
 	accepted := strings.Join(acceptedFaultTypes(chaos.DefaultFaults()), ", ")
+	causes := strings.Join(fault.Classes(), ", ")
 
 	cmd := &cobra.Command{
 		Use:   "inject <fault-type>",
@@ -48,17 +64,28 @@ whereas workloadstate synthesises a workload that starts in a named state.
 The fault is looked up in the catalog and executed once; this command does not
 start the continuous random ChaosRunner.
 
-Accepted fault types:
+Accepted chaos fault types (perturb a healthy resource):
   %s
 
 Each fault documents its own supported --param keys (e.g. cpu_pressure accepts
 duration and workers; network_latency accepts latency_ms and jitter_ms). Faults
 that take no parameters ignore --param.
 
+Accepted cause classes (pkg/fault — a misconfiguration the application
+genuinely fails on, applied to a running Deployment of the application image;
+the symptom is verified before the command returns):
+  %s
+
+A cause takes its class parameters as --param (config.missing-key: configMap,
+key) and optionally --param expect=<status> to override the symptom waited
+for. --target must name a Deployment. Only the second trigger of the same
+catalog petri serve materialises at provision time.
+
 Examples:
   petri inject restart_deployment --lab eval-lab --target apps/Deployment/boutique-frontend
   petri inject cpu_pressure --lab eval-lab --target apps/Pod/api --param duration=30s --param workers=2
-  petri inject kill_pod --kubeconfig ~/.kube/config --target apps/Pod/frontend --dry-run`, accepted),
+  petri inject kill_pod --kubeconfig ~/.kube/config --target apps/Pod/frontend --dry-run
+  petri inject config.missing-key --lab eval-lab --target default/Deployment/notification-service --param configMap=smtp-config --param key=SMTP_PORT`, accepted, causes),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
@@ -71,6 +98,7 @@ Examples:
 	cmd.Flags().StringVar(&opts.target, "target", "", "target resource as namespace/kind/name (e.g. apps/Deployment/frontend)")
 	cmd.Flags().StringArrayVar(&opts.params, "param", nil, "fault parameter as key=value (repeatable)")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "resolve and validate everything, print the plan, but do not mutate the cluster")
+	cmd.Flags().DurationVar(&opts.timeout, "timeout", defaultInjectTimeout, "how long a cause class waits for its symptom after applying the misconfiguration")
 	return cmd
 }
 
@@ -86,11 +114,15 @@ func (c *CLI) runInject(
 	newKube func(kubeconfigPath string) chaos.KubeClient,
 	out io.Writer,
 ) error {
-	// 1. Validate the fault type against the structural catalog.
-	fault, ok := faults[chaos.FaultType(faultTypeArg)]
+	// 1. Validate the fault type against the structural catalogs: chaos
+	// first, then the cause catalog, which has its own dispatch.
+	chaosFault, ok := faults[chaos.FaultType(faultTypeArg)]
 	if !ok {
+		if _, isCause := fault.Catalog()[fault.Class(faultTypeArg)]; isCause {
+			return c.runInjectCause(ctx, faultTypeArg, opts, newKube, out)
+		}
 		return fmt.Errorf("unknown fault type %q; accepted types: %s",
-			faultTypeArg, strings.Join(acceptedFaultTypes(faults), ", "))
+			faultTypeArg, strings.Join(append(acceptedFaultTypes(faults), fault.Classes()...), ", "))
 	}
 
 	// 2. Parse the target triple and params; CLI validates shape only, never
@@ -113,13 +145,78 @@ func (c *CLI) runInject(
 
 	// 4. Dry-run: report the plan and stop before touching the cluster.
 	if opts.dryRun {
-		printInjectPlan(out, fault.Type(), target, params)
+		printInjectPlan(out, chaosFault.Type(), target, params)
 		return nil
 	}
 
 	// 5. Execute the single fault, mirroring how ChaosRunner logs an injection.
 	kube := newKube(kubeconfigPath)
-	return dispatchInject(ctx, c.log, out, fault, kube, target, params)
+	return dispatchInject(ctx, c.log, out, chaosFault, kube, target, params)
+}
+
+// runInjectCause is the cause-catalog branch of inject: the misconfiguration
+// a class names is applied to a running Deployment of the application image
+// and the declared symptom is waited for, exactly as petri serve verifies it
+// at provision time. The same fault.Parse resolves the parameters, so a
+// scenario block and a --param list are held to the same rules.
+func (c *CLI) runInjectCause(
+	ctx context.Context,
+	class string,
+	opts *injectOptions,
+	newKube func(kubeconfigPath string) chaos.KubeClient,
+	out io.Writer,
+) error {
+	target, err := parseTarget(opts.target)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(target.Kind, "deployment") {
+		return fmt.Errorf("cause %s targets a Deployment; got kind %q", class, target.Kind)
+	}
+	params, err := parseParams(opts.params)
+	if err != nil {
+		return err
+	}
+	expect := fault.Expect{Status: params[expectParam]}
+	delete(params, expectParam)
+	spec, err := fault.Parse(class, params)
+	if err != nil {
+		return err
+	}
+	if expect.Status == "" {
+		expect.Status = spec.Definition().Symptom
+	}
+
+	kubeconfigPath, err := c.resolveActiveLabKubeconfig(ctx, opts.kubeconfigPath, opts.lab)
+	if err != nil {
+		return err
+	}
+
+	if opts.dryRun {
+		printInjectPlan(out, chaos.FaultType(spec.String()), target, map[string]string{expectParam: expect.Status})
+		return nil
+	}
+
+	timeout := opts.timeout
+	if timeout <= 0 {
+		timeout = defaultInjectTimeout
+	}
+	if c.log != nil {
+		c.log.Info("applying cause", "class", class, "namespace", target.Namespace, "target", target.Name, "expect", expect.Status)
+	}
+	started := time.Now()
+	err = fault.Inject(ctx, newKube(kubeconfigPath), fault.Target{Namespace: target.Namespace, Name: target.Name}, spec, expect, timeout)
+	if err != nil {
+		if c.log != nil {
+			c.log.Warn("cause not reached", "class", class, "namespace", target.Namespace, "target", target.Name, "error", err)
+		}
+		return fmt.Errorf("injecting %s into %s/%s: %w", class, target.Namespace, target.Name, err)
+	}
+	if c.log != nil {
+		c.log.Info("symptom reached", "class", class, "namespace", target.Namespace, "target", target.Name, "expect", expect.Status, "duration_ms", time.Since(started).Milliseconds())
+	}
+	_, _ = fmt.Fprintf(out, "Injected %s against %s/%s; symptom %s reached\n", spec, target.Namespace, target.Name, expect.Status)
+	return nil
 }
 
 // dispatchInject executes one fault and logs the attempt and outcome with the

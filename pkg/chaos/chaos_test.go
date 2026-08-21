@@ -73,6 +73,11 @@ func (m *mockKubeClient) UpdateConfigMap(_ context.Context, namespace, name stri
 	return m.err
 }
 
+func (m *mockKubeClient) DeleteConfigMapKey(_ context.Context, namespace, name, key string) error {
+	m.record("delete_configmap_key:" + namespace + "/" + name + "/" + key)
+	return m.err
+}
+
 func (m *mockKubeClient) ListServiceAccountSecrets(_ context.Context, namespace, name string) ([]string, error) {
 	m.record("list_sa_secrets:" + namespace + "/" + name)
 	return m.saTokens[namespace+"/"+name], m.err

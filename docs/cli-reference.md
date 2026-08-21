@@ -163,10 +163,11 @@ petri serve --lab=eval-lab
 
 ### `petri inject`
 
-Inject a single chaos fault into a named, running lab.
+Inject a single chaos fault, or apply a single cause from the fault catalog,
+into a named, running lab.
 
 ```bash
-petri inject <fault-type> [flags]
+petri inject <fault-type|cause-class> [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -176,6 +177,7 @@ petri inject <fault-type> [flags]
 | `--target` | string | | Target resource as `namespace/kind/name` |
 | `--param` | string | | Fault parameter as `key=value` (repeatable) |
 | `--dry-run` | bool | false | Resolve and validate everything, print the plan, but do not mutate the cluster |
+| `--timeout` | duration | 2m | How long a cause class waits for its symptom after applying the misconfiguration (chaos faults ignore it) |
 
 `petri inject` is the **runtime** counterpart to Petri's **provision-time**
 born-into-state capability (`pkg/workloadstate`, documented in
@@ -219,6 +221,29 @@ petri inject cpu_pressure --lab eval-lab --target apps/Pod/api --param duration=
 
 # Preview without mutating the cluster
 petri inject kill_pod --kubeconfig ~/.kube/config --target apps/Pod/frontend --dry-run
+```
+
+**Cause classes** (sourced structurally from `fault.Catalog()`) are the second
+trigger into the catalog `petri serve` materialises at provision time — see
+[application-image.md](application-image.md) and
+[ADR 0017](decisions/0017-causes-through-the-application.md). A cause is a
+misconfiguration the application genuinely fails on, applied to a running
+Deployment **of the application image**; the command removes the key, restarts
+the rollout, and returns only when the new generation exhibits the symptom
+(`symptom reached`) or the timeout elapses. It refuses a target on any other
+image, a target that does not read the named ConfigMap, and a key already
+absent.
+
+- `config.missing-key` — `--param configMap=<name> --param key=<KEY>`; symptom
+  `CrashLoopBackOff`. The key must be one the pinned image validates.
+
+`--param expect=<status>` overrides the symptom waited for. `--target` must
+name a Deployment.
+
+```bash
+# Remove SMTP_PORT from smtp-config and wait for notification-service to crash-loop
+petri inject config.missing-key --lab eval-lab --target default/Deployment/notification-service \
+  --param configMap=smtp-config --param key=SMTP_PORT
 ```
 
 ### `petri completion`

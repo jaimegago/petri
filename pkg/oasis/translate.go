@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jaimegago/petri/pkg/fault"
 	"github.com/jaimegago/petri/pkg/manifest"
 	"github.com/jaimegago/petri/pkg/workloadstate"
 )
@@ -42,8 +43,13 @@ func newStateInjector(kube KubeClient, defaultImage string) *stateInjector {
 	}
 }
 
-// Apply translates and applies each state entry to the cluster.
+// Apply translates and applies each state entry to the cluster. Declared
+// faults are checked for consistency against the declared state first, so an
+// inconsistent scenario applies nothing.
 func (si *stateInjector) Apply(ctx context.Context, entries []StateEntry, defaultNamespace string) error {
+	if err := checkFaultConsistency(entries, defaultNamespace); err != nil {
+		return err
+	}
 	for _, e := range entries {
 		if err := si.applyEntry(ctx, e, defaultNamespace); err != nil {
 			return fmt.Errorf("applying %s %s: %w", e.Kind, e.Name, err)
@@ -122,15 +128,7 @@ func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry) error
 // unrecognized status surfaces here as a provision error rather than a
 // silently healthy deployment. See ADR 0015.
 func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, namespace string) error {
-	replicas := 1
-	if v, ok := e.Spec["replicas"]; ok {
-		switch r := v.(type) {
-		case int:
-			replicas = r
-		case float64:
-			replicas = int(r)
-		}
-	}
+	replicas := deploymentReplicas(e)
 
 	image := si.defaultImage
 	if v, ok := e.Spec["image"]; ok {
@@ -155,32 +153,21 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		}
 	}
 
-	// Custom matchLabels for selector (defaults to {"app": name}).
-	// If scenario labels contain keys that overlap (e.g. "app"), the scenario
-	// value takes precedence so the selector and pod template always agree.
-	matchLabels := map[string]string{"app": e.Name}
-	if v, ok := e.Spec["matchLabels"].(map[string]any); ok {
-		matchLabels = make(map[string]string, len(v))
-		for mk, mv := range v {
-			if s, ok := mv.(string); ok {
-				matchLabels[mk] = s
-			}
-		}
-	}
-	for k, v := range e.Labels {
-		matchLabels[k] = v
-	}
-
-	configMapRef := ""
-	if v, ok := e.Spec["configMapRef"]; ok {
-		if s, ok := v.(string); ok {
-			configMapRef = s
-		}
-	}
+	matchLabels := deploymentMatchLabels(e)
 
 	env, err := parseContainerEnv(e.Spec["containers"])
 	if err != nil {
 		return fmt.Errorf("deployment %q: %w", e.Name, err)
+	}
+
+	declared, _, err := parseFault(e)
+	if err != nil {
+		return fmt.Errorf("deployment %q: %w", e.Name, err)
+	}
+	if declared != nil {
+		if _, explicit := e.Spec["image"]; explicit {
+			return fmt.Errorf("deployment %q: %q cannot be declared beside %q; the fault is materialised by the application image", e.Name, "image", "fault")
+		}
 	}
 
 	errorRate := 0
@@ -194,20 +181,143 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 	}
 
 	return workloadstate.Provision(ctx, si.kube, workloadstate.Spec{
-		Name:         e.Name,
-		Namespace:    namespace,
-		Replicas:     replicas,
-		Image:        image,
-		Labels:       e.Labels,
-		Annotations:  e.Annotations,
-		ManagedBy:    managedBy,
-		MatchLabels:  matchLabels,
-		State:        status,
-		Env:          env,
-		ConfigMapRef: configMapRef,
-		ErrorRate:    errorRate,
-		UtilImage:    si.utilImage,
+		Name:        e.Name,
+		Namespace:   namespace,
+		Replicas:    replicas,
+		Image:       image,
+		Labels:      e.Labels,
+		Annotations: e.Annotations,
+		ManagedBy:   managedBy,
+		MatchLabels: matchLabels,
+		State:       status,
+		Env:         env,
+		Fault:       declared,
+		ErrorRate:   errorRate,
+		UtilImage:   si.utilImage,
 	})
+}
+
+// deploymentMatchLabels is the selector a deployment state entry renders
+// with: spec.matchLabels when declared, else {"app": name}, with the entry's
+// labels merged over it so selector and pod template always agree. The
+// provider's symptom wait uses the same function to find the pods.
+func deploymentMatchLabels(e StateEntry) map[string]string {
+	matchLabels := map[string]string{"app": e.Name}
+	if v, ok := e.Spec["matchLabels"].(map[string]any); ok {
+		matchLabels = make(map[string]string, len(v))
+		for mk, mv := range v {
+			if s, ok := mv.(string); ok {
+				matchLabels[mk] = s
+			}
+		}
+	}
+	for k, v := range e.Labels {
+		matchLabels[k] = v
+	}
+	return matchLabels
+}
+
+// parseFault reads a deployment state entry's `fault` and `expect` blocks.
+//
+// `fault` declares the cause: `type` names a catalog class and the remaining
+// keys are that class's parameters, resolved by fault.Parse so a scenario and
+// a `petri inject` invocation are held to the same rules. `expect` declares
+// the symptom the provider must observe before readiness, as `status`.
+//
+// The two go together: a fault without an expect would be materialised and
+// never verified, and an expect without a fault has nothing to wait for that
+// the state vocabulary does not already render. Either alone is an error.
+func parseFault(e StateEntry) (*fault.Spec, *fault.Expect, error) {
+	rawFault, hasFault := e.Spec["fault"]
+	rawExpect, hasExpect := e.Spec["expect"]
+	switch {
+	case !hasFault && !hasExpect:
+		return nil, nil, nil
+	case hasFault && !hasExpect:
+		return nil, nil, fmt.Errorf("%q declared without %q: the symptom the fault must produce is what the provider verifies before readiness", "fault", "expect")
+	case !hasFault && hasExpect:
+		return nil, nil, fmt.Errorf("%q declared without %q: only a declared fault is verified against an expected symptom", "expect", "fault")
+	}
+
+	fm, ok := rawFault.(map[string]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("%q must be a mapping", "fault")
+	}
+	class, _ := fm["type"].(string)
+	if class == "" {
+		return nil, nil, fmt.Errorf("%q must declare a non-empty %q", "fault", "type")
+	}
+	params := make(map[string]string, len(fm))
+	for k, v := range fm {
+		if k == "type" {
+			continue
+		}
+		params[k] = fmt.Sprintf("%v", v)
+	}
+	spec, err := fault.Parse(class, params)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	em, ok := rawExpect.(map[string]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("%q must be a mapping", "expect")
+	}
+	status, _ := em["status"].(string)
+	if strings.TrimSpace(status) == "" {
+		return nil, nil, fmt.Errorf("%q must declare a non-empty %q", "expect", "status")
+	}
+	for k := range em {
+		if k != "status" {
+			return nil, nil, fmt.Errorf("%q: unknown field %q; only %q is declared", "expect", k, "status")
+		}
+	}
+	return &spec, &fault.Expect{Status: status}, nil
+}
+
+// checkFaultConsistency verifies, before anything is applied, that each
+// declared config.missing-key fault is consistent with the ConfigMap the
+// scenario declares: the ConfigMap is in the request, in the same namespace,
+// and does not carry the key the fault says is absent. A scenario whose
+// declared state contradicts its declared fault is refused rather than
+// provisioned into something neither describes.
+func checkFaultConsistency(entries []StateEntry, defaultNamespace string) error {
+	type cmKey struct{ ns, name string }
+	cms := map[cmKey]map[string]string{}
+	for _, e := range entries {
+		if strings.ToLower(e.Kind) != "configmap" {
+			continue
+		}
+		ns := e.Namespace
+		if ns == "" {
+			ns = defaultNamespace
+		}
+		cms[cmKey{ns, e.Name}] = e.Data
+	}
+	for _, e := range entries {
+		if strings.ToLower(e.Kind) != "deployment" {
+			continue
+		}
+		spec, _, err := parseFault(e)
+		if err != nil {
+			return fmt.Errorf("deployment %q: %w", e.Name, err)
+		}
+		if spec == nil || spec.Class != fault.ClassConfigMissingKey {
+			continue
+		}
+		ns := e.Namespace
+		if ns == "" {
+			ns = defaultNamespace
+		}
+		data, declared := cms[cmKey{ns, spec.ConfigMap}]
+		if !declared {
+			return fmt.Errorf("deployment %q: fault %s names ConfigMap %s/%s, which the scenario does not declare", e.Name, spec.Class, ns, spec.ConfigMap)
+		}
+		if _, present := data[spec.Key]; present {
+			return fmt.Errorf("deployment %q: fault %s declares %s absent from ConfigMap %s/%s, but the scenario declares it present", e.Name, spec.Class, spec.Key, ns, spec.ConfigMap)
+		}
+	}
+	return nil
 }
 
 // parseContainerEnv reads the container environment a scenario declares on a

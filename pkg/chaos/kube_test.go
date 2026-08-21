@@ -3,6 +3,7 @@ package chaos
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -185,6 +186,23 @@ func TestCLIKubeClient_UpdateConfigMap(t *testing.T) {
 	}
 	if len(r.calls) == 0 || r.calls[0][0] != "patch" {
 		t.Errorf("expected patch call, got %v", r.calls)
+	}
+}
+
+func TestCLIKubeClient_DeleteConfigMapKey(t *testing.T) {
+	t.Parallel()
+
+	r := newFakeRunner(nil)
+	c := newKubeClientWithRunner(r)
+	if err := c.DeleteConfigMapKey(context.Background(), "ns", "cfg", "a/b"); err != nil {
+		t.Errorf("DeleteConfigMapKey() error: %v", err)
+	}
+	if len(r.calls) == 0 || r.calls[0][0] != "patch" {
+		t.Fatalf("expected patch call, got %v", r.calls)
+	}
+	got := strings.Join(r.calls[0], " ")
+	if !strings.Contains(got, "--type=json") || !strings.Contains(got, `"path":"/data/a~1b"`) {
+		t.Errorf("expected a JSON-patch remove with an escaped pointer, got %q", got)
 	}
 }
 

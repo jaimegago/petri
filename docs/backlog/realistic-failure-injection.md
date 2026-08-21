@@ -93,3 +93,16 @@ the strategic half and does not block that one.
 
 Raised by the maintainer on 2026-08-21 from the DA-1 result. Recorded in
 `joe-pm/threads/da1-capability-run.md`.
+
+## Slice 1 landed — 2026-08-21
+
+`joe-pm/queue/realistic-fixtures-phase.md` answered the open questions and
+ADR 0017 records the decisions: a petri-owned application (`images/svc`),
+faults as plausible misconfigurations selected by ordinary environment,
+`Pending` and `ImagePullBackOff` staying synthetic, and scenarios declaring a
+`fault` and an `expect` beside the state. `pkg/fault` is the catalog;
+`config.missing-key` is its first class, and DA-1 is materialised through the
+application with the symptom verified before readiness.
+
+This item stays open until slices 2–4 (DA-3, DA-2, DA-4) have landed their
+fault classes.

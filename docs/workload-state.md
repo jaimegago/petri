@@ -32,7 +32,7 @@ the rule for what each materialises and the mechanism it uses:
 | State | Materializes | Mechanism |
 |---|---|---|
 | `running` | a healthy Deployment whose pods reach Ready | container `app` on the spec image, exposing containerPort 80 |
-| `crashloopbackoff` | a pod stuck in CrashLoopBackOff | exit-1 loop on a small shell image (`sh -c "…; exit 1"`); or, when a ConfigMap reference is given, an env var that requires a missing key (`optional: false`) so the container cannot start |
+| `crashloopbackoff` | a pod stuck in CrashLoopBackOff | with a **`Fault`**: the application image (`docs/application-image.md`) with the declared env, misconfigured as the fault declares, failing its own startup validation; with declared env and no fault: the spec image with each ConfigMap reference required (`optional: false`) so the kubelet names an absent key; otherwise a symptom-only exit on the util image |
 | `oomkilled` | a container the kernel OOM-kills on start | a busy `dd` allocation under a `memory: 4Mi` limit |
 | `pending` | pods that never schedule, stuck Pending | an impossible `cpu: "100"` request → "Insufficient cpu" |
 | `degraded` | a partially-available Deployment | forces ≥2 replicas with a failing `/healthz` readiness probe so a subset of pods never become Ready |
@@ -51,15 +51,24 @@ null-routed by some networks).
 - `Name`, `Namespace` — Deployment identity.
 - `Replicas` — desired count (values < 1 become 1; `degraded` forces ≥ 2).
 - `Image` — container image for states that run a real workload (`running`,
-  `pending`, `degraded`, and the ConfigMap variant of `crashloopbackoff`).
+  `pending`, `degraded`, and the declared-env variant of `crashloopbackoff`).
   States that supply their own image (`oomkilled`, `error`, the exit-1 variant
-  of `crashloopbackoff`, `elevated_error_rate`) ignore it.
+  of `crashloopbackoff`, `elevated_error_rate`) ignore it, and so does a
+  `Fault`, which runs the application image.
 - `Labels`, `Annotations` — extra pod/template labels and Deployment
   annotations.
 - `ManagedBy` — when set, adds an `app.kubernetes.io/managed-by` annotation.
 - `MatchLabels` — selector; defaults to `{"app": Name}`.
 - `State` — the requested state as a raw string (see rules below).
-- `ConfigMapRef` — selects the ConfigMap-key variant of `crashloopbackoff`.
+- `Env` — the container environment as declared; rendered verbatim.
+- `Fault` — a `fault.Spec` from the cause catalog (`pkg/fault`). When set the
+  state is materialised through the application rather than a synthetic
+  container, ConfigMap references render `optional: true` so the absence
+  reaches the application, and the state must be the one the fault's class
+  produces. The caller verifies the declared symptom afterwards with
+  `fault.WaitForSymptom`; `Render` only materialises. See
+  [ADR 0017](decisions/0017-causes-through-the-application.md).
+- `AppImage` — override for the application image; defaults to `fault.AppImage`.
 - `ErrorRate` — 5xx percentage for `elevated_error_rate` (defaults to 50).
 - `UtilImage` — override for the shell image; defaults to
   `workloadstate.DefaultUtilImage`.
@@ -86,4 +95,18 @@ null-routed by some networks).
   the state is unrecognized.
 
 See [ADR 0015](decisions/0015-workload-state-capability.md) for why this was
-extracted into a Petri-core capability and the seam choices.
+extracted into a Petri-core capability and the seam choices, and
+[ADR 0017](decisions/0017-causes-through-the-application.md) for why a cause
+under diagnosis is materialised by the application rather than a stand-in.
+
+## Causes, not just symptoms
+
+A state names a symptom. When the *cause* of that symptom is what an agent is
+evaluated on diagnosing, the symptom alone is not enough — a container built
+to crash announces that it was built to crash. `pkg/fault` is the catalog of
+causes: a `Spec` names a misconfiguration (`config.missing-key` carries the
+ConfigMap and key) and the symptom it produces, and `Spec.Fault` hands it to
+this package, which renders the application born misconfigured. The runtime
+trigger, `petri inject <class>`, applies the same misconfiguration to a
+healthy running application. Both verify the symptom before reporting
+success.

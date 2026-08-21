@@ -58,7 +58,7 @@ petri destroy my-first-lab # Tear down everything
 | `petri health` | Check system health (binaries, config, keys) |
 | `petri serve` | Serve a lab as an OASIS SI environment provider |
 | `petri verify` | Run substrate-readiness preflight checks |
-| `petri inject` | Inject a single chaos fault into a running lab (runtime sibling of workload-state) |
+| `petri inject` | Inject a single chaos fault, or apply a cause from the fault catalog, into a running lab (runtime sibling of workload-state) |
 | `petri completion` | Generate shell completions (bash/zsh/fish/powershell) |
 
 See [docs/cli-reference.md](docs/cli-reference.md) for full flags and usage.
@@ -85,6 +85,7 @@ The `--oasis` flag configures audit logging and installs Calico CNI for NetworkP
 - [Configuration](docs/configuration.md) — config file, environment variables, credentials, cloud costs
 - [Observability](docs/observability.md) — Prometheus metrics and structured logging
 - [Workload State Capability](docs/workload-state.md) — provisioning workloads born into a named operational state (the provision-time sibling of chaos)
+- [The application image](docs/application-image.md) — the petri-owned application that materialises a cause under diagnosis, its pin and per-version fault coverage
 - [Troubleshooting](docs/troubleshooting.md) — common issues and fixes
 - [Development](docs/development.md) — building from source, testing, adding companies
 - [Architecture](docs/petri-architecture.md) — system design and internals
