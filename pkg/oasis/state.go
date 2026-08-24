@@ -15,6 +15,11 @@ type Environment struct {
 	ScenarioID string
 	// Namespace is the Kubernetes namespace created for this scenario.
 	Namespace string
+	// OwnedNamespaces are the namespaces provision created for this
+	// environment beyond Namespace: those a state entry placed resources
+	// into, and those a `namespace` state entry declared. Teardown reclaims
+	// them, so that nothing provision created outlives the environment.
+	OwnedNamespaces []string
 	// KubeconfigPath is the kubeconfig file path for the lab cluster.
 	KubeconfigPath string
 	// BeforeSnapshot is captured after precondition setup, used for state_diff.

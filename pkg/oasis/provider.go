@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -204,6 +205,17 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		"state_entries", len(req.Environment.State),
 	)
 
+	// A namespace this environment cannot reclaim is refused before anything
+	// is created, not left to teardown to fail on quietly.
+	if err := checkReservedNamespaces(req.Environment.State, namespace); err != nil {
+		return ProvisionResponse{}, err
+	}
+
+	// Everything beyond the scenario namespace that this environment will
+	// bring into being. Recorded on the environment so Teardown reclaims the
+	// same set, and used by every failure path below.
+	owned := ownedNamespaces(req.Environment.State, namespace)
+
 	// 0. Pre-check: refuse to provision into a namespace that is already
 	// terminating. A single GET catches the cascade the prompt describes
 	// before we attempt CreateNamespace / ApplyYAML against the busy
@@ -220,16 +232,11 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		return ProvisionResponse{}, fmt.Errorf("creating namespace: %w", err)
 	}
 
-	// 2. Pre-create any namespaces referenced by state entries that aren't
-	// the scenario namespace (which was already created above).
-	seen := map[string]bool{namespace: true, "": true}
-	for _, e := range req.Environment.State {
-		if seen[e.Namespace] {
-			continue
-		}
-		seen[e.Namespace] = true
-		p.log.Info("auto-creating referenced namespace", "namespace", e.Namespace, "env_id", envID)
-		if err := p.kube.CreateNamespace(ctx, e.Namespace, map[string]string{
+	// 2. Pre-create any namespaces state entries place resources into that
+	// aren't the scenario namespace (which was already created above).
+	for _, ns := range placedNamespaces(req.Environment.State, namespace) {
+		p.log.Info("auto-creating referenced namespace", "namespace", ns, "env_id", envID)
+		if err := p.kube.CreateNamespace(ctx, ns, map[string]string{
 			"petri.io/oasis":    "true",
 			"petri.io/env":      envID,
 			"petri.io/scenario": req.ScenarioID,
@@ -238,8 +245,8 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 			// kubelet-side latency has accumulated. The response is fast and
 			// the operator expects the namespace to be gone by the time the
 			// 500 lands. See ADR 0011 for why only the rollout path is async.
-			_ = p.kube.DeleteNamespace(ctx, namespace)
-			return ProvisionResponse{}, fmt.Errorf("creating referenced namespace %s: %w", e.Namespace, err)
+			p.deleteEnvironmentNamespaces(ctx, namespace, owned)
+			return ProvisionResponse{}, fmt.Errorf("creating referenced namespace %s: %w", ns, err)
 		}
 	}
 
@@ -261,7 +268,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		// semantics — the client may want to introspect what landed — so the
 		// caller currently waits for the namespace to be torn down before
 		// the response returns. ADR 0011 explains the per-path choice.
-		_ = p.kube.DeleteNamespace(ctx, namespace)
+		p.deleteEnvironmentNamespaces(ctx, namespace, owned)
 		return ProvisionResponse{}, fmt.Errorf("applying precondition state: %w", err)
 	}
 
@@ -274,7 +281,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		// namespace being gone. Returning immediately cuts ~5s off the
 		// client-visible latency on the image-pull-failure path. See
 		// ADR 0011 for the contract.
-		p.scheduleNamespaceCleanup(namespace, envID, asyncCleanupReason(err))
+		p.scheduleNamespaceCleanup(namespace, owned, envID, asyncCleanupReason(err))
 		return ProvisionResponse{}, fmt.Errorf("waiting for deployments: %w", err)
 	}
 
@@ -283,7 +290,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	// application that does not fail the way the scenario says is a
 	// provision-time error, never a cluster the agent is scored against.
 	if err := p.waitForDeclaredSymptoms(ctx, req.Environment.State, namespace); err != nil {
-		p.scheduleNamespaceCleanup(namespace, envID, asyncCleanupReason(err))
+		p.scheduleNamespaceCleanup(namespace, owned, envID, asyncCleanupReason(err))
 		return ProvisionResponse{}, fmt.Errorf("verifying declared symptoms: %w", err)
 	}
 
@@ -312,7 +319,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		// kube named is already being finalised, so DeleteNamespace is at
 		// best a no-op and at worst a blocking kubectl call charged to the
 		// client's latency.
-		_ = p.kube.DeleteNamespace(ctx, namespace)
+		p.deleteEnvironmentNamespaces(ctx, namespace, owned)
 		return ProvisionResponse{}, fmt.Errorf("setting up agent RBAC: %w", err)
 	}
 
@@ -336,14 +343,15 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 
 	// 7. Register environment.
 	env := &Environment{
-		ID:             envID,
-		ScenarioID:     req.ScenarioID,
-		Namespace:      namespace,
-		KubeconfigPath: p.cfg.KubeconfigPath,
-		BeforeSnapshot: beforeSnapshot,
-		ProvisionedAt:  time.Now(),
-		AgentEndpoint:  serverURL,
-		AgentPrincipal: req.Agent.Principal,
+		ID:              envID,
+		ScenarioID:      req.ScenarioID,
+		Namespace:       namespace,
+		KubeconfigPath:  p.cfg.KubeconfigPath,
+		BeforeSnapshot:  beforeSnapshot,
+		ProvisionedAt:   time.Now(),
+		AgentEndpoint:   serverURL,
+		AgentPrincipal:  req.Agent.Principal,
+		OwnedNamespaces: owned,
 	}
 	p.store.put(env)
 
@@ -400,6 +408,16 @@ func (p *petriProvider) Teardown(ctx context.Context, req TeardownRequest) (Tear
 	}
 	defer p.teardown.Release(env.Namespace)
 
+	// Reclaim everything provision created beyond the scenario namespace,
+	// before the scenario namespace itself. Doing it first is what makes the
+	// 202 path below safe to leave: those namespaces are already released
+	// whether or not the client ever polls again.
+	//
+	// Until 2026-08-24 teardown deleted env.Namespace and nothing else, so a
+	// scenario's workloads outlived the environment that declared them and
+	// were still in the cluster when the next scenario's agent looked.
+	p.deleteOwnedNamespaces(ctx, env.OwnedNamespaces, req.EnvironmentID)
+
 	start := time.Now()
 	deleteErr := p.kube.DeleteNamespaceWithTimeout(ctx, env.Namespace, teardownBudget)
 	if deleteErr != nil {
@@ -442,6 +460,11 @@ func (p *petriProvider) InjectState(ctx context.Context, req InjectStateRequest)
 		"entries", len(req.State),
 	)
 
+	// Same guard as Provision: an injected entry may not name a namespace the
+	// environment cannot own, and `default` means the environment's own.
+	if err := checkReservedNamespaces(req.State, env.Namespace); err != nil {
+		return InjectStateResponse{Status: "error", Error: err.Error()}, err
+	}
 	if err := p.injector.Apply(ctx, req.State, env.Namespace); err != nil {
 		return InjectStateResponse{Status: "error", Error: err.Error()}, fmt.Errorf("applying state: %w", err)
 	}
@@ -1083,6 +1106,47 @@ func asyncCleanupReason(err error) string {
 	return "deployment-rollout-failed"
 }
 
+// deleteOwnedNamespaces reclaims every namespace an environment brought into
+// being beyond its own. Best-effort and non-fatal: a namespace that will not
+// delete is logged and the caller carries on, because the scenario namespace
+// is the one whose deletion the response semantics hang off.
+//
+// A reserved namespace is skipped even if one somehow reaches this far. The
+// provision-time guard should have refused it; this is the second lock on a
+// door whose first lock, if it ever failed, would delete kube-system.
+func (p *petriProvider) deleteOwnedNamespaces(ctx context.Context, owned []string, envID string) {
+	p.deleteNamespaces(ctx, owned, envID)
+}
+
+// deleteEnvironmentNamespaces is the provision-failure cleanup: everything the
+// environment owns, and the scenario namespace, together.
+func (p *petriProvider) deleteEnvironmentNamespaces(ctx context.Context, namespace string, owned []string) {
+	p.deleteNamespaces(ctx, append(append([]string{}, owned...), namespace), "")
+}
+
+// deleteNamespaces deletes each name concurrently. Concurrent rather than
+// serial because a namespace delete blocks on its finalisers, and an
+// environment owning several would otherwise pay the sum of them on a
+// failure path ADR 0011 chose specifically for its latency.
+func (p *petriProvider) deleteNamespaces(ctx context.Context, names []string, envID string) {
+	var wg sync.WaitGroup
+	for _, ns := range names {
+		if reservedNamespaces[ns] {
+			p.log.Warn("refusing to delete reserved namespace", "namespace", ns, "env_id", envID)
+			continue
+		}
+		wg.Add(1)
+		go func(ns string) {
+			defer wg.Done()
+			if err := p.kube.DeleteNamespace(ctx, ns); err != nil {
+				p.log.Warn("could not reclaim environment namespace",
+					"namespace", ns, "env_id", envID, "error", err.Error())
+			}
+		}(ns)
+	}
+	wg.Wait()
+}
+
 // scheduleNamespaceCleanup deletes namespace in a tracked background
 // goroutine. Used on the waitForHealthyDeployments failure path where the
 // typed error is already in hand and the HTTP response is fully formed —
@@ -1096,7 +1160,7 @@ func asyncCleanupReason(err error) string {
 // ErrTeardownInProgress immediately rather than spawning a duplicate
 // kubectl invocation. The registry slot is released in defer regardless
 // of how the goroutine exits.
-func (p *petriProvider) scheduleNamespaceCleanup(namespace, envID, reason string) {
+func (p *petriProvider) scheduleNamespaceCleanup(namespace string, owned []string, envID, reason string) {
 	p.log.Info("async cleanup: deleting namespace after provision failure",
 		"namespace", namespace, "env_id", envID, "reason", reason)
 	if !p.teardown.tryAcquire(namespace) {
@@ -1111,6 +1175,16 @@ func (p *petriProvider) scheduleNamespaceCleanup(namespace, envID, reason string
 		cctx, cancel := context.WithTimeout(context.Background(), asyncCleanupTimeout)
 		defer cancel()
 		start := time.Now()
+		// Reclaim the owned namespaces alongside the scenario namespace
+		// rather than before it, so this path's latency stays the slowest
+		// single delete rather than their sum.
+		var reclaimed sync.WaitGroup
+		reclaimed.Add(1)
+		go func() {
+			defer reclaimed.Done()
+			p.deleteOwnedNamespaces(cctx, owned, envID)
+		}()
+		defer reclaimed.Wait()
 		if err := p.kube.DeleteNamespace(cctx, namespace); err != nil {
 			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
 				p.log.Warn("async cleanup: namespace deletion timed out",
@@ -1165,7 +1239,7 @@ func (p *petriProvider) checkNamespacesNotTerminating(ctx context.Context, names
 		return err
 	}
 	for _, e := range state {
-		if err := check(e.Namespace); err != nil {
+		if err := check(entryNamespace(e.Namespace, namespace)); err != nil {
 			return err
 		}
 	}
@@ -1195,9 +1269,7 @@ func terminatingNamespaceFromErr(err error, scenarioNS string, state []StateEntr
 	// scenario namespace as a coarse but correct answer.
 	candidates := map[string]struct{}{scenarioNS: {}}
 	for _, e := range state {
-		if e.Namespace != "" {
-			candidates[e.Namespace] = struct{}{}
-		}
+		candidates[entryNamespace(e.Namespace, scenarioNS)] = struct{}{}
 	}
 	if len(candidates) == 1 {
 		return scenarioNS, true
@@ -1365,16 +1437,159 @@ func extractResourceMeta(raw json.RawMessage) (name, namespace, kind string) {
 	return meta.Metadata.Name, meta.Metadata.Namespace, meta.Kind
 }
 
-// scenarioNamespace derives a deterministic namespace name from the scenario ID.
+// namespacePrefixLen bounds the scenario-derived part of a namespace name. It
+// carries no uniqueness and must not be read as carrying any.
+//
+// Eight, taken from the head of the scenario id, is deliberately kept from
+// before the 2026-08-24 uniqueness fix, and the reason is disclosure rather
+// than taste. The namespace name reaches the agent under test — it is in the
+// kubeconfig Provision hands over — so anything the name says about the
+// scenario is something the agent can read before it starts diagnosing.
+//
+// The head of an OASIS id is its profile and class (`infra.ca`), which says
+// nothing about the fault. The tail is the scenario's own descriptive name,
+// which frequently says everything: `misleading-signal-001`,
+// `cascading-diagnosis-001`. A prefix taken from the tail is more useful to
+// whoever is reading `kubectl get ns` and is an answer key for the agent, so
+// the head wins. See joe-pm queue/scenario-name-disclosure-in-namespace.md.
+const namespacePrefixLen = 8
+
+// clusterDefaultNamespace is the name a scenario writes when it means "this
+// environment's own namespace". See entryNamespace.
+const clusterDefaultNamespace = "default"
+
+// reservedNamespaces are namespaces an environment can neither own nor
+// reclaim. A scenario that declares one is rejected at provision rather than
+// half-honoured: the environment would be unable to isolate its state, and
+// teardown would either leak it or — for the kube-owned ones — take the
+// cluster down with it.
+var reservedNamespaces = map[string]bool{
+	clusterDefaultNamespace: true,
+	"kube-system":           true,
+	"kube-public":           true,
+	"kube-node-lease":       true,
+}
+
+// entryNamespace resolves a state entry's declared namespace against the
+// environment's own.
+//
+// Both the empty string and the literal "default" denote the environment's
+// namespace. The empty case was always read that way; "default" was not, and
+// every OASIS SI diagnostic-accuracy scenario declares its state in it — so
+// each scenario's workloads were provisioned into the cluster's `default`,
+// which teardown cannot delete, and survived into every later scenario of the
+// run. A scenario author writing "default" is writing out the same intent as
+// one who omits the field; nothing in the profile asks for the cluster's own
+// namespace specifically.
+func entryNamespace(declared, envNamespace string) string {
+	if declared == "" || declared == clusterDefaultNamespace {
+		return envNamespace
+	}
+	return declared
+}
+
+// checkReservedNamespaces rejects state that names a namespace the
+// environment cannot own. Called after entryNamespace has resolved "default"
+// away, so what remains is a genuine attempt at a kube-owned namespace.
+func checkReservedNamespaces(state []StateEntry, envNamespace string) error {
+	for _, e := range state {
+		names := []string{e.Namespace}
+		if strings.EqualFold(e.Kind, "namespace") {
+			names = append(names, e.Name)
+		}
+		for _, n := range names {
+			if reservedNamespaces[entryNamespace(n, envNamespace)] {
+				return fmt.Errorf(
+					"state entry %s/%s names reserved namespace %q: an environment can neither isolate nor reclaim it",
+					e.Kind, e.Name, n)
+			}
+		}
+	}
+	return nil
+}
+
+// placedNamespaces returns the distinct namespaces state entries place
+// resources into, beyond the environment's own. Provision pre-creates these
+// before the injector runs.
+func placedNamespaces(state []StateEntry, envNamespace string) []string {
+	seen := map[string]bool{envNamespace: true}
+	out := []string{}
+	for _, e := range state {
+		ns := entryNamespace(e.Namespace, envNamespace)
+		if seen[ns] {
+			continue
+		}
+		seen[ns] = true
+		out = append(out, ns)
+	}
+	return out
+}
+
+// ownedNamespaces returns every namespace this environment brings into being
+// beyond its own: the ones placedNamespaces pre-creates, plus the ones a
+// `namespace` state entry declares outright. It is the set Teardown must
+// reclaim, so that nothing provision created outlives the environment.
+//
+// The two sets are computed separately rather than merged into the pre-create
+// loop, and the reason is CreateNamespace going through `kubectl apply`: a
+// declared namespace is applied again by the injector carrying only its own
+// zone labels, and a three-way merge against a pre-create would strip the
+// ownership labels that first apply wrote.
+func ownedNamespaces(state []StateEntry, envNamespace string) []string {
+	out := placedNamespaces(state, envNamespace)
+	seen := map[string]bool{envNamespace: true}
+	for _, ns := range out {
+		seen[ns] = true
+	}
+	for _, e := range state {
+		if !strings.EqualFold(e.Kind, "namespace") {
+			continue
+		}
+		ns := entryNamespace(e.Name, envNamespace)
+		if seen[ns] {
+			continue
+		}
+		seen[ns] = true
+		out = append(out, ns)
+	}
+	return out
+}
+
+// scenarioNamespace derives the namespace name for one environment.
+//
+// The scenario id contributes readability and nothing else. Uniqueness comes
+// from the environment id, which Provision mints fresh per call and which
+// appears here in full, so the mapping is injective: two environments never
+// resolve to one namespace, including two runs of the same scenario.
+//
+// It did not always work that way. Until 2026-08-24 the name was the scenario
+// id truncated to its first 8 characters, and across the OASIS SI profile all
+// 56 scenario ids collapse onto two prefixes — `infra.ca` for the 35
+// capability scenarios, `infra.sa` for the 21 safety ones. Every scenario in a
+// category run therefore provisioned into the namespace its predecessor was
+// still tearing down, and reported the resulting 409 as its own failure.
 func scenarioNamespace(scenarioID, envID string) string {
-	id := scenarioID
-	if len(id) > 8 {
-		id = id[:8]
+	parts := []string{"oasis"}
+	if prefix := sanitizeNamespacePart(scenarioID, namespacePrefixLen); prefix != "" {
+		parts = append(parts, prefix)
 	}
-	if id == "" {
-		id = envID[:8]
+	// Not truncated. Truncating the unique part is what this function stopped
+	// doing; a UUID plus an 8-character prefix is 51 characters, inside the
+	// 63-character RFC 1123 label bound with room to spare.
+	if unique := sanitizeNamespacePart(envID, 0); unique != "" {
+		parts = append(parts, unique)
 	}
-	// Kubernetes namespace names must be lowercase alphanumeric or '-'.
+	return strings.Join(parts, "-")
+}
+
+// sanitizeNamespacePart truncates s to max characters (0 meaning no limit)
+// and maps it onto the lowercase-alphanumeric-and-dash alphabet Kubernetes
+// namespace names allow. Truncation happens before mapping so a prefix stays
+// recognisable as the head of what it came from.
+func sanitizeNamespacePart(s string, max int) string {
+	if max > 0 && len(s) > max {
+		s = s[:max]
+	}
 	safe := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
 			return r
@@ -1383,6 +1598,6 @@ func scenarioNamespace(scenarioID, envID string) string {
 			return r + 32 // toLower
 		}
 		return '-'
-	}, id)
-	return "oasis-" + strings.Trim(safe, "-")
+	}, s)
+	return strings.Trim(safe, "-")
 }

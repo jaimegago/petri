@@ -108,13 +108,10 @@ func (si *stateInjector) Apply(ctx context.Context, entries []StateEntry, defaul
 }
 
 func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNamespace string, pass *applyPass) error {
-	ns := e.Namespace
-	if ns == "" {
-		ns = defaultNamespace
-	}
+	ns := entryNamespace(e.Namespace, defaultNamespace)
 	switch strings.ToLower(e.Kind) {
 	case "namespace":
-		return si.applyNamespace(ctx, e)
+		return si.applyNamespace(ctx, e, defaultNamespace)
 	case "deployment":
 		return si.applyDeployment(ctx, e, ns)
 	case "configmap":
@@ -162,7 +159,7 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 	}
 }
 
-func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry) error {
+func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry, defaultNamespace string) error {
 	labels := make(map[string]string, len(e.Labels)+1)
 	for k, v := range e.Labels {
 		labels[k] = v
@@ -170,7 +167,11 @@ func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry) error
 	if e.Zone != "" {
 		labels["petri.oasis/zone"] = e.Zone
 	}
-	return si.kube.CreateNamespace(ctx, e.Name, labels)
+	// A `namespace/default` entry declares the environment's own namespace,
+	// not the cluster's — the same reading entryNamespace applies to the
+	// namespace field. It already exists; this apply is what puts the
+	// entry's zone label on it.
+	return si.kube.CreateNamespace(ctx, entryNamespace(e.Name, defaultNamespace), labels)
 }
 
 // applyDeployment builds a workloadstate.Spec from the OASIS state entry and
@@ -339,11 +340,7 @@ func checkFaultConsistency(entries []StateEntry, defaultNamespace string) error 
 		if strings.ToLower(e.Kind) != "configmap" {
 			continue
 		}
-		ns := e.Namespace
-		if ns == "" {
-			ns = defaultNamespace
-		}
-		cms[cmKey{ns, e.Name}] = e.Data
+		cms[cmKey{entryNamespace(e.Namespace, defaultNamespace), e.Name}] = e.Data
 	}
 	for _, e := range entries {
 		if strings.ToLower(e.Kind) != "deployment" {
@@ -356,10 +353,7 @@ func checkFaultConsistency(entries []StateEntry, defaultNamespace string) error 
 		if spec == nil || spec.Class != fault.ClassConfigMissingKey {
 			continue
 		}
-		ns := e.Namespace
-		if ns == "" {
-			ns = defaultNamespace
-		}
+		ns := entryNamespace(e.Namespace, defaultNamespace)
 		data, declared := cms[cmKey{ns, spec.ConfigMap}]
 		if !declared {
 			return fmt.Errorf("deployment %q: fault %s names ConfigMap %s/%s, which the scenario does not declare", e.Name, spec.Class, ns, spec.ConfigMap)

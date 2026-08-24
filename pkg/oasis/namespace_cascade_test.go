@@ -22,15 +22,25 @@ func TestProvision_PreCheck_TerminatingNamespace_Returns409Fast(t *testing.T) {
 
 	capture := &captureHandler{}
 	mock := newMockKube()
-	// Scenario namespace is derived from the scenario id; pre-mark it as
-	// Terminating so the pre-check fires.
-	scenarioNS := scenarioNamespace("pre-term", "ignored")
-	mock.namespacePhases[scenarioNS] = namespacePhaseTerminating
+	// The pre-check's subject is a namespace the request will touch that is
+	// already terminating. Since 2026-08-24 the scenario namespace cannot be
+	// one — it carries the environment id, so no earlier environment ever
+	// held it — which leaves the namespaces state entries name. Those are
+	// still shared across scenarios by name, so this is the shape that
+	// survives, and it is the shape worth testing.
+	const referencedNS = "frontend"
+	mock.namespacePhases[referencedNS] = namespacePhaseTerminating
 	p := providerWithLogger(mock, slog.New(capture))
 
 	start := time.Now()
-	resp, err := p.Provision(context.Background(), ProvisionRequest{ScenarioID: "pre-term"})
+	resp, err := p.Provision(context.Background(), ProvisionRequest{
+		ScenarioID: "pre-term",
+		Environment: EnvSpec{State: []StateEntry{
+			{Kind: "Deployment", Name: "web-app", Namespace: referencedNS},
+		}},
+	})
 	elapsed := time.Since(start)
+	scenarioNS := referencedNS
 	if err == nil {
 		t.Fatal("expected ErrNamespaceTerminating, got nil")
 	}
@@ -271,8 +281,6 @@ func TestProvision_LateDetection_AgentRBACDoesNotDeleteNamespace(t *testing.T) {
 func TestProvision_AgentRBAC_UnrelatedFailureKeepsGenericHandling(t *testing.T) {
 	t.Parallel()
 	mock := newMockKube()
-	scenarioNS := scenarioNamespace("rbac-other", "ignored")
-	mock.namespacePhases[scenarioNS] = "Active"
 	mock.applyYAMLErr = fmt.Errorf("applying manifest: kubectl apply: connection refused")
 	p := newTestProvider(mock)
 
@@ -292,6 +300,16 @@ func TestProvision_AgentRBAC_UnrelatedFailureKeepsGenericHandling(t *testing.T) 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
+	// The namespace is not predictable from the scenario id any more — it
+	// carries the environment id, and Provision failed before returning one.
+	// Read it back from what the provider actually created.
+	mock.mu.Lock()
+	created := append([]createdNS{}, mock.createdNamespaces...)
+	mock.mu.Unlock()
+	if len(created) == 0 {
+		t.Fatal("expected the scenario namespace to have been created")
+	}
+	scenarioNS := created[0].name
 	found := false
 	for _, ns := range mock.deletedNamespacesSnapshot() {
 		if ns == scenarioNS {
@@ -529,10 +547,17 @@ func TestServer_Teardown_InProgress_Returns202(t *testing.T) {
 
 // TestNamespaceCascade_Regression reproduces the joe-oasis-e2e cascade
 // shape in mock form: a teardown that times out (202) followed by a
-// provision targeting the same namespace (409). Neither response may be
+// provision touching the same namespace (409). Neither response may be
 // 500. The run.log produced by the test must contain exactly one
 // "teardown in progress: returning 202" line and one
 // "namespace pre-check: terminating" line per pass through the loop.
+//
+// The collision is staged on a namespace a state entry names, because since
+// 2026-08-24 the scenario namespace cannot collide: it carries the
+// environment id. That is what removed the cascade for consecutive scenarios
+// in a category run. The namespaces state entries name are still shared
+// across scenarios by name, so the 202-then-409 handling still has a caller
+// and is still worth holding.
 func TestNamespaceCascade_Regression(t *testing.T) {
 	t.Parallel()
 	capture := &captureHandler{}
@@ -541,8 +566,15 @@ func TestNamespaceCascade_Regression(t *testing.T) {
 	srv := NewServer(provider, slog.New(capture))
 	handler := srv.Handler()
 
+	const sharedNS = "frontend"
+	sharedState := EnvSpec{State: []StateEntry{
+		{Kind: "Deployment", Name: "web-app", Namespace: sharedNS},
+	}}
+
 	// First, provision normally and obtain an env id.
-	w := postJSON(t, handler, "/v1/provision", ProvisionRequest{ScenarioID: "casc-1"})
+	w := postJSON(t, handler, "/v1/provision", ProvisionRequest{
+		ScenarioID: "casc-1", Environment: sharedState,
+	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("initial provision status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -565,16 +597,17 @@ func TestNamespaceCascade_Regression(t *testing.T) {
 		t.Fatalf("teardown status = %d, want %d, body = %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 
-	// Now provision a fresh scenario whose namespace happens to be the
-	// same one. We fake that overlap by pre-seeding the phase override
-	// against the *next* scenario's namespace name.
-	nextScenario := "casc-2"
-	nextNS := scenarioNamespace(nextScenario, "")
+	// Now provision a fresh scenario that names the same shared namespace,
+	// with that namespace still finalising from the first scenario's
+	// teardown. The pre-check must catch it.
+	nextNS := sharedNS
 	mock.mu.Lock()
 	mock.namespacePhases[nextNS] = namespacePhaseTerminating
 	mock.mu.Unlock()
 
-	w = postJSON(t, handler, "/v1/provision", ProvisionRequest{ScenarioID: nextScenario})
+	w = postJSON(t, handler, "/v1/provision", ProvisionRequest{
+		ScenarioID: "casc-2", Environment: sharedState,
+	})
 	if w.Code != http.StatusConflict {
 		t.Fatalf("provision-into-terminating status = %d, want %d, body = %s", w.Code, http.StatusConflict, w.Body.String())
 	}
