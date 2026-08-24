@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jaimegago/petri/pkg/fault"
 	"github.com/jaimegago/petri/pkg/manifest"
@@ -43,6 +45,49 @@ func newStateInjector(kube KubeClient, defaultImage string) *stateInjector {
 	}
 }
 
+// applyPass carries per-Apply state that spans entries: the declared-node →
+// real-node bindings, and the usage-fact series those bindings label. Both are
+// computed before any entry is applied because entry order is the scenario's,
+// not petri's — C-DA-003 declares the pod that references node-1 before the
+// node entry itself.
+type applyPass struct {
+	// nodeBindings maps declared node names to real lab node names.
+	nodeBindings map[string]string
+	// nodeUsageSeries is every usage fact routed to the served metrics
+	// surface (node cpu_usage, pod cpu_usage), under the bound identity.
+	nodeUsageSeries []metricSeries
+	// hasMetricsEntry records whether the scenario declares any metrics
+	// entry; the usage series fold into those mocks when it does, and get a
+	// standalone mock when it does not, so the facts are always served.
+	hasMetricsEntry bool
+	// now anchors every served timestamp for this Apply.
+	now time.Time
+}
+
+func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, defaultNamespace string) (*applyPass, error) {
+	bindings, err := bindDeclaredNodes(ctx, kube, entries)
+	if err != nil {
+		return nil, err
+	}
+	series, err := collectNodeUsageSeries(entries, bindings, defaultNamespace)
+	if err != nil {
+		return nil, err
+	}
+	hasMetrics := false
+	for _, e := range entries {
+		if strings.ToLower(e.Kind) == "metrics" {
+			hasMetrics = true
+			break
+		}
+	}
+	return &applyPass{
+		nodeBindings:    bindings,
+		nodeUsageSeries: series,
+		hasMetricsEntry: hasMetrics,
+		now:             time.Now(),
+	}, nil
+}
+
 // Apply translates and applies each state entry to the cluster. Declared
 // faults are checked for consistency against the declared state first, so an
 // inconsistent scenario applies nothing.
@@ -50,15 +95,19 @@ func (si *stateInjector) Apply(ctx context.Context, entries []StateEntry, defaul
 	if err := checkFaultConsistency(entries, defaultNamespace); err != nil {
 		return err
 	}
+	pass, err := newApplyPass(ctx, si.kube, entries, defaultNamespace)
+	if err != nil {
+		return err
+	}
 	for _, e := range entries {
-		if err := si.applyEntry(ctx, e, defaultNamespace); err != nil {
+		if err := si.applyEntry(ctx, e, defaultNamespace, pass); err != nil {
 			return fmt.Errorf("applying %s %s: %w", e.Kind, e.Name, err)
 		}
 	}
-	return nil
+	return si.applyNodeUsageMock(ctx, pass, defaultNamespace)
 }
 
-func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNamespace string) error {
+func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNamespace string, pass *applyPass) error {
 	ns := e.Namespace
 	if ns == "" {
 		ns = defaultNamespace
@@ -85,13 +134,15 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 	case "pvc", "persistentvolumeclaim":
 		return si.applyPVC(ctx, e, ns)
 	case "pod":
-		return si.applyPod(ctx, e, ns)
+		return si.applyPod(ctx, e, ns, pass)
+	case "node":
+		return si.applyNode(ctx, e, pass)
 	case "dashboard":
 		return si.applyDashboard(ctx, e, ns)
 	case "gitops-application":
 		return si.applyGitOpsApplication(ctx, e, ns)
 	case "metrics":
-		return si.applyMetrics(ctx, e, ns)
+		return si.applyMetrics(ctx, e, ns, pass)
 	case "traces":
 		return si.applyTraces(ctx, e, ns)
 	case "alert":
@@ -485,8 +536,26 @@ func (si *stateInjector) applyPVC(ctx context.Context, e StateEntry, namespace s
 	return si.kube.ApplyYAML(ctx, manifest)
 }
 
-func (si *stateInjector) applyPod(ctx context.Context, e StateEntry, namespace string) error {
-	manifest := buildPodManifest(e.Name, namespace, e.Spec, e.Labels, si.defaultImage)
+// applyPod renders a pod state entry. A declared `node` reference is resolved
+// through the pass's bindings so the pod is genuinely scheduled onto the bound
+// real node — its nodeName then agrees with the served metrics' node label,
+// and the declared (scenario-internal) node name never reaches the cluster. A
+// reference to a node the scenario does not declare is a loud error: the
+// binding is the only thing that keeps the channels consistent.
+func (si *stateInjector) applyPod(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
+	nodeName := ""
+	if v, ok := e.Spec["node"]; ok {
+		ref, ok := v.(string)
+		if !ok || ref == "" {
+			return fmt.Errorf("pod %q: %q must be a non-empty string", e.Name, "node")
+		}
+		bound, ok := pass.nodeBindings[ref]
+		if !ok {
+			return fmt.Errorf("pod %q declares node %q, which the scenario does not declare as a node state entry", e.Name, ref)
+		}
+		nodeName = bound
+	}
+	manifest := buildPodManifest(e.Name, namespace, e.Spec, e.Labels, si.defaultImage, nodeName)
 	return si.kube.ApplyYAML(ctx, manifest)
 }
 
@@ -770,7 +839,7 @@ func buildPVCManifest(name, namespace string, spec map[string]any, labels map[st
 
 // ── Pod manifest builder ─────────────────────────────────────────────────────
 
-func buildPodManifest(name, namespace string, spec map[string]any, labels map[string]string, defaultImage string) string {
+func buildPodManifest(name, namespace string, spec map[string]any, labels map[string]string, defaultImage, nodeName string) string {
 	image := defaultImage
 	if image == "" {
 		image = defaultOASISImage
@@ -786,7 +855,11 @@ func buildPodManifest(name, namespace string, spec map[string]any, labels map[st
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	sb.WriteString("  labels:\n")
 	sb.WriteString(manifest.LabelsToYAML(podLabels, 4))
-	sb.WriteString("\nspec:\n  containers:\n  - name: app\n")
+	sb.WriteString("\nspec:\n")
+	if nodeName != "" {
+		fmt.Fprintf(&sb, "  nodeName: %s\n", nodeName)
+	}
+	sb.WriteString("  containers:\n  - name: app\n")
 	fmt.Fprintf(&sb, "    image: %s\n", image)
 
 	// Support env vars from secrets (secretKeyRef).
@@ -897,22 +970,54 @@ func buildDashboardJSON(name string, spec map[string]any) string {
 // applyMetrics deploys a mock Prometheus API server that returns canned metric
 // values specified in the state entry. The agent queries this mock at
 // /api/v1/query and /api/v1/query_range.
-func (si *stateInjector) applyMetrics(ctx context.Context, e StateEntry, namespace string) error {
-	responses := buildMetricsResponses(e.Name, e.Spec)
-	configMap := buildMockServerConfigMap("mock-prometheus-"+e.Name, namespace, "responses.json", responses, map[string]string{
+//
+// The scenario's node-surface usage series (node cpu_usage, pod cpu_usage)
+// are folded into every metrics mock so the misleading signal and the truth
+// are readable from one endpoint — the agent's Prometheus channel is a single
+// configured URL, and facts split across two services would leave one set
+// unreachable.
+func (si *stateInjector) applyMetrics(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
+	responses, err := buildMetricsResponses(e.Name, namespace, e.Spec, pass.nodeUsageSeries, pass.now)
+	if err != nil {
+		return err
+	}
+	return si.applyPrometheusMock(ctx, e.Name, namespace, responses)
+}
+
+// applyNodeUsageMock serves the node-surface usage series when the scenario
+// declares no metrics entry to fold them into. Every declared usage fact must
+// be genuinely observable through the served metrics surface; a scenario with
+// node facts and no metrics entry would otherwise declare values nothing
+// serves. The name is fixed and scenario-neutral — it must not carry a
+// declared node name, which is scenario-internal and never leaks.
+func (si *stateInjector) applyNodeUsageMock(ctx context.Context, pass *applyPass, namespace string) error {
+	if len(pass.nodeUsageSeries) == 0 || pass.hasMetricsEntry {
+		return nil
+	}
+	responses, err := renderPromResponses(pass.nodeUsageSeries, pass.now)
+	if err != nil {
+		return err
+	}
+	return si.applyPrometheusMock(ctx, "node-usage", namespace, responses)
+}
+
+// applyPrometheusMock deploys one mock Prometheus (ConfigMap, pod, Service)
+// named mock-prometheus-<name>, serving the given responses.json.
+func (si *stateInjector) applyPrometheusMock(ctx context.Context, name, namespace, responses string) error {
+	configMap := buildMockServerConfigMap("mock-prometheus-"+name, namespace, "responses.json", responses, map[string]string{
 		"petri.io/mock":    "prometheus",
 		"petri.io/metrics": "true",
 	})
-	pod := buildMockServerPod("mock-prometheus-"+e.Name, namespace, "mock-prometheus-"+e.Name, 9090, mockPrometheusScript(), map[string]string{
-		"app": "mock-prometheus-" + e.Name,
+	pod := buildMockServerPod("mock-prometheus-"+name, namespace, "mock-prometheus-"+name, 9090, mockPrometheusScript(), map[string]string{
+		"app": "mock-prometheus-" + name,
 	})
-	svc := buildServiceManifest("mock-prometheus-"+e.Name, namespace, 9090, 9090, map[string]string{
+	svc := buildServiceManifest("mock-prometheus-"+name, namespace, 9090, 9090, map[string]string{
 		"petri.io/mock": "prometheus",
 	})
 
 	for _, m := range []string{configMap, pod, svc} {
 		if err := si.kube.ApplyYAML(ctx, m); err != nil {
-			return fmt.Errorf("applying metrics mock for %s: %w", e.Name, err)
+			return fmt.Errorf("applying metrics mock for %s: %w", name, err)
 		}
 	}
 	return nil
@@ -1187,31 +1292,105 @@ http.server.HTTPServer(("",9093),H).serve_forever()`
 
 // ── Mock response data builders ─────────────────────────────────────────────
 
-func buildMetricsResponses(name string, spec map[string]any) string {
-	// Build a Prometheus-format instant query response from spec fields.
-	// Spec can contain metric_name, value, and labels.
-	metricName := name
-	if v, ok := spec["metric_name"].(string); ok && v != "" {
-		metricName = v
-	}
-	value := "0"
-	if v, ok := spec["value"].(string); ok {
-		value = v
-	} else if v, ok := spec["value"].(float64); ok {
-		value = fmt.Sprintf("%g", v)
-	}
+// buildMetricsResponses builds the mock Prometheus responses for a metrics
+// state entry. Two declaration styles are recognised:
+//
+//   - The legacy single-series form: metric_name, value, labels.
+//   - C-DA-003's fact form: memory_usage_trend (served as a rising
+//     container-memory range series ending near the 4Mi limit the genuine OOM
+//     machinery enforces, so the served trend and the physical OOM agree) and
+//     last_oom_kill ("<N>_<unit>_ago", served as a timestamp-seconds series).
+//
+// Other spec fields pass through unserved, as they always have; extending
+// that tolerance is not this builder's call. The extra series (node-surface
+// usage facts) are appended so one endpoint serves the whole declared world.
+func buildMetricsResponses(name, namespace string, spec map[string]any, extra []metricSeries, now time.Time) (string, error) {
+	var series []metricSeries
 
-	metricLabels := map[string]string{"__name__": metricName}
-	if ls, ok := spec["labels"].(map[string]any); ok {
-		for k, v := range ls {
-			if s, ok := v.(string); ok {
-				metricLabels[k] = s
+	_, hasMetricName := spec["metric_name"]
+	_, hasValue := spec["value"]
+	_, hasTrend := spec["memory_usage_trend"]
+	_, hasOOM := spec["last_oom_kill"]
+
+	if hasMetricName || hasValue || (!hasTrend && !hasOOM) {
+		metricName := name
+		if v, ok := spec["metric_name"].(string); ok && v != "" {
+			metricName = v
+		}
+		value := "0"
+		if v, ok := spec["value"].(string); ok {
+			value = v
+		} else if v, ok := spec["value"].(float64); ok {
+			value = formatFloat(v)
+		}
+		metricLabels := map[string]string{"__name__": metricName}
+		if ls, ok := spec["labels"].(map[string]any); ok {
+			for k, v := range ls {
+				if s, ok := v.(string); ok {
+					metricLabels[k] = s
+				}
 			}
 		}
+		series = append(series, metricSeries{labels: metricLabels, value: value})
 	}
 
-	labelsJSON, _ := json.Marshal(metricLabels)
-	return fmt.Sprintf(`{"query":{"status":"success","data":{"resultType":"vector","result":[{"metric":%s,"value":[1700000000,"%s"]}]}}}`, string(labelsJSON), value)
+	if hasTrend {
+		trend, ok := spec["memory_usage_trend"].(string)
+		if !ok || trend != "monotonically_increasing" {
+			return "", fmt.Errorf("metrics %q: unsupported %s %v; the implemented trend is %q", name, "memory_usage_trend", spec["memory_usage_trend"], "monotonically_increasing")
+		}
+		series = append(series, memoryTrendSeries(name, namespace, now))
+	}
+
+	if hasOOM {
+		raw, ok := spec["last_oom_kill"].(string)
+		if !ok {
+			return "", fmt.Errorf("metrics %q: %s must be a string like %q", name, "last_oom_kill", "2_minutes_ago")
+		}
+		at, err := parseAgoTimestamp("last_oom_kill", raw, now)
+		if err != nil {
+			return "", fmt.Errorf("metrics %q: %w", name, err)
+		}
+		series = append(series, metricSeries{
+			labels: map[string]string{
+				"__name__":  "last_oom_kill_timestamp_seconds",
+				"namespace": namespace,
+				"service":   name,
+			},
+			value: strconv.FormatInt(at.Unix(), 10),
+		})
+	}
+
+	series = append(series, extra...)
+	return renderPromResponses(series, now)
+}
+
+// memoryTrendSeries renders memory_usage_trend: monotonically_increasing as a
+// container-memory series rising over the last 30 minutes toward the 4Mi
+// limit the genuine-OOM machinery runs its workloads under, so the served
+// trend is consistent with the physically real OOM kills.
+func memoryTrendSeries(name, namespace string, now time.Time) metricSeries {
+	const (
+		points     = 7
+		step       = 5 * time.Minute
+		startBytes = 1 << 20 // 1Mi
+		endBytes   = 4 << 20 // the 4Mi OOM limit
+	)
+	samples := make([]metricSample, 0, points)
+	for i := 0; i < points; i++ {
+		at := now.Add(-time.Duration(points-1-i) * step)
+		value := startBytes + (endBytes-startBytes)*i/(points-1)
+		samples = append(samples, metricSample{at: at, value: strconv.Itoa(value)})
+	}
+	return metricSeries{
+		labels: map[string]string{
+			"__name__":  "container_memory_working_set_bytes",
+			"namespace": namespace,
+			"service":   name,
+		},
+		value:        samples[len(samples)-1].value,
+		rangeSamples: samples,
+	}
 }
 
 func buildTracesResponses(name string, spec map[string]any) string {

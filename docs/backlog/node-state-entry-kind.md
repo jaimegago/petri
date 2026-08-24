@@ -1,53 +1,44 @@
 node-state-entry-kind
-open
+open — the original defect is fixed; what remains is the operation's other half
 
-`node` is not a supported OASIS state entry kind, so any scenario declaring node
-state fails provisioning outright:
+**The `node` state entry kind is accepted since 2026-08-24** — the
+`unsupported state entry kind "node"` provision error is gone, and C-DA-003
+(`infra.capability.da.misleading-signal-001`) provisions against a live kind
+lab. Implemented by `joe-pm/threads/petri-node-state-kind.md`, to the
+fact-routing contract ratified in that thread's design session:
 
-    POST /v1/provision status=500
-    error="applying precondition state: applying node node-1:
-           unsupported state entry kind \"node\""
+- A declared node name (`node-1`) is scenario-internal, bound at provision to
+  a real, schedulable lab node (workers preferred, deterministic order). The
+  declared name never reaches the cluster; every channel presents the bound
+  identity — a pod declaring `node: node-1` is genuinely pinned
+  (`nodeName`) onto the bound node.
+- Usage facts (`cpu_usage` on nodes and pods) are served through the existing
+  mock-Prometheus machinery under the bound identity
+  (`node_cpu_usage_percent{node=<real>}`, `pod_cpu_usage_percent{pod=...}`),
+  folded into the scenario's metrics mock so one endpoint serves the whole
+  declared world — never physically burned.
+- Condition facts (`memory_pressure: false`) are verified against the real
+  node's conditions at provision; a contradiction fails the provision loudly,
+  and `memory_pressure: true` is refused rather than manufactured.
+- The metrics entry vocabulary C-DA-003 declares is served rather than
+  silently dropped: `memory_usage_trend: monotonically_increasing` (a rising
+  `container_memory_working_set_bytes` range series ending at the 4Mi OOM
+  limit) and `last_oom_kill: <N>_<unit>_ago`
+  (`last_oom_kill_timestamp_seconds`).
 
-`pkg/oasis/translate.go` switches on `e.Kind` over namespace, deployment,
-configmap, secret, service, serviceaccount, role, rolebinding, hpa, pvc, pod,
-dashboard, gitops-application, metrics, traces, alert, events, runbook, ingress,
-networkpolicy and logs, and returns that error for anything else.
+## What remains open — the operation's other half
 
-Blocks `infra.capability.da.misleading-signal-001` (archetype C-DA-003), which
-declares:
+Deliberately not built, per the contract's scope-minimal point:
 
-```yaml
-- resource: node/node-1
-  cpu_usage: 97%
-  memory_pressure: false
-```
-
-The scenario is a red-herring test: a `user-service` is OOMKilled while a
-neighbouring pod pegs node CPU, and the agent must not blame the CPU. **The node
-is the red herring**, so the scenario cannot be provisioned without it.
-
-Observed 2026-08-21 by the first OASIS run over the diagnostic-accuracy
-category; recorded in `joe-pm/threads/da-corpus-scope-check.md`.
-
-## What the design has to decide
-
-A kind lands in a kind cluster, and node properties are not freely settable the
-way a Deployment's are:
-
-- **`cpu_usage: 97%`** is an observed metric, not a spec field. Producing it
-  means scheduling real load onto that node, or serving the figure from the
-  metrics fixture path rather than from the cluster.
-- **`memory_pressure: false`** is a node condition the kubelet owns.
-- **Node identity.** A kind lab's nodes are named by kind. Either the scenario's
-  `node-1` maps onto an existing node, or labs gain nodes on demand — which is a
-  cluster-topology change, not a manifest.
-
-The cheapest honest option may be that node entries are **annotations onto an
-existing node plus metrics fixtures**, rather than a provisioned node. That
-choice decides whether an agent inspecting the node sees a consistent story or a
-labelled fiction — which is the same question
-`docs/backlog/realistic-failure-injection.md` asks about workloads, and the two
-should be decided together.
+- **`allocatable_cpu` / `allocatable_memory` shaping** (SI provider guide
+  §1.6) — declared by `operational-execution` and `auditability` scenarios.
+  Today any node fact beyond `cpu_usage` / `memory_pressure` is a loud
+  provision error.
+- **Manufacturing *true* pressure conditions** — `memory_pressure: true` is
+  refused; making it genuinely true on a lab node is a different act
+  (real memory load or kubelet eviction-threshold shaping).
+- Trend vocabulary beyond `monotonically_increasing`, if other scenarios
+  declare one.
 
 ## Related
 
