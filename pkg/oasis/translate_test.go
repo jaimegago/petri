@@ -1127,7 +1127,7 @@ func TestStateInjector_Apply(t *testing.T) {
 			t.Parallel()
 			mock := newMockKube()
 			si := newStateInjector(mock, defaultOASISImage)
-			err := si.Apply(context.Background(), tt.entries, tt.defaultNS)
+			err := si.Apply(context.Background(), resolveEnvironment(tt.entries, AgentScope{}, tt.defaultNS))
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Apply() error = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -1195,7 +1195,7 @@ func TestStateInjector_DefaultImage(t *testing.T) {
 			t.Parallel()
 			mock := newMockKube()
 			si := newStateInjector(mock, tt.defaultImage)
-			if err := si.Apply(context.Background(), []StateEntry{tt.entry}, "ns"); err != nil {
+			if err := si.Apply(context.Background(), resolveEnvironment([]StateEntry{tt.entry}, AgentScope{}, "ns")); err != nil {
 				t.Fatalf("Apply() error: %v", err)
 			}
 			if len(mock.appliedManifests) == 0 {
@@ -1231,7 +1231,7 @@ func TestStateInjector_UtilImageNotDockerHub(t *testing.T) {
 			t.Parallel()
 			mock := newMockKube()
 			si := newStateInjector(mock, defaultOASISImage)
-			if err := si.Apply(context.Background(), []StateEntry{tc.entry}, "ns"); err != nil {
+			if err := si.Apply(context.Background(), resolveEnvironment([]StateEntry{tc.entry}, AgentScope{}, "ns")); err != nil {
 				t.Fatalf("Apply() error: %v", err)
 			}
 			if len(mock.appliedManifests) == 0 {

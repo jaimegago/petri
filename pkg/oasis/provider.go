@@ -198,6 +198,12 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	envID := uuid.New().String()
 	namespace := scenarioNamespace(req.ScenarioID, envID)
 
+	// The parse boundary. Every namespace token this request declares is
+	// resolved here and nowhere else, so nothing below can read one. The
+	// resolution is reported to the caller in the response, because the
+	// caller declared the tokens and cannot otherwise learn what they became.
+	env := resolveEnvironment(req.Environment.State, req.Agent.Scope, namespace)
+
 	p.log.Info("provisioning OASIS environment",
 		"env_id", envID,
 		"scenario_id", req.ScenarioID,
@@ -207,20 +213,20 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 
 	// A namespace this environment cannot reclaim is refused before anything
 	// is created, not left to teardown to fail on quietly.
-	if err := checkReservedNamespaces(req.Environment.State, namespace); err != nil {
+	if err := checkReservedNamespaces(env); err != nil {
 		return ProvisionResponse{}, err
 	}
 
 	// Everything beyond the scenario namespace that this environment will
 	// bring into being. Recorded on the environment so Teardown reclaims the
 	// same set, and used by every failure path below.
-	owned := ownedNamespaces(req.Environment.State, namespace)
+	owned := ownedNamespaces(env)
 
 	// 0. Pre-check: refuse to provision into a namespace that is already
 	// terminating. A single GET catches the cascade the prompt describes
 	// before we attempt CreateNamespace / ApplyYAML against the busy
 	// finaliser. Part 1 of ADR 0014.
-	if err := p.checkNamespacesNotTerminating(ctx, namespace, req.Environment.State); err != nil {
+	if err := p.checkNamespacesNotTerminating(ctx, env); err != nil {
 		return ProvisionResponse{}, err
 	}
 
@@ -234,7 +240,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 
 	// 2. Pre-create any namespaces state entries place resources into that
 	// aren't the scenario namespace (which was already created above).
-	for _, ns := range placedNamespaces(req.Environment.State, namespace) {
+	for _, ns := range placedNamespaces(env) {
 		p.log.Info("auto-creating referenced namespace", "namespace", ns, "env_id", envID)
 		if err := p.kube.CreateNamespace(ctx, ns, map[string]string{
 			"petri.io/oasis":    "true",
@@ -251,13 +257,13 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	}
 
 	// 3. Apply all precondition state entries.
-	if err := p.injector.Apply(ctx, req.Environment.State, namespace); err != nil {
+	if err := p.injector.Apply(ctx, env); err != nil {
 		// Late-detection path: kubectl's stderr "because it is being
 		// terminated" is converted to *ErrNamespaceTerminating so the
 		// HTTP layer returns 409 instead of 500. The conflict came from
 		// kube; we don't try to clean up the doomed namespace ourselves.
 		// Part 2 of ADR 0014.
-		if termNS, ok := terminatingNamespaceFromErr(err, namespace, req.Environment.State); ok {
+		if termNS, ok := terminatingNamespaceFromErr(err, env); ok {
 			p.log.Warn("namespace late-detected as terminating during apply",
 				"namespace", termNS,
 				"env_id", envID,
@@ -275,7 +281,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	// 3b. Wait for deployments with explicit status=running to finish rolling
 	// out. All other statuses and deployments without a status field are
 	// skipped — they represent intentionally unhealthy states.
-	if err := p.waitForHealthyDeployments(ctx, req.Environment.State, namespace); err != nil {
+	if err := p.waitForHealthyDeployments(ctx, env); err != nil {
 		// Async cleanup: the typed error from waitForHealthyDeployments is
 		// fully populated; the response body does not depend on the
 		// namespace being gone. Returning immediately cuts ~5s off the
@@ -289,13 +295,13 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	// they declare. The environment is not handed over without it: an
 	// application that does not fail the way the scenario says is a
 	// provision-time error, never a cluster the agent is scored against.
-	if err := p.waitForDeclaredSymptoms(ctx, req.Environment.State, namespace); err != nil {
+	if err := p.waitForDeclaredSymptoms(ctx, env); err != nil {
 		p.scheduleNamespaceCleanup(namespace, owned, envID, asyncCleanupReason(err))
 		return ProvisionResponse{}, fmt.Errorf("verifying declared symptoms: %w", err)
 	}
 
 	// 4. Setup RBAC for the agent.
-	if err := p.setupAgentRBAC(ctx, namespace, req.Agent.Scope); err != nil {
+	if err := p.setupAgentRBAC(ctx, env); err != nil {
 		// Late-detection path, exactly as in step 3: the agent's
 		// ServiceAccount / Role / RoleBinding reach kube through the same
 		// kubectl apply, but later — after the pre-check and after the
@@ -305,7 +311,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		// caller was told 500 (unrecoverable) about a condition kube
 		// clears in seconds. Part 2 of ADR 0014 applied to the second
 		// apply site.
-		if termNS, ok := terminatingNamespaceFromErr(err, namespace, req.Environment.State); ok {
+		if termNS, ok := terminatingNamespaceFromErr(err, env); ok {
 			p.log.Warn("namespace late-detected as terminating during agent RBAC setup",
 				"namespace", termNS,
 				"env_id", envID,
@@ -341,19 +347,21 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		beforeSnapshot = StateSnapshotResponse{EnvironmentID: envID, Timestamp: time.Now()}
 	}
 
-	// 7. Register environment.
-	env := &Environment{
-		ID:              envID,
-		ScenarioID:      req.ScenarioID,
-		Namespace:       namespace,
-		KubeconfigPath:  p.cfg.KubeconfigPath,
-		BeforeSnapshot:  beforeSnapshot,
-		ProvisionedAt:   time.Now(),
-		AgentEndpoint:   serverURL,
-		AgentPrincipal:  req.Agent.Principal,
-		OwnedNamespaces: owned,
+	// 7. Register environment. ResolvedNamespaces is carried so that a later
+	// InjectState answers a declared token the same way provision did.
+	record := &Environment{
+		ID:                 envID,
+		ScenarioID:         req.ScenarioID,
+		Namespace:          namespace,
+		KubeconfigPath:     p.cfg.KubeconfigPath,
+		BeforeSnapshot:     beforeSnapshot,
+		ProvisionedAt:      time.Now(),
+		AgentEndpoint:      serverURL,
+		AgentPrincipal:     req.Agent.Principal,
+		OwnedNamespaces:    owned,
+		ResolvedNamespaces: env.Resolution,
 	}
-	p.store.put(env)
+	p.store.put(record)
 
 	return ProvisionResponse{
 		EnvironmentID: envID,
@@ -364,7 +372,8 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 			Token:      token,
 			Namespace:  namespace,
 		},
-		Status: "ready",
+		Status:             "ready",
+		ResolvedNamespaces: env.Resolution,
 	}, nil
 }
 
@@ -460,12 +469,19 @@ func (p *petriProvider) InjectState(ctx context.Context, req InjectStateRequest)
 		"entries", len(req.State),
 	)
 
+	// The second parse boundary. Injected state arrives declaring tokens
+	// exactly as provision's did, so it is resolved here before anything
+	// consumes it — otherwise an injected entry declaring `default` would
+	// land in the cluster's own namespace while provision's landed in the
+	// environment's.
+	injected := resolveEnvironment(req.State, AgentScope{}, env.Namespace)
+
 	// Same guard as Provision: an injected entry may not name a namespace the
-	// environment cannot own, and `default` means the environment's own.
-	if err := checkReservedNamespaces(req.State, env.Namespace); err != nil {
+	// environment cannot own.
+	if err := checkReservedNamespaces(injected); err != nil {
 		return InjectStateResponse{Status: "error", Error: err.Error()}, err
 	}
-	if err := p.injector.Apply(ctx, req.State, env.Namespace); err != nil {
+	if err := p.injector.Apply(ctx, injected); err != nil {
 		return InjectStateResponse{Status: "error", Error: err.Error()}, fmt.Errorf("applying state: %w", err)
 	}
 	return InjectStateResponse{Status: "applied"}, nil
@@ -926,7 +942,7 @@ func (p *petriProvider) observeStateDiff(ctx context.Context, env *Environment, 
 // (CrashLoopBackOff, ImagePullBackOff, Pending, OOMKilled, Error, Degraded,
 // etc.) and deployments with no status field are skipped — they represent
 // intentionally unhealthy states that would always time out.
-func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries []StateEntry, namespace string) error {
+func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, env resolvedEnv) error {
 	pullTimeout := p.cfg.ImagePullTimeout
 	if pullTimeout <= 0 {
 		pullTimeout = defaultImagePullTimeout
@@ -938,7 +954,7 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 	}
 	var pending []pendingDeploy
 
-	for _, e := range entries {
+	for _, e := range env.State {
 		if strings.ToLower(e.Kind) != "deployment" {
 			continue
 		}
@@ -951,11 +967,12 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 		if !ok || strings.ToLower(s) != "running" {
 			continue
 		}
-		ns := e.Namespace
-		if ns == "" {
-			ns = namespace
-		}
-		pending = append(pending, pendingDeploy{name: e.Name, namespace: ns})
+		// e.Namespace is resolved; resolveEnvironment is the only place that
+		// reads a declared token. This site used to resolve the empty string
+		// for itself and leave "default" alone, so a scenario declaring its
+		// deployments in "default" waited out the full rollout budget on a
+		// namespace provision had never used.
+		pending = append(pending, pendingDeploy{name: e.Name, namespace: e.Namespace})
 	}
 
 	if len(pending) == 0 {
@@ -1001,7 +1018,7 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, entries [
 // expected symptom. The budget is the image pull budget plus the rollout
 // budget: the application image must be pulled before it can fail. Waits run
 // concurrently with first-failure-wins semantics, as the healthy rollouts do.
-func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, entries []StateEntry, namespace string) error {
+func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, env resolvedEnv) error {
 	pullTimeout := p.cfg.ImagePullTimeout
 	if pullTimeout <= 0 {
 		pullTimeout = defaultImagePullTimeout
@@ -1015,7 +1032,7 @@ func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, entries []S
 		expect          fault.Expect
 	}
 	var pending []declared
-	for _, e := range entries {
+	for _, e := range env.State {
 		if strings.ToLower(e.Kind) != "deployment" {
 			continue
 		}
@@ -1028,12 +1045,9 @@ func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, entries []S
 		if spec == nil {
 			continue
 		}
-		ns := e.Namespace
-		if ns == "" {
-			ns = namespace
-		}
+		// Resolved upstream, as in waitForHealthyDeployments above.
 		pending = append(pending, declared{
-			name: e.Name, namespace: ns,
+			name: e.Name, namespace: e.Namespace,
 			selector: deploymentMatchLabels(e),
 			replicas: deploymentReplicas(e),
 			expect:   *expect,
@@ -1213,7 +1227,7 @@ func (p *petriProvider) scheduleNamespaceCleanup(namespace string, owned []strin
 // If any of them is in Terminating phase, return *ErrNamespaceTerminating
 // before the apply loop starts. A 404 (empty phase) is normal — Provision
 // will create the namespace.
-func (p *petriProvider) checkNamespacesNotTerminating(ctx context.Context, namespace string, state []StateEntry) error {
+func (p *petriProvider) checkNamespacesNotTerminating(ctx context.Context, env resolvedEnv) error {
 	seen := map[string]bool{}
 	check := func(ns string) error {
 		if ns == "" || seen[ns] {
@@ -1235,11 +1249,11 @@ func (p *petriProvider) checkNamespacesNotTerminating(ctx context.Context, names
 		}
 		return nil
 	}
-	if err := check(namespace); err != nil {
+	if err := check(env.Namespace); err != nil {
 		return err
 	}
-	for _, e := range state {
-		if err := check(entryNamespace(e.Namespace, namespace)); err != nil {
+	for _, e := range env.State {
+		if err := check(e.Namespace); err != nil {
 			return err
 		}
 	}
@@ -1253,7 +1267,7 @@ func (p *petriProvider) checkNamespacesNotTerminating(ctx context.Context, names
 // kubectl message itself (preferred) and falls back to scenarioNS for the
 // rare case kubectl elides the name. Returns ("", false) when the error
 // does not match this shape.
-func terminatingNamespaceFromErr(err error, scenarioNS string, state []StateEntry) (string, bool) {
+func terminatingNamespaceFromErr(err error, env resolvedEnv) (string, bool) {
 	if err == nil {
 		return "", false
 	}
@@ -1267,14 +1281,14 @@ func terminatingNamespaceFromErr(err error, scenarioNS string, state []StateEntr
 	// Fall back to the request's distinct namespaces. If exactly one is
 	// referenced, attribute the failure to it; otherwise return the
 	// scenario namespace as a coarse but correct answer.
-	candidates := map[string]struct{}{scenarioNS: {}}
-	for _, e := range state {
-		candidates[entryNamespace(e.Namespace, scenarioNS)] = struct{}{}
+	candidates := map[string]struct{}{env.Namespace: {}}
+	for _, e := range env.State {
+		candidates[e.Namespace] = struct{}{}
 	}
 	if len(candidates) == 1 {
-		return scenarioNS, true
+		return env.Namespace, true
 	}
-	return scenarioNS, true
+	return env.Namespace, true
 }
 
 // extractTerminatingNamespace pulls the namespace name out of kubectl's
@@ -1296,8 +1310,8 @@ func extractTerminatingNamespace(msg string) string {
 	return strings.TrimSpace(rest[:end])
 }
 
-func (p *petriProvider) setupAgentRBAC(ctx context.Context, namespace string, scope AgentScope) error {
-	for _, manifest := range buildAgentRBACManifests(namespace, scope) {
+func (p *petriProvider) setupAgentRBAC(ctx context.Context, env resolvedEnv) error {
+	for _, manifest := range buildAgentRBACManifests(env) {
 		if err := p.kube.ApplyYAML(ctx, manifest); err != nil {
 			return err
 		}
@@ -1488,17 +1502,96 @@ func entryNamespace(declared, envNamespace string) string {
 	return declared
 }
 
+// resolvedEnv is an environment whose declared namespace tokens have all been
+// resolved. It exists so that "an unresolved namespace token never crosses a
+// boundary" is a property of the type rather than a convention each consumer
+// remembers.
+//
+// Before it, resolution was entryNamespace applied by every consumer for
+// itself. Ten call sites applied it and three did not, and the three were not
+// discoverable from the ten: the two provision waiters watched the literal
+// "default" and timed out on deployments that were never there, and the agent
+// RBAC builder wrote the agent's Role and RoleBinding into the cluster's own
+// `default` namespace — granting the agent a namespace the scenario never
+// provisioned, and leaking two objects teardown cannot reclaim, `default`
+// being a namespace kube does not permit deleting.
+//
+// Construct one with resolveEnvironment. Every helper that consumes a declared
+// namespace takes this type rather than ([]StateEntry, string), so handing one
+// unresolved state is a compile error rather than a silent misprovision.
+type resolvedEnv struct {
+	// Namespace is the environment's own namespace.
+	Namespace string
+	// State is the declared state, with every namespace token resolved.
+	State []StateEntry
+	// Scope is the agent scope, with every namespace token resolved.
+	Scope AgentScope
+	// Resolution maps each declared namespace token to what it resolved to.
+	// Reported to the caller in ProvisionResponse, because the caller
+	// declares tokens and cannot otherwise learn what they became.
+	Resolution map[string]string
+}
+
+// resolveEnvironment resolves every namespace token an environment declares
+// against the environment's own namespace, once, at the earliest point that
+// knows it.
+//
+// Three kinds of token are declared and all three resolve here: a state
+// entry's `namespace`, a `namespace`-kind entry's `name`, and each entry of
+// the agent's `scope.namespaces`. The first two were already resolved by most
+// of their consumers; the third was resolved by none.
+//
+// An omitted namespace resolves the same way but is not recorded in
+// Resolution: nothing declared it, so there is no token to report an answer
+// for.
+func resolveEnvironment(state []StateEntry, scope AgentScope, envNamespace string) resolvedEnv {
+	resolution := make(map[string]string)
+	resolve := func(declared string) string {
+		actual := entryNamespace(declared, envNamespace)
+		if declared != "" {
+			resolution[declared] = actual
+		}
+		return actual
+	}
+
+	resolvedState := make([]StateEntry, len(state))
+	for i, e := range state {
+		resolvedState[i] = e
+		resolvedState[i].Namespace = resolve(e.Namespace)
+		if strings.EqualFold(e.Kind, "namespace") {
+			resolvedState[i].Name = resolve(e.Name)
+		}
+	}
+
+	resolvedScope := scope
+	if len(scope.Namespaces) > 0 {
+		namespaces := make([]string, len(scope.Namespaces))
+		for i, declared := range scope.Namespaces {
+			namespaces[i] = resolve(declared)
+		}
+		resolvedScope.Namespaces = namespaces
+	}
+
+	return resolvedEnv{
+		Namespace:  envNamespace,
+		State:      resolvedState,
+		Scope:      resolvedScope,
+		Resolution: resolution,
+	}
+}
+
 // checkReservedNamespaces rejects state that names a namespace the
-// environment cannot own. Called after entryNamespace has resolved "default"
-// away, so what remains is a genuine attempt at a kube-owned namespace.
-func checkReservedNamespaces(state []StateEntry, envNamespace string) error {
-	for _, e := range state {
+// environment cannot own. Takes a resolvedEnv because "default" must already
+// have resolved away by the time this runs; what it sees is a genuine attempt
+// at a kube-owned namespace.
+func checkReservedNamespaces(env resolvedEnv) error {
+	for _, e := range env.State {
 		names := []string{e.Namespace}
 		if strings.EqualFold(e.Kind, "namespace") {
 			names = append(names, e.Name)
 		}
 		for _, n := range names {
-			if reservedNamespaces[entryNamespace(n, envNamespace)] {
+			if reservedNamespaces[n] {
 				return fmt.Errorf(
 					"state entry %s/%s names reserved namespace %q: an environment can neither isolate nor reclaim it",
 					e.Kind, e.Name, n)
@@ -1511,11 +1604,11 @@ func checkReservedNamespaces(state []StateEntry, envNamespace string) error {
 // placedNamespaces returns the distinct namespaces state entries place
 // resources into, beyond the environment's own. Provision pre-creates these
 // before the injector runs.
-func placedNamespaces(state []StateEntry, envNamespace string) []string {
-	seen := map[string]bool{envNamespace: true}
+func placedNamespaces(env resolvedEnv) []string {
+	seen := map[string]bool{env.Namespace: true}
 	out := []string{}
-	for _, e := range state {
-		ns := entryNamespace(e.Namespace, envNamespace)
+	for _, e := range env.State {
+		ns := e.Namespace
 		if seen[ns] {
 			continue
 		}
@@ -1535,17 +1628,17 @@ func placedNamespaces(state []StateEntry, envNamespace string) []string {
 // declared namespace is applied again by the injector carrying only its own
 // zone labels, and a three-way merge against a pre-create would strip the
 // ownership labels that first apply wrote.
-func ownedNamespaces(state []StateEntry, envNamespace string) []string {
-	out := placedNamespaces(state, envNamespace)
-	seen := map[string]bool{envNamespace: true}
+func ownedNamespaces(env resolvedEnv) []string {
+	out := placedNamespaces(env)
+	seen := map[string]bool{env.Namespace: true}
 	for _, ns := range out {
 		seen[ns] = true
 	}
-	for _, e := range state {
+	for _, e := range env.State {
 		if !strings.EqualFold(e.Kind, "namespace") {
 			continue
 		}
-		ns := entryNamespace(e.Name, envNamespace)
+		ns := e.Name
 		if seen[ns] {
 			continue
 		}

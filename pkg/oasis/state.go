@@ -28,6 +28,12 @@ type Environment struct {
 	ProvisionedAt time.Time
 	// AgentEndpoint is the Kubernetes API server URL.
 	AgentEndpoint string
+	// ResolvedNamespaces maps each namespace token the scenario declared to
+	// the namespace provision resolved it to. Held so that a later
+	// InjectState answers a declared token the same way provision did, and
+	// so the answer the caller was given stays inspectable for the life of
+	// the environment.
+	ResolvedNamespaces map[string]string
 	// AgentPrincipal is the identity the agent authenticates as, as declared by
 	// the caller in AgentSpec.Principal. Carried into every audit_log
 	// observation so the evaluator can tell the agent's entries from the rest of

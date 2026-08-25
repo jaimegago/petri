@@ -74,6 +74,23 @@ type ProvisionResponse struct {
 	AgentCredentials AgentCredentials `json:"agent_credentials"`
 	Status           string           `json:"status"`
 	Error            string           `json:"error,omitempty"`
+
+	// ResolvedNamespaces maps each namespace token the scenario declared to
+	// the namespace it was actually provisioned into. It is reported because
+	// the caller declares tokens and the provider resolves them, so nothing
+	// outside this process can otherwise tell what a declared name became.
+	//
+	// A caller scopes the agent, and judges the agent, against the values in
+	// here — never against what the scenario declared. Reading the declared
+	// token is what told an agent to look in `default` while its workloads
+	// were provisioned into the environment's own namespace.
+	//
+	// It is a map rather than a list because different tokens resolve by
+	// different rules: `default` denotes the environment's own namespace,
+	// and every other token currently maps to itself. A map keeps each
+	// token's answer addressable, so the rule for the others can change
+	// without changing the shape of this field.
+	ResolvedNamespaces map[string]string `json:"resolved_namespaces,omitempty"`
 }
 
 // AgentCredentials contains the credentials the agent uses to access the environment.

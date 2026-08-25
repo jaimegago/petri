@@ -72,7 +72,7 @@ func TestStateInjector_NodeKind_CDA003(t *testing.T) {
 	mock.resources["node//lab-worker"] = nodeJSON("False")
 
 	si := newStateInjector(mock, defaultOASISImage)
-	if err := si.Apply(context.Background(), cda003Entries(), "oasis-test"); err != nil {
+	if err := si.Apply(context.Background(), resolveEnvironment(cda003Entries(), AgentScope{}, "oasis-test")); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestStateInjector_NodeKind_Errors(t *testing.T) {
 				mock.resources["node//lab-worker"] = tt.nodeObj
 			}
 			si := newStateInjector(mock, defaultOASISImage)
-			err := si.Apply(context.Background(), tt.entries, "oasis-test")
+			err := si.Apply(context.Background(), resolveEnvironment(tt.entries, AgentScope{}, "oasis-test"))
 			if err == nil {
 				t.Fatalf("Apply() expected error containing %q, got nil", tt.wantErr)
 			}
@@ -243,7 +243,7 @@ func TestStateInjector_NodeKind_StandaloneUsageMock(t *testing.T) {
 	entries := []StateEntry{
 		{Kind: "node", Name: "node-1", Spec: map[string]any{"cpu_usage": "97%", "memory_pressure": false}},
 	}
-	if err := si.Apply(context.Background(), entries, "oasis-test"); err != nil {
+	if err := si.Apply(context.Background(), resolveEnvironment(entries, AgentScope{}, "oasis-test")); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	all := strings.Join(mock.appliedManifests, "\n---\n")

@@ -91,24 +91,24 @@ func TestParseFault(t *testing.T) {
 
 func TestCheckFaultConsistency(t *testing.T) {
 	t.Parallel()
-	if err := checkFaultConsistency(da1Entries(""), "scenario-ns"); err != nil {
+	if err := checkFaultConsistency(resolveEnvironment(da1Entries(""), AgentScope{}, "scenario-ns").State); err != nil {
 		t.Fatalf("consistent scenario rejected: %v", err)
 	}
 
 	present := da1Entries("")
 	present[0].Data = map[string]string{"SMTP_HOST": "smtp.internal", "SMTP_PORT": "587"}
-	if err := checkFaultConsistency(present, "scenario-ns"); err == nil || !strings.Contains(err.Error(), "declares it present") {
+	if err := checkFaultConsistency(resolveEnvironment(present, AgentScope{}, "scenario-ns").State); err == nil || !strings.Contains(err.Error(), "declares it present") {
 		t.Fatalf("want present-key error, got %v", err)
 	}
 
 	missing := da1Entries("")[1:]
-	if err := checkFaultConsistency(missing, "scenario-ns"); err == nil || !strings.Contains(err.Error(), "does not declare") {
+	if err := checkFaultConsistency(resolveEnvironment(missing, AgentScope{}, "scenario-ns").State); err == nil || !strings.Contains(err.Error(), "does not declare") {
 		t.Fatalf("want undeclared-configmap error, got %v", err)
 	}
 
 	elsewhere := da1Entries("")
 	elsewhere[0].Namespace = "other"
-	if err := checkFaultConsistency(elsewhere, "scenario-ns"); err == nil || !strings.Contains(err.Error(), "does not declare") {
+	if err := checkFaultConsistency(resolveEnvironment(elsewhere, AgentScope{}, "scenario-ns").State); err == nil || !strings.Contains(err.Error(), "does not declare") {
 		t.Fatalf("want namespace-mismatch error, got %v", err)
 	}
 }
@@ -118,7 +118,7 @@ func TestStateInjector_FaultRejectsExplicitImage(t *testing.T) {
 	entries := da1Entries("")
 	entries[1].Spec["image"] = "registry.k8s.io/nginx-slim:0.27"
 	mock := &mockKubeClient{}
-	err := newStateInjector(mock, "").Apply(context.Background(), entries, "ns")
+	err := newStateInjector(mock, "").Apply(context.Background(), resolveEnvironment(entries, AgentScope{}, "ns"))
 	if err == nil || !strings.Contains(err.Error(), `"image" cannot be declared beside "fault"`) {
 		t.Fatalf("want image-beside-fault error, got %v", err)
 	}
@@ -132,7 +132,7 @@ func TestStateInjector_InconsistentFaultAppliesNothing(t *testing.T) {
 	entries := da1Entries("")
 	entries[0].Data["SMTP_PORT"] = "587"
 	mock := &mockKubeClient{}
-	if err := newStateInjector(mock, "").Apply(context.Background(), entries, "ns"); err == nil {
+	if err := newStateInjector(mock, "").Apply(context.Background(), resolveEnvironment(entries, AgentScope{}, "ns")); err == nil {
 		t.Fatal("expected consistency error")
 	}
 	if len(mock.appliedManifests) != 0 {

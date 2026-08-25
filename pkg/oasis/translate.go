@@ -91,27 +91,29 @@ func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, de
 // Apply translates and applies each state entry to the cluster. Declared
 // faults are checked for consistency against the declared state first, so an
 // inconsistent scenario applies nothing.
-func (si *stateInjector) Apply(ctx context.Context, entries []StateEntry, defaultNamespace string) error {
-	if err := checkFaultConsistency(entries, defaultNamespace); err != nil {
+// Apply takes a resolvedEnv rather than (entries, namespace) because every
+// namespace it writes into must already be resolved. See resolvedEnv.
+func (si *stateInjector) Apply(ctx context.Context, env resolvedEnv) error {
+	if err := checkFaultConsistency(env.State); err != nil {
 		return err
 	}
-	pass, err := newApplyPass(ctx, si.kube, entries, defaultNamespace)
+	pass, err := newApplyPass(ctx, si.kube, env.State, env.Namespace)
 	if err != nil {
 		return err
 	}
-	for _, e := range entries {
-		if err := si.applyEntry(ctx, e, defaultNamespace, pass); err != nil {
+	for _, e := range env.State {
+		if err := si.applyEntry(ctx, e, env.Namespace, pass); err != nil {
 			return fmt.Errorf("applying %s %s: %w", e.Kind, e.Name, err)
 		}
 	}
-	return si.applyNodeUsageMock(ctx, pass, defaultNamespace)
+	return si.applyNodeUsageMock(ctx, pass, env.Namespace)
 }
 
 func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNamespace string, pass *applyPass) error {
-	ns := entryNamespace(e.Namespace, defaultNamespace)
+	ns := e.Namespace
 	switch strings.ToLower(e.Kind) {
 	case "namespace":
-		return si.applyNamespace(ctx, e, defaultNamespace)
+		return si.applyNamespace(ctx, e)
 	case "deployment":
 		return si.applyDeployment(ctx, e, ns)
 	case "configmap":
@@ -159,7 +161,7 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 	}
 }
 
-func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry, defaultNamespace string) error {
+func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry) error {
 	labels := make(map[string]string, len(e.Labels)+1)
 	for k, v := range e.Labels {
 		labels[k] = v
@@ -167,11 +169,10 @@ func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry, defau
 	if e.Zone != "" {
 		labels["petri.oasis/zone"] = e.Zone
 	}
-	// A `namespace/default` entry declares the environment's own namespace,
-	// not the cluster's — the same reading entryNamespace applies to the
-	// namespace field. It already exists; this apply is what puts the
-	// entry's zone label on it.
-	return si.kube.CreateNamespace(ctx, entryNamespace(e.Name, defaultNamespace), labels)
+	// e.Name is resolved: a `namespace/default` entry declares the
+	// environment's own namespace, not the cluster's. It already exists;
+	// this apply is what puts the entry's zone label on it.
+	return si.kube.CreateNamespace(ctx, e.Name, labels)
 }
 
 // applyDeployment builds a workloadstate.Spec from the OASIS state entry and
@@ -333,14 +334,14 @@ func parseFault(e StateEntry) (*fault.Spec, *fault.Expect, error) {
 // and does not carry the key the fault says is absent. A scenario whose
 // declared state contradicts its declared fault is refused rather than
 // provisioned into something neither describes.
-func checkFaultConsistency(entries []StateEntry, defaultNamespace string) error {
+func checkFaultConsistency(entries []StateEntry) error {
 	type cmKey struct{ ns, name string }
 	cms := map[cmKey]map[string]string{}
 	for _, e := range entries {
 		if strings.ToLower(e.Kind) != "configmap" {
 			continue
 		}
-		cms[cmKey{entryNamespace(e.Namespace, defaultNamespace), e.Name}] = e.Data
+		cms[cmKey{e.Namespace, e.Name}] = e.Data
 	}
 	for _, e := range entries {
 		if strings.ToLower(e.Kind) != "deployment" {
@@ -353,7 +354,7 @@ func checkFaultConsistency(entries []StateEntry, defaultNamespace string) error 
 		if spec == nil || spec.Class != fault.ClassConfigMissingKey {
 			continue
 		}
-		ns := entryNamespace(e.Namespace, defaultNamespace)
+		ns := e.Namespace
 		data, declared := cms[cmKey{ns, spec.ConfigMap}]
 		if !declared {
 			return fmt.Errorf("deployment %q: fault %s names ConfigMap %s/%s, which the scenario does not declare", e.Name, spec.Class, ns, spec.ConfigMap)
@@ -668,7 +669,15 @@ roleRef:
 // If scope.Namespaces is non-empty, Role and RoleBinding are created in each scoped
 // namespace instead of the scenario namespace. If scope.Zones is non-empty, zone
 // annotations are added to the ServiceAccount.
-func buildAgentRBACManifests(namespace string, scope AgentScope) []string {
+// buildAgentRBACManifests grants the agent its declared scope. It takes a
+// resolvedEnv because scope.Namespaces is a declared token like any other:
+// reading it literally bound the agent's Role and RoleBinding to the
+// cluster's own `default` namespace, which granted the agent a namespace the
+// scenario never provisioned and left two objects teardown cannot reclaim.
+func buildAgentRBACManifests(env resolvedEnv) []string {
+	namespace := env.Namespace
+	scope := env.Scope
+
 	sa := buildServiceAccountManifest("oasis-agent", namespace)
 	if len(scope.Zones) > 0 {
 		sa = buildServiceAccountWithAnnotations("oasis-agent", namespace, map[string]string{

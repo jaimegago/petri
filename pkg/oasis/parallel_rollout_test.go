@@ -40,7 +40,7 @@ func TestWaitForHealthyDeployments_RunsInParallel(t *testing.T) {
 
 	entries := healthyDeploymentEntries(3)
 	start := time.Now()
-	if err := p.waitForHealthyDeployments(context.Background(), entries, "ignored"); err != nil {
+	if err := p.waitForHealthyDeployments(context.Background(), resolveEnvironment(entries, AgentScope{}, "ignored")); err != nil {
 		t.Fatalf("waitForHealthyDeployments error: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -82,7 +82,7 @@ func TestWaitForHealthyDeployments_ImagePullFailureWins(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := time.Now()
-	err := p.waitForHealthyDeployments(ctx, entries, "ignored")
+	err := p.waitForHealthyDeployments(ctx, resolveEnvironment(entries, AgentScope{}, "ignored"))
 	elapsed := time.Since(start)
 
 	var pull *ErrImagePullFailure
@@ -125,7 +125,7 @@ func TestWaitForHealthyDeployments_SiblingsCancelOnFailure(t *testing.T) {
 
 	doneCh := make(chan error, 1)
 	go func() {
-		doneCh <- p.waitForHealthyDeployments(ctx, entries, "ignored")
+		doneCh <- p.waitForHealthyDeployments(ctx, resolveEnvironment(entries, AgentScope{}, "ignored"))
 	}()
 
 	select {
@@ -169,7 +169,7 @@ func TestWaitForHealthyDeployments_SimultaneousTimeoutsReturnSingleDeployment(t 
 	}
 	p := providerWithLogger(mock, slog.New(capture))
 
-	err := p.waitForHealthyDeployments(context.Background(), healthyDeploymentEntries(2), "ignored")
+	err := p.waitForHealthyDeployments(context.Background(), resolveEnvironment(healthyDeploymentEntries(2), AgentScope{}, "ignored"))
 	if err == nil {
 		t.Fatal("expected error from waitForHealthyDeployments")
 	}
@@ -228,7 +228,7 @@ func TestWaitForHealthyDeployments_RespectsConcurrencyCap(t *testing.T) {
 	p := newTestProvider(mock)
 
 	entries := healthyDeploymentEntries(16)
-	if err := p.waitForHealthyDeployments(context.Background(), entries, "ignored"); err != nil {
+	if err := p.waitForHealthyDeployments(context.Background(), resolveEnvironment(entries, AgentScope{}, "ignored")); err != nil {
 		t.Fatalf("waitForHealthyDeployments error: %v", err)
 	}
 
@@ -251,7 +251,7 @@ func TestWaitForHealthyDeployments_SkipsNonRunningStatuses(t *testing.T) {
 		{Kind: "Deployment", Name: "no-status", Namespace: "ns-y", Spec: map[string]any{}},
 		{Kind: "Service", Name: "svc", Namespace: "ns-z", Spec: map[string]any{"status": "running"}},
 	}
-	if err := p.waitForHealthyDeployments(context.Background(), entries, "ignored"); err != nil {
+	if err := p.waitForHealthyDeployments(context.Background(), resolveEnvironment(entries, AgentScope{}, "ignored")); err != nil {
 		t.Fatalf("expected nil error when no entries are eligible, got %v", err)
 	}
 	mock.mu.Lock()
