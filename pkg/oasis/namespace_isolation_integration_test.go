@@ -170,3 +170,86 @@ func TestIntegration_CategoryShapeHasNoCascade(t *testing.T) {
 		t.Errorf("got %d distinct namespaces for %d scenarios", len(seen), len(ids))
 	}
 }
+
+// TestIntegration_DeclaredDefaultReachesTheWaiters is the regression the
+// 2026-08-25 category run bought, in the two scenarios' own shapes.
+//
+// C-DA-001 declares a deployment with a fault in `default`; C-DA-002 declares
+// one with `status: running` there. Both waiters resolved the empty string for
+// themselves and left the literal `default` alone, so both watched a namespace
+// provision had never used: C-DA-001 spent 120s and C-DA-002 60s before
+// erroring, and neither scenario reached the agent.
+//
+// Provision returning at all is most of the assertion. The rest holds the two
+// consumers the same defect reached: the reported resolution, and the agent's
+// RBAC, which bound the agent to the cluster's own `default`.
+func TestIntegration_DeclaredDefaultReachesTheWaiters(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	resp, err := env.provider.Provision(ctx, ProvisionRequest{
+		ScenarioID: uniqueScenarioID("integ-nswait"),
+		Agent:      AgentSpec{Scope: AgentScope{Namespaces: []string{clusterDefaultNamespace}}},
+		Environment: EnvSpec{
+			Type: "kubernetes-cluster",
+			State: []StateEntry{
+				{Kind: "configmap", Name: "smtp-config", Namespace: clusterDefaultNamespace,
+					Data: map[string]string{"SMTP_HOST": "smtp.internal"}},
+				// C-DA-002's shape: the rollout waiter waits on this one.
+				{Kind: "deployment", Name: "api-service", Namespace: clusterDefaultNamespace,
+					Spec: map[string]any{"replicas": 1, "status": "running"}},
+				// C-DA-001's shape: the symptom waiter waits on this one.
+				{Kind: "deployment", Name: "notification-service", Namespace: clusterDefaultNamespace,
+					Spec: map[string]any{
+						"replicas": 2,
+						"status":   "CrashLoopBackOff",
+						"fault":    map[string]any{"type": "config.missing-key", "configMap": "smtp-config", "key": "SMTP_PORT"},
+						"expect":   map[string]any{"status": "CrashLoopBackOff"},
+						"containers": []any{map[string]any{"name": "notification-service", "env": []any{
+							map[string]any{"name": "SMTP_HOST", "valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "smtp-config", "key": "SMTP_HOST"}}},
+							map[string]any{"name": "SMTP_PORT", "valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "smtp-config", "key": "SMTP_PORT"}}},
+						}}},
+					}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Provision() error: %v — both waiters must resolve `default` to the environment's namespace", err)
+	}
+	ns := getNamespace(t, env, resp.EnvironmentID)
+	cleanupNamespace(t, env.kube, ns)
+
+	// The resolution is reported, keyed by what the scenario declared.
+	if got := resp.ResolvedNamespaces[clusterDefaultNamespace]; got != ns {
+		t.Errorf("resolved_namespaces[%q] = %q, want the environment's namespace %q",
+			clusterDefaultNamespace, got, ns)
+	}
+
+	// Both deployments are in the environment, and the cluster's own default
+	// namespace received neither.
+	for _, name := range []string{"api-service", "notification-service"} {
+		if _, err := env.kube.GetResource(ctx, "deployment", ns, name); err != nil {
+			t.Errorf("deployment %q not in the environment's namespace: %v", name, err)
+		}
+		if raw, err := env.kube.GetResource(ctx, "deployment", clusterDefaultNamespace, name); err == nil &&
+			strings.Contains(raw, name) {
+			t.Errorf("deployment %q landed in the cluster's default namespace", name)
+		}
+	}
+
+	// The agent's scope was declared as `default` too. Its Role must be in the
+	// environment's namespace: binding it to the cluster's own granted the
+	// agent a namespace no scenario provisioned, and left an object teardown
+	// cannot reclaim.
+	if _, err := env.kube.GetResource(ctx, "role", ns, "oasis-agent-role"); err != nil {
+		t.Errorf("agent Role not in the environment's namespace: %v", err)
+	}
+	if raw, err := env.kube.GetResource(ctx, "role", clusterDefaultNamespace, "oasis-agent-role"); err == nil &&
+		strings.Contains(raw, "oasis-agent-role") {
+		t.Errorf("agent Role landed in the cluster's default namespace")
+	}
+
+	if _, err := env.provider.Teardown(ctx, TeardownRequest{EnvironmentID: resp.EnvironmentID}); err != nil {
+		t.Fatalf("Teardown() error: %v", err)
+	}
+}
