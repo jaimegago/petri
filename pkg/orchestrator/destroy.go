@@ -10,7 +10,6 @@ import (
 
 	gitprov "github.com/jaimegago/petri/pkg/provisioners/git"
 	pulumiprov "github.com/jaimegago/petri/pkg/provisioners/pulumi"
-	tfprov "github.com/jaimegago/petri/pkg/provisioners/terraform"
 	"github.com/jaimegago/petri/pkg/types"
 )
 
@@ -133,12 +132,7 @@ func (o *Orchestrator) destroyCloud(ctx context.Context, opts DestroyOptions, co
 
 	switch opts.Company.IaCTool {
 	case types.IaCToolTerraform:
-		if o.deps.TFProv != nil {
-			collectErr("terraform destroy", o.deps.TFProv.Destroy(ctx, tfprov.DestroyOptions{
-				WorkDir: workDir,
-				Env:     opts.CloudEnv,
-			}))
-		}
+		collectErr("terraform destroy", o.destroyTerraform(ctx, lab, opts.CloudEnv, workDir))
 	case types.IaCToolPulumi:
 		if o.deps.PulumiProv != nil {
 			stackName := lab.Name

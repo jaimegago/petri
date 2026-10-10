@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -45,7 +46,10 @@ type PlanResult struct {
 type ApplyOptions struct {
 	WorkDir string
 	VarFile string
-	Env     []string
+	// Vars are passed as `-var name=value`, in name order. Values reach the
+	// terraform command line, so they must not be secrets.
+	Vars map[string]string
+	Env  []string
 }
 
 // ApplyResult contains outputs and tracked resources from a successful apply.
@@ -58,7 +62,10 @@ type ApplyResult struct {
 type DestroyOptions struct {
 	WorkDir string
 	VarFile string
-	Env     []string
+	// Vars are passed as `-var name=value`, in name order; a destroy needs the
+	// same input variables as the apply it undoes. Never secrets.
+	Vars map[string]string
+	Env  []string
 }
 
 // OutputValue holds a single terraform output value.
@@ -160,6 +167,7 @@ func (p *provisioner) Apply(ctx context.Context, opts ApplyOptions) (*ApplyResul
 	if opts.VarFile != "" {
 		args = append(args, "-var-file", opts.VarFile)
 	}
+	args = append(args, varArgs(opts.Vars)...)
 	if err := p.runner.exec(ctx, opts.WorkDir, opts.Env, args...); err != nil {
 		return nil, fmt.Errorf("terraform apply in %s: %w", opts.WorkDir, err)
 	}
@@ -182,10 +190,26 @@ func (p *provisioner) Destroy(ctx context.Context, opts DestroyOptions) error {
 	if opts.VarFile != "" {
 		args = append(args, "-var-file", opts.VarFile)
 	}
+	args = append(args, varArgs(opts.Vars)...)
 	if err := p.runner.exec(ctx, opts.WorkDir, opts.Env, args...); err != nil {
 		return fmt.Errorf("terraform destroy in %s: %w", opts.WorkDir, err)
 	}
 	return nil
+}
+
+// varArgs renders vars as `-var name=value` arguments, sorted by name so the
+// command line is deterministic.
+func varArgs(vars map[string]string) []string {
+	names := make([]string, 0, len(vars))
+	for n := range vars {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	args := make([]string, 0, 2*len(names))
+	for _, n := range names {
+		args = append(args, "-var", n+"="+vars[n])
+	}
+	return args
 }
 
 // Output returns the current terraform outputs as a map.

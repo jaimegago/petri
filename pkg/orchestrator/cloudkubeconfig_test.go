@@ -86,7 +86,7 @@ func TestEKSClustersFromOutputs(t *testing.T) {
 		}
 		gotArgs := strings.Join(auth.Exec.Args, " ")
 		wantArgs := "eks get-token --cluster-name " + wantName + " --region eu-west-1 --output json"
-		if auth.Exec.Command != "aws" || gotArgs != wantArgs || auth.Exec.APIVersion != eksExecAPIVersion {
+		if auth.Exec.Command != "aws" || gotArgs != wantArgs || auth.Exec.APIVersion != execAPIVersion {
 			t.Errorf("exec = %s %s (%s)", auth.Exec.Command, gotArgs, auth.Exec.APIVersion)
 		}
 	}
@@ -402,25 +402,5 @@ func TestCreate_CloudAWS_ApplyFailureRollsBack(t *testing.T) {
 	}
 	if !destroyed {
 		t.Error("a partial apply was not torn down")
-	}
-}
-
-func TestCreate_CloudGCP_NoKubeconfigSkipsClusterSteps(t *testing.T) {
-	mgr := state.NewMockManager()
-	lab := newTestLab(types.CloudProviderGCP)
-	if err := mgr.CreateLab(context.Background(), lab); err != nil {
-		t.Fatal(err)
-	}
-	o, kctls := newCloudTestOrchestrator(t, mgr, &mockTFProv{})
-	company, spec := cloudTestCompany()
-
-	if err := o.Create(context.Background(), CreateOptions{Lab: lab, Company: company, Spec: spec}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if len(kctls) != 0 || len(lab.Metadata.Clusters) != 0 {
-		t.Errorf("cluster steps ran without a kubeconfig: %d clients, %d clusters", len(kctls), len(lab.Metadata.Clusters))
-	}
-	if _, err := mgr.GetCredential(context.Background(), lab.ID, "kubeconfig"); err == nil {
-		t.Error("a kubeconfig credential was stored without a kubeconfig")
 	}
 }

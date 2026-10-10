@@ -44,6 +44,40 @@ const nodeSubnet = new azure.network.Subnet("node-subnet", {
   subnetName: "aks-nodes",
   addressPrefix: "10.240.0.0/16",
 });
+
+// ─── Cluster access ──────────────────────────────────────────────────────────
+//
+// The clusters authenticate through Microsoft Entra ID with Azure RBAC, so the
+// kubeconfig petri assembles uses the kubelogin exec plugin and carries no
+// secret. The identity running this program is granted cluster admin, as the
+// creator of an EKS cluster is. Each cluster exports its name, endpoint and CA
+// certificate; no credential is exported.
+
+const clientConfig = azure.authorization.getClientConfigOutput();
+
+// Built-in role "Azure Kubernetes Service RBAC Cluster Admin".
+const aksRbacClusterAdminRoleId = "b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b";
+
+// clusterCA reads the base64 cluster CA certificate out of the AKS user
+// kubeconfig. Only the CA leaves this function; on an Entra ID cluster the
+// user kubeconfig holds no credential in any case. The CA is public, so it is
+// exported in the clear for petri to read without --show-secrets.
+function clusterCA(cluster: azure.containerservice.ManagedCluster): pulumi.Output<string> {
+  const creds = azure.containerservice.listManagedClusterUserCredentialsOutput({
+    resourceGroupName: resourceGroup.name,
+    resourceName: cluster.name,
+  });
+  return pulumi.unsecret(
+    creds.kubeconfigs.apply((kubeconfigs) => {
+      const kubeconfig = Buffer.from(kubeconfigs[0].value, "base64").toString("utf8");
+      const match = kubeconfig.match(/certificate-authority-data:\s*(\S+)/);
+      if (!match) {
+        throw new Error("AKS user kubeconfig carries no certificate-authority-data");
+      }
+      return match[1];
+    }),
+  );
+}
 {{ range $i, $cluster := .Level.ClusterNames }}
 // ─── AKS: {{ $cluster }} ──────────────────────────────────────────────────────
 
@@ -54,6 +88,10 @@ const aks{{ title $cluster }} = new azure.containerservice.ManagedCluster("aks-{
   dnsPrefix: `${prefix}-{{ $cluster }}`,
   kubernetesVersion: "1.29",
   identity: { type: "SystemAssigned" },
+  aadProfile: {
+    managed: true,
+    enableAzureRBAC: true,
+  },
   networkProfile: {
     networkPlugin: "azure",
     loadBalancerSku: "standard",
@@ -74,8 +112,16 @@ const aks{{ title $cluster }} = new azure.containerservice.ManagedCluster("aks-{
   tags: { ...commonTags, environment: "{{ $cluster }}" },
 });
 
+new azure.authorization.RoleAssignment("aks-{{ $cluster }}-admin", {
+  principalId: clientConfig.objectId,
+  roleDefinitionId: pulumi.interpolate`/subscriptions/${clientConfig.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${aksRbacClusterAdminRoleId}`,
+  scope: aks{{ title $cluster }}.id,
+});
+
 export const aks{{ title $cluster }}Name = aks{{ title $cluster }}.name;
 export const aks{{ title $cluster }}ResourceGroup = resourceGroup.name;
+export const aks{{ title $cluster }}Endpoint = pulumi.interpolate`https://${aks{{ title $cluster }}.fqdn}`;
+export const aks{{ title $cluster }}Certificate = clusterCA(aks{{ title $cluster }});
 {{ end }}
 {{ range .Level.Databases }}
 {{ if eq .Type "postgresql" }}

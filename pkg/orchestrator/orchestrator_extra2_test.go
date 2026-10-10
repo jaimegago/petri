@@ -364,11 +364,15 @@ func TestDestroyCloud_PulumiDestroyError_Force(t *testing.T) {
 
 // mockPulumiProv extended to support destroy error injection.
 type mockPulumiProv struct {
+	upFn      func(ctx context.Context, opts pulumiprov.UpOptions) (*pulumiprov.UpResult, error)
 	destroyFn func(ctx context.Context, opts pulumiprov.DestroyOptions) error
 }
 
 func (m *mockPulumiProv) Init(_ context.Context, _ pulumiprov.InitOptions) error { return nil }
-func (m *mockPulumiProv) Up(_ context.Context, _ pulumiprov.UpOptions) (*pulumiprov.UpResult, error) {
+func (m *mockPulumiProv) Up(ctx context.Context, opts pulumiprov.UpOptions) (*pulumiprov.UpResult, error) {
+	if m.upFn != nil {
+		return m.upFn(ctx, opts)
+	}
 	return &pulumiprov.UpResult{}, nil
 }
 func (m *mockPulumiProv) Destroy(ctx context.Context, opts pulumiprov.DestroyOptions) error {

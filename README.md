@@ -16,7 +16,12 @@ This project is not affiliated with, and should not be confused with, Anthropic'
 - Docker Desktop 4.x+ (for local labs)
 - [kind](https://kind.sigs.k8s.io/) v0.20.0 or later (for local labs)
 - Git
-- Cloud provider CLIs (aws, az, gcloud) and Terraform/Pulumi for cloud labs
+- Cloud provider CLIs (aws, az, gcloud) and Terraform/Pulumi for cloud labs.
+  Cloud lab kubeconfigs authenticate through exec plugins, so kubectl needs the
+  one for its cloud: the aws CLI (AWS), [`gke-gcloud-auth-plugin`](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin)
+  (GCP), or [`kubelogin`](https://azure.github.io/kubelogin/) after `az login` (Azure)
+- GCP labs need a project: `gcp.project_id` in `~/.petri/config.yaml`, or
+  `petri create --gcp-project`
 
 ### Install
 

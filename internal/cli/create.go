@@ -26,6 +26,8 @@ type createOptions struct {
 	noApps  bool
 	oasis   bool
 	dryRun  bool
+	// gcpProject overrides gcp.project_id from the config file.
+	gcpProject string
 }
 
 func (c *CLI) newCreateCmd() *cobra.Command {
@@ -55,6 +57,7 @@ Examples:
 	cmd.Flags().BoolVar(&opts.noApps, "no-apps", false, "Skip application deployment (platform only)")
 	cmd.Flags().BoolVar(&opts.oasis, "oasis", false, "Enable OASIS evaluation mode (audit logging, Calico CNI for NetworkPolicy)")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Print what would be created without creating it")
+	cmd.Flags().StringVar(&opts.gcpProject, "gcp-project", "", "GCP project for a GCP lab (overrides gcp.project_id in the config file)")
 
 	_ = cmd.MarkFlagRequired("company")
 	_ = cmd.MarkFlagRequired("level")
@@ -100,6 +103,11 @@ func (c *CLI) runCreate(opts *createOptions) error {
 		provider = types.CloudProvider(opts.cloud)
 	}
 
+	gcpProject, err := c.resolveGCPProject(provider, opts.gcpProject)
+	if err != nil {
+		return err
+	}
+
 	name := opts.name
 	if name == "" {
 		name = fmt.Sprintf("%s-l%d-%s", strings.ToLower(opts.company), opts.level, randomSuffix(6))
@@ -107,6 +115,9 @@ func (c *CLI) runCreate(opts *createOptions) error {
 
 	if opts.dryRun {
 		printDryRun(name, company, opts.level, provider, spec, opts)
+		if gcpProject != "" {
+			fmt.Printf("GCP Project:   %s\n", gcpProject)
+		}
 		return nil
 	}
 
@@ -185,11 +196,12 @@ func (c *CLI) runCreate(opts *createOptions) error {
 	}
 
 	if err := orch.Create(ctx, orchestrator.CreateOptions{
-		Lab:       lab,
-		Company:   company,
-		Spec:      spec,
-		NoApps:    opts.noApps,
-		OASISMode: opts.oasis,
+		Lab:          lab,
+		Company:      company,
+		Spec:         spec,
+		NoApps:       opts.noApps,
+		OASISMode:    opts.oasis,
+		GCPProjectID: gcpProject,
 	}); err != nil {
 		return fmt.Errorf("lab creation failed: %w", err)
 	}
@@ -223,6 +235,23 @@ func printDryRun(name string, company *types.Company, level int, provider types.
 	fmt.Printf("  %s-%s-infra\n", strings.ToLower(company.Name), name)
 	fmt.Printf("  %s-%s-gitops\n", strings.ToLower(company.Name), name)
 	fmt.Printf("  %s-%s-apps\n", strings.ToLower(company.Name), name)
+}
+
+// resolveGCPProject returns the GCP project a lab is created in: the
+// --gcp-project flag, else gcp.project_id from the config file. A GCP lab with
+// neither is refused here, before a lab record exists or anything is
+// provisioned; other providers need no project.
+func (c *CLI) resolveGCPProject(provider types.CloudProvider, flag string) (string, error) {
+	if provider != types.CloudProviderGCP {
+		return "", nil
+	}
+	if flag != "" {
+		return flag, nil
+	}
+	if c.cfg != nil && c.cfg.GCP.ProjectID != "" {
+		return c.cfg.GCP.ProjectID, nil
+	}
+	return "", orchestrator.ErrNoGCPProject
 }
 
 func (c *CLI) resolveCompaniesFile() string {

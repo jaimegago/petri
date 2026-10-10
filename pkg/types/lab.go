@@ -51,6 +51,10 @@ type LabMetadata struct {
 	ObservabilityURLs map[string]string `json:"observability_urls,omitempty"`
 	WorkDir           string            `json:"work_dir,omitempty"`
 	ErrorMessage      string            `json:"error_message,omitempty"`
+	// GCPProjectID is the GCP project a GCP lab was created in. Recorded at
+	// create so teardown targets the same project whatever the config says
+	// by then.
+	GCPProjectID string `json:"gcp_project_id,omitempty"`
 }
 
 // GitRepo tracks a created git repository.

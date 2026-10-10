@@ -85,6 +85,7 @@ type Config struct {
 	Observability ObservabilityConfig `yaml:"observability"`
 	Git           GitConfig           `yaml:"git"`
 	Cloud         CloudConfig         `yaml:"cloud"`
+	GCP           GCPConfig           `yaml:"gcp"`
 	Cleanup       CleanupConfig       `yaml:"cleanup"`
 	OASIS         OASISConfig         `yaml:"oasis"`
 }
@@ -119,6 +120,14 @@ type GitConfig struct {
 type CloudConfig struct {
 	TerraformVersion string `yaml:"terraform_version"`
 	PulumiVersion    string `yaml:"pulumi_version"`
+}
+
+// GCPConfig configures GCP cloud labs.
+type GCPConfig struct {
+	// ProjectID is the GCP project GCP labs are created in. `petri create
+	// --gcp-project` overrides it; a GCP lab with neither is refused before
+	// anything is provisioned.
+	ProjectID string `yaml:"project_id"`
 }
 
 // CleanupConfig configures TTL-based cleanup behavior.

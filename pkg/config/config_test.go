@@ -228,3 +228,20 @@ func TestOASISTimeoutsLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestGCPProjectIDLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("gcp:\n  project_id: lab-project\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GCP.ProjectID != "lab-project" {
+		t.Errorf("GCP.ProjectID = %q, want lab-project", cfg.GCP.ProjectID)
+	}
+	if DefaultConfig().GCP.ProjectID != "" {
+		t.Error("the default config names a GCP project")
+	}
+}

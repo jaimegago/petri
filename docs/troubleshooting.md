@@ -405,8 +405,13 @@ design rationale.
 petri info <lab-name>
 
 # Set kubeconfig (one file per cluster; cloud labs print the paths on create).
-# AWS kubeconfigs authenticate through `aws eks get-token`, so the aws CLI and
-# the same AWS credentials petri ran with must be available.
+# Cloud kubeconfigs hold no secret; they authenticate through an exec plugin
+# with the same cloud credentials petri ran with:
+#   AWS   — `aws eks get-token` (the aws CLI)
+#   GCP   — `gke-gcloud-auth-plugin` (gcloud credentials)
+#   Azure — `kubelogin get-token --login azurecli` (after `az login`); the
+#           clusters use Entra ID with Azure RBAC, and the identity that ran
+#           petri is granted cluster admin
 export KUBECONFIG=~/.petri/labs/<lab-id>/kubeconfigs/<cluster-name>
 
 # Verify

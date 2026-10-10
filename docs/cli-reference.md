@@ -43,6 +43,7 @@ petri create --company=<company> --level=<1|2|3> [flags]
 | `--no-apps` | bool | false | Skip application deployment |
 | `--oasis` | bool | false | Enable OASIS evaluation mode (audit logging, Calico CNI for NetworkPolicy, worker allocatable shaped to `4000m`/`8Gi`) |
 | `--dry-run` | bool | false | Print what would be created without creating it |
+| `--gcp-project` | string | `gcp.project_id` | GCP project for a GCP lab; required (flag or config) for GCP labs |
 
 Local labs create git repos on the filesystem under `~/.petri/labs/<id>/repos/`.
 

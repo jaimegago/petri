@@ -2,7 +2,7 @@ package orchestrator
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +41,9 @@ type CreateOptions struct {
 	// CloudEnv carries cloud provider credential environment variables
 	// forwarded to Terraform/Pulumi (e.g. AWS_ACCESS_KEY_ID=…).
 	CloudEnv []string
+	// GCPProjectID is the GCP project a GCP lab is created in. Required for
+	// GCP labs; recorded in lab metadata so teardown targets the same project.
+	GCPProjectID string
 }
 
 // rollback accumulates cleanup functions executed in reverse on error.
@@ -426,6 +429,12 @@ func printLocalConnectionInfo(lab *types.Lab, cluster *localprov.ClusterInfo) {
 // createCloud provisions git repositories, runs IaC, and deploys applications
 // on a cloud-hosted Kubernetes cluster.
 func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *rollback) error {
+	if opts.Lab.CloudProvider == types.CloudProviderGCP {
+		if opts.GCPProjectID == "" {
+			return ErrNoGCPProject
+		}
+		opts.Lab.Metadata.GCPProjectID = opts.GCPProjectID
+	}
 	if o.deps.GitProv == nil {
 		return fmt.Errorf("git provisioner not configured; provide GITHUB_TOKEN")
 	}
@@ -467,7 +476,7 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 	switch opts.Company.IaCTool {
 	case types.IaCToolTerraform:
 		rb.push(func(ctx context.Context) error {
-			return o.destroyTerraform(ctx, opts, workDir)
+			return o.destroyTerraform(ctx, opts.Lab, opts.CloudEnv, workDir)
 		})
 		clusters, err = o.runTerraform(ctx, opts, workDir)
 	case types.IaCToolPulumi:
@@ -737,8 +746,13 @@ func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, wor
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 
+	vars, err := terraformVars(opts.Lab)
+	if err != nil {
+		return nil, err
+	}
 	result, err := o.deps.TFProv.Apply(ctx, tfprov.ApplyOptions{
 		WorkDir: workDir,
+		Vars:    vars,
 		Env:     opts.CloudEnv,
 	})
 	if err != nil {
@@ -759,32 +773,59 @@ func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, wor
 		}
 	}
 
+	var clusters []provisionedCluster
 	switch opts.Lab.CloudProvider {
 	case types.CloudProviderAWS:
-		clusters, err := eksClustersFromOutputs(result.Outputs, opts.Spec.ClusterNames, opts.Spec.NodesPerCluster)
-		if err != nil {
-			return nil, fmt.Errorf("obtaining cluster kubeconfig: %w", err)
-		}
-		return clusters, nil
+		clusters, err = eksClustersFromOutputs(result.Outputs, opts.Spec.ClusterNames, opts.Spec.NodesPerCluster)
+	case types.CloudProviderGCP:
+		clusters, err = gkeClustersFromOutputs(result.Outputs, opts.Spec.ClusterNames, opts.Spec.NodesPerCluster)
 	default:
-		o.log.Warn("No kubeconfig assembly for this provider yet", "provider", opts.Lab.CloudProvider)
+		o.log.Warn("No terraform kubeconfig assembly for this provider", "provider", opts.Lab.CloudProvider)
 		return nil, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("obtaining cluster kubeconfig: %w", err)
+	}
+	return clusters, nil
 }
 
-// destroyTerraform runs terraform destroy for rollback or teardown.
-func (o *Orchestrator) destroyTerraform(ctx context.Context, opts CreateOptions, workDir string) error {
+// ErrNoGCPProject refuses a GCP lab with no project, before anything is
+// provisioned: the GCP template's project_id has no default.
+var ErrNoGCPProject = errors.New("GCP labs need a GCP project: set gcp.project_id in ~/.petri/config.yaml or pass petri create --gcp-project")
+
+// terraformVars returns the input variables a lab's terraform apply and
+// destroy both pass. The GCP template's project_id has no default, so a GCP
+// lab without one is refused rather than left to an interactive prompt.
+func terraformVars(lab *types.Lab) (map[string]string, error) {
+	if lab.CloudProvider != types.CloudProviderGCP {
+		return nil, nil
+	}
+	if lab.Metadata.GCPProjectID == "" {
+		return nil, ErrNoGCPProject
+	}
+	return map[string]string{"project_id": lab.Metadata.GCPProjectID}, nil
+}
+
+// destroyTerraform runs terraform destroy for rollback or teardown, with the
+// same input variables the apply passed.
+func (o *Orchestrator) destroyTerraform(ctx context.Context, lab *types.Lab, env []string, workDir string) error {
 	if o.deps.TFProv == nil {
 		return nil
 	}
+	vars, err := terraformVars(lab)
+	if err != nil {
+		return err
+	}
 	return o.deps.TFProv.Destroy(ctx, tfprov.DestroyOptions{
 		WorkDir: workDir,
-		Env:     opts.CloudEnv,
+		Vars:    vars,
+		Env:     env,
 	})
 }
 
-// runPulumi runs pulumi login+init+up and returns the cluster it created when
-// the stack exports a `kubeconfig` output.
+// runPulumi runs pulumi login+init+up and returns the clusters it created with
+// their kubeconfigs. It returns no clusters, without error, where the provider
+// has no kubeconfig assembly.
 func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDir string) ([]provisionedCluster, error) {
 	if o.deps.PulumiProv == nil {
 		o.log.Warn("Pulumi provisioner not configured; skipping IaC provisioning")
@@ -824,18 +865,15 @@ func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDi
 		}
 	}
 
-	// The output is a JSON-encoded string; its value is credential material
-	// and is never logged.
-	kc, ok := result.Outputs["kubeconfig"]
-	if !ok {
-		o.log.Warn("Pulumi stack exports no kubeconfig output")
+	if opts.Lab.CloudProvider != types.CloudProviderAzure {
+		o.log.Warn("No pulumi kubeconfig assembly for this provider", "provider", opts.Lab.CloudProvider)
 		return nil, nil
 	}
-	var raw string
-	if err := json.Unmarshal(kc.Value, &raw); err != nil || raw == "" {
-		return nil, fmt.Errorf("pulumi output %q is not a non-empty string", "kubeconfig")
+	clusters, err := aksClustersFromOutputs(result.Outputs, opts.Spec.ClusterNames, opts.Spec.NodesPerCluster)
+	if err != nil {
+		return nil, fmt.Errorf("obtaining cluster kubeconfig: %w", err)
 	}
-	return []provisionedCluster{{Name: opts.Lab.Name, Kubeconfig: []byte(raw)}}, nil
+	return clusters, nil
 }
 
 // destroyPulumiStack runs pulumi destroy + stack rm for rollback.

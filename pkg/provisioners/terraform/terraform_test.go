@@ -280,6 +280,38 @@ func TestDestroy(t *testing.T) {
 	}
 }
 
+func TestApplyAndDestroy_PassVars(t *testing.T) {
+	vars := map[string]string{"project_id": "my-proj", "a_first": "x"}
+	want := "-var a_first=x -var project_id=my-proj"
+
+	var got []string
+	r := &mockRunner{
+		execFn: func(_ context.Context, _ string, _ []string, args ...string) error {
+			got = append(got, strings.Join(args, " "))
+			return nil
+		},
+	}
+	p := newWithRunner(r)
+	if _, err := p.Apply(context.Background(), ApplyOptions{WorkDir: t.TempDir(), Vars: vars}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := p.Destroy(context.Background(), DestroyOptions{WorkDir: t.TempDir(), Vars: vars}); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d exec calls, want 2", len(got))
+	}
+	for _, cmd := range got {
+		if !strings.HasSuffix(cmd, want) {
+			t.Errorf("command %q does not end with %q", cmd, want)
+		}
+	}
+
+	if args := varArgs(nil); len(args) != 0 {
+		t.Errorf("varArgs(nil) = %v, want none", args)
+	}
+}
+
 // ─── Output tests ─────────────────────────────────────────────────────────────
 
 func TestOutput(t *testing.T) {

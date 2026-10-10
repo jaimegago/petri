@@ -32,3 +32,25 @@ logs that the stack exports no `kubeconfig`). Found 2026-10-10 in
   accounts vs AAD + `kubelogin` is part of the design.
 - `runPulumi` already reads a `kubeconfig` string output as a single cluster;
   a multi-cluster level needs a per-cluster output shape like AWS's.
+
+## Resolution (2026-10-10)
+
+Done in `joe-pm/threads/cloud-kubeconfig-gcp-azure.md`. Both providers now
+assemble per-cluster kubeconfigs in `pkg/orchestrator/cloudkubeconfig.go` and
+get the AWS path's per-cluster treatment.
+
+- **GCP**: project from `gcp.project_id` or `petri create --gcp-project`,
+  passed as `-var project_id=…` to apply and destroy and recorded in lab
+  metadata for teardown; refused before anything is provisioned when absent.
+  The template emits `gke_<name>_cluster_ca_certificate`; auth is
+  `gke-gcloud-auth-plugin`; the bare endpoint gets `https://`.
+- **Azure**: AKS is Entra ID-enabled with Azure RBAC, the deploying identity
+  granted "Azure Kubernetes Service RBAC Cluster Admin"; the program exports
+  `aks<Name>{Name,Endpoint,Certificate}` per cluster (CA read from the user
+  kubeconfig, nothing else exported); auth is `kubelogin get-token --login
+  azurecli`. No secret in the kubeconfig.
+
+Not fixed, pre-existing: the Azure program's Postgres block does not typecheck
+against `@pulumi/azure-native` v2 (`dbforpostgresql.Server` is the flexible
+server there; the block is single-server shaped), and it requires a
+`dbPassword` stack secret petri never sets.

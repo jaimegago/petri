@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/jaimegago/petri/pkg/config"
 	"github.com/jaimegago/petri/pkg/state"
 	"github.com/jaimegago/petri/pkg/types"
 )
@@ -167,4 +170,51 @@ func contains(s, sub string) bool {
 			}
 			return false
 		}())
+}
+
+func TestResolveGCPProject(t *testing.T) {
+	withConfig := &CLI{cfg: &config.Config{GCP: config.GCPConfig{ProjectID: "from-config"}}}
+	noConfig := &CLI{cfg: config.DefaultConfig()}
+
+	tests := []struct {
+		name     string
+		cli      *CLI
+		provider types.CloudProvider
+		flag     string
+		want     string
+		wantErr  bool
+	}{
+		{"flag overrides config", withConfig, types.CloudProviderGCP, "from-flag", "from-flag", false},
+		{"config when no flag", withConfig, types.CloudProviderGCP, "", "from-config", false},
+		{"neither is refused", noConfig, types.CloudProviderGCP, "", "", true},
+		{"other providers need none", noConfig, types.CloudProviderAWS, "", "", false},
+		{"other providers ignore the flag", withConfig, types.CloudProviderAzure, "from-flag", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cli.resolveGCPProject(tt.provider, tt.flag)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("project = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRunCreate_GCPWithoutProjectRefusedBeforeLabRecord pins that a GCP lab
+// with no project fails before any lab record or provisioning exists.
+func TestRunCreate_GCPWithoutProjectRefusedBeforeLabRecord(t *testing.T) {
+	mgr := state.NewMockManager()
+	c := newTestCLI(mgr, companiesYAML(t))
+	c.cfg = config.DefaultConfig()
+
+	err := c.runCreate(&createOptions{company: "cloudnative", level: 1, name: "gcp-lab"})
+	if err == nil || !strings.Contains(err.Error(), "--gcp-project") {
+		t.Fatalf("runCreate = %v, want the missing-project error", err)
+	}
+	if lab, _ := mgr.GetLabByName(context.Background(), "gcp-lab"); lab != nil {
+		t.Error("a lab record was created for a refused GCP lab")
+	}
 }

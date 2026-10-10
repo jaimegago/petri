@@ -26,6 +26,9 @@ cloud:
   terraform_version: 1.7.0
   pulumi_version: 3.100.0
 
+gcp:
+  project_id: my-gcp-project   # required for GCP labs; petri create --gcp-project overrides
+
 cleanup:
   check_interval: 5m
   grace_period: 30m

@@ -19,6 +19,11 @@ output "gke_{{ . }}_endpoint" {
   sensitive   = true
 }
 
+output "gke_{{ . }}_cluster_ca_certificate" {
+  description = "GKE cluster CA certificate (base64) for {{ . }}"
+  value       = google_container_cluster.{{ . }}.master_auth[0].cluster_ca_certificate
+}
+
 output "gke_{{ . }}_kubeconfig_command" {
   description = "gcloud command to configure kubeconfig for {{ . }}"
   value       = "gcloud container clusters get-credentials ${google_container_cluster.{{ . }}.name} --region ${var.region} --project ${var.project_id}"
