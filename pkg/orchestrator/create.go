@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -421,7 +422,11 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 		return fmt.Errorf("git provisioner not configured; provide GITHUB_TOKEN")
 	}
 
-	prog := newProgress(7, o.log)
+	totalSteps := 10
+	if opts.NoApps {
+		totalSteps = 9
+	}
+	prog := newProgress(totalSteps, o.log)
 	companyLower := strings.ToLower(opts.Company.Name)
 
 	// ── Step 1: Create git repositories ─────────────────────────────────────
@@ -445,59 +450,85 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 	}
 
 	// ── Step 3: Provision infrastructure ─────────────────────────────────────
+	// The teardown is registered before the run so a partial apply, or a
+	// failure to reach the clusters it created, still rolls back.
 	prog.Step("Provisioning infrastructure")
 	workDir := o.labWorkDir(opts.Lab.ID.String(), "infra")
-	var clusterKubeconfig string
+	var clusters []provisionedCluster
 
 	switch opts.Company.IaCTool {
 	case types.IaCToolTerraform:
-		kc, err := o.runTerraform(ctx, opts, workDir)
-		if err != nil {
-			return err
-		}
-		clusterKubeconfig = kc
 		rb.push(func(ctx context.Context) error {
 			return o.destroyTerraform(ctx, opts, workDir)
 		})
+		clusters, err = o.runTerraform(ctx, opts, workDir)
 	case types.IaCToolPulumi:
-		kc, err := o.runPulumi(ctx, opts, workDir)
-		if err != nil {
-			return err
-		}
-		clusterKubeconfig = kc
 		rb.push(func(ctx context.Context) error {
 			return o.destroyPulumiStack(ctx, opts, workDir)
 		})
+		clusters, err = o.runPulumi(ctx, opts, workDir)
 	default:
 		return fmt.Errorf("unsupported IaC tool: %s", opts.Company.IaCTool)
 	}
+	if err != nil {
+		return err
+	}
 
-	// ── Step 4: Generate and commit GitOps manifests ─────────────────────────
+	// ── Step 4: Persist kubeconfig as encrypted credential ──────────────────
+	prog.Step("Storing kubeconfig credential")
+	if err := o.storeCloudKubeconfigs(ctx, opts, clusters); err != nil {
+		return err
+	}
+
+	// ── Step 5: Generate and commit GitOps manifests ─────────────────────────
 	prog.Step("Generating GitOps manifests")
 	if err := o.generateAndCommitGitOps(ctx, opts); err != nil {
 		// Non-fatal for GitOps (cluster already exists).
 		o.log.Warn("GitOps manifest generation failed; continuing", "error", err)
 	}
 
-	// ── Step 5: Deploy application manifests ─────────────────────────────────
-	prog.Step("Deploying application manifests")
-	if !opts.NoApps && clusterKubeconfig != "" {
-		kctl := o.deps.KubectlFactory(clusterKubeconfig)
-		if err := o.applyAppManifests(ctx, opts, kctl); err != nil {
-			o.log.Warn("App deployment errors; lab will still be marked ACTIVE", "error", err)
-		}
+	// Steps 6–9 mirror the local path, once per cluster. A failure here is
+	// non-fatal: the infrastructure exists and the lab is still marked ACTIVE.
+	kctls := make([]KubectlClient, len(opts.Lab.Metadata.Clusters))
+	for i, c := range opts.Lab.Metadata.Clusters {
+		kctls[i] = o.deps.KubectlFactory(c.KubeconfigPath)
 	}
 
 	// ── Step 6: Wait for nodes ───────────────────────────────────────────────
 	prog.Step("Waiting for cluster nodes")
-	if clusterKubeconfig != "" {
-		kctl := o.deps.KubectlFactory(clusterKubeconfig)
+	for i, kctl := range kctls {
 		if err := kctl.WaitForNodes(ctx, 10*time.Minute); err != nil {
-			o.log.Warn("Node wait timed out; lab will still be marked ACTIVE", "error", err)
+			o.log.Warn("Node wait timed out; lab will still be marked ACTIVE", "error", err, "cluster", opts.Lab.Metadata.Clusters[i].Name)
 		}
 	}
 
-	// ── Step 7: Mark ACTIVE ──────────────────────────────────────────────────
+	// ── Step 7: Deploy platform components ──────────────────────────────────
+	prog.Step("Deploying platform components")
+	for i, kctl := range kctls {
+		if err := o.applyPlatformManifests(ctx, opts, kctl); err != nil {
+			o.log.Warn("Platform manifest deployment had errors; continuing", "error", err, "cluster", opts.Lab.Metadata.Clusters[i].Name)
+		}
+	}
+
+	// ── Step 8: Deploy observability stack ──────────────────────────────────
+	prog.Step("Deploying observability stack")
+	for i, kctl := range kctls {
+		if err := o.applyObservabilityManifests(ctx, opts, kctl); err != nil {
+			o.log.Warn("Observability manifest deployment had errors; continuing", "error", err, "cluster", opts.Lab.Metadata.Clusters[i].Name)
+		}
+	}
+
+	// ── Step 9 (optional): Deploy application manifests ─────────────────────
+	if !opts.NoApps {
+		prog.Step("Deploying application manifests")
+		for i, kctl := range kctls {
+			if err := o.applyAppManifests(ctx, opts, kctl); err != nil {
+				o.log.Warn("App deployment errors; lab will still be marked ACTIVE", "error", err, "cluster", opts.Lab.Metadata.Clusters[i].Name)
+			}
+		}
+	}
+
+	// ── Step 10: Mark ACTIVE ─────────────────────────────────────────────────
 	prog.Step("Finalising lab")
 	opts.Lab.Status = types.LabStatusActive
 	if err := o.deps.State.UpdateLab(ctx, opts.Lab); err != nil {
@@ -506,6 +537,60 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 
 	prog.Done(fmt.Sprintf("Lab %q is ACTIVE", opts.Lab.Name))
 	printCloudConnectionInfo(opts.Lab, repos)
+	return nil
+}
+
+// storeCloudKubeconfigs stores the clusters' merged kubeconfig as the lab's
+// encrypted `kubeconfig` credential, writes one single-context kubeconfig per
+// cluster (0600, the same posture as a kind kubeconfig) for kubectl, and
+// records the clusters in lab metadata. No clusters is not an error: an IaC
+// path that cannot yet reach its clusters leaves the lab without cluster
+// access, and the cluster steps that follow find nothing to do.
+func (o *Orchestrator) storeCloudKubeconfigs(ctx context.Context, opts CreateOptions, clusters []provisionedCluster) error {
+	if len(clusters) == 0 {
+		o.log.Warn("No cluster kubeconfig obtained; skipping cluster steps", "provider", opts.Lab.CloudProvider, "iac", opts.Company.IaCTool)
+		return nil
+	}
+
+	merged, err := mergeKubeconfigs(clusters)
+	if err != nil {
+		return err
+	}
+	enc, err := o.deps.Cipher.Encrypt(merged)
+	if err != nil {
+		return fmt.Errorf("encrypting kubeconfig: %w", err)
+	}
+	if err := o.deps.State.StoreCredential(ctx, &types.LabCredential{
+		ID:             uuid.New(),
+		LabID:          opts.Lab.ID,
+		CredentialType: "kubeconfig",
+		EncryptedValue: enc,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("storing kubeconfig credential: %w", err)
+	}
+
+	dir := o.labWorkDir(opts.Lab.ID.String(), "kubeconfigs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating kubeconfig dir: %w", err)
+	}
+	meta := make([]types.Cluster, 0, len(clusters))
+	for _, c := range clusters {
+		path := filepath.Join(dir, c.Name)
+		if err := os.WriteFile(path, c.Kubeconfig, 0o600); err != nil {
+			return fmt.Errorf("writing kubeconfig for cluster %s: %w", c.Name, err)
+		}
+		meta = append(meta, types.Cluster{
+			Name:           c.Name,
+			KubeconfigPath: path,
+			Endpoint:       c.Endpoint,
+			NodeCount:      c.NodeCount,
+		})
+	}
+	opts.Lab.Metadata.Clusters = meta
+	if err := o.deps.State.UpdateLab(ctx, opts.Lab); err != nil {
+		return fmt.Errorf("saving clusters to lab metadata: %w", err)
+	}
 	return nil
 }
 
@@ -628,18 +713,20 @@ func (o *Orchestrator) generateAndCommitGitOps(ctx context.Context, opts CreateO
 	return nil
 }
 
-// runTerraform runs terraform init+apply and returns the cluster kubeconfig path (if available).
-func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, workDir string) (string, error) {
+// runTerraform runs terraform init+apply and returns the clusters it created
+// with their kubeconfigs. It returns no clusters, without error, where the
+// provider has no kubeconfig assembly yet.
+func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, workDir string) ([]provisionedCluster, error) {
 	if o.deps.TFProv == nil {
 		o.log.Warn("Terraform provisioner not configured; skipping IaC provisioning")
-		return "", nil
+		return nil, nil
 	}
 
 	if err := o.deps.TFProv.Init(ctx, tfprov.InitOptions{
 		WorkDir: workDir,
 		Env:     opts.CloudEnv,
 	}); err != nil {
-		return "", fmt.Errorf("terraform init: %w", err)
+		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 
 	result, err := o.deps.TFProv.Apply(ctx, tfprov.ApplyOptions{
@@ -647,7 +734,7 @@ func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, wor
 		Env:     opts.CloudEnv,
 	})
 	if err != nil {
-		return "", fmt.Errorf("terraform apply: %w", err)
+		return nil, fmt.Errorf("terraform apply: %w", err)
 	}
 
 	// Track resources in state.
@@ -664,16 +751,17 @@ func (o *Orchestrator) runTerraform(ctx context.Context, opts CreateOptions, wor
 		}
 	}
 
-	// Extract kubeconfig from outputs if present.
-	if kc, ok := result.Outputs["kubeconfig"]; ok {
-		kubeconfigPath := filepath.Join(workDir, "kubeconfig")
-		if err := os.WriteFile(kubeconfigPath, kc.Value, 0o600); err != nil {
-			o.log.Warn("Failed to write kubeconfig from Terraform output", "error", err)
-		} else {
-			return kubeconfigPath, nil
+	switch opts.Lab.CloudProvider {
+	case types.CloudProviderAWS:
+		clusters, err := eksClustersFromOutputs(result.Outputs, opts.Spec.ClusterNames, opts.Spec.NodesPerCluster)
+		if err != nil {
+			return nil, fmt.Errorf("obtaining cluster kubeconfig: %w", err)
 		}
+		return clusters, nil
+	default:
+		o.log.Warn("No kubeconfig assembly for this provider yet", "provider", opts.Lab.CloudProvider)
+		return nil, nil
 	}
-	return "", nil
 }
 
 // destroyTerraform runs terraform destroy for rollback or teardown.
@@ -687,11 +775,12 @@ func (o *Orchestrator) destroyTerraform(ctx context.Context, opts CreateOptions,
 	})
 }
 
-// runPulumi runs pulumi login+init+up and returns the cluster kubeconfig path (if available).
-func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDir string) (string, error) {
+// runPulumi runs pulumi login+init+up and returns the cluster it created when
+// the stack exports a `kubeconfig` output.
+func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDir string) ([]provisionedCluster, error) {
 	if o.deps.PulumiProv == nil {
 		o.log.Warn("Pulumi provisioner not configured; skipping IaC provisioning")
-		return "", nil
+		return nil, nil
 	}
 
 	stackName := opts.Lab.Name
@@ -701,7 +790,7 @@ func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDi
 		StackName: stackName,
 		Env:       opts.CloudEnv,
 	}); err != nil {
-		return "", fmt.Errorf("pulumi init: %w", err)
+		return nil, fmt.Errorf("pulumi init: %w", err)
 	}
 
 	result, err := o.deps.PulumiProv.Up(ctx, pulumiprov.UpOptions{
@@ -710,7 +799,7 @@ func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDi
 		Env:       opts.CloudEnv,
 	})
 	if err != nil {
-		return "", fmt.Errorf("pulumi up: %w", err)
+		return nil, fmt.Errorf("pulumi up: %w", err)
 	}
 
 	// Track resources.
@@ -727,16 +816,18 @@ func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDi
 		}
 	}
 
-	// Extract kubeconfig from outputs.
-	if kc, ok := result.Outputs["kubeconfig"]; ok {
-		kubeconfigPath := filepath.Join(workDir, "kubeconfig")
-		if err := os.WriteFile(kubeconfigPath, kc.Value, 0o600); err != nil {
-			o.log.Warn("Failed to write kubeconfig from Pulumi output", "error", err)
-		} else {
-			return kubeconfigPath, nil
-		}
+	// The output is a JSON-encoded string; its value is credential material
+	// and is never logged.
+	kc, ok := result.Outputs["kubeconfig"]
+	if !ok {
+		o.log.Warn("Pulumi stack exports no kubeconfig output")
+		return nil, nil
 	}
-	return "", nil
+	var raw string
+	if err := json.Unmarshal(kc.Value, &raw); err != nil || raw == "" {
+		return nil, fmt.Errorf("pulumi output %q is not a non-empty string", "kubeconfig")
+	}
+	return []provisionedCluster{{Name: opts.Lab.Name, Kubeconfig: []byte(raw)}}, nil
 }
 
 // destroyPulumiStack runs pulumi destroy + stack rm for rollback.
@@ -773,6 +864,9 @@ func (o *Orchestrator) labWorkDir(labID, subdir string) string {
 func printCloudConnectionInfo(lab *types.Lab, repos []types.GitRepo) {
 	fmt.Printf("\nLab %q is ready!\n", lab.Name)
 	fmt.Printf("  Provider: %s\n", lab.CloudProvider)
+	for _, c := range lab.Metadata.Clusters {
+		fmt.Printf("  Cluster:  %s (export KUBECONFIG=%s)\n", c.Name, c.KubeconfigPath)
+	}
 	for _, r := range repos {
 		fmt.Printf("  %s repo: %s\n", r.Type, r.URL)
 	}

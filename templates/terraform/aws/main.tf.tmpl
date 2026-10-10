@@ -14,6 +14,13 @@ module "vpc" {
   azs             = ["${var.aws_region}a", "${var.aws_region}b", "${var.aws_region}c"]
   private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
   public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+{{- range .Level.Databases }}{{ if eq .Type "postgresql" }}
+
+  # Isolated subnets for RDS; the module creates the subnet group the rds
+  # module below is placed in.
+  database_subnets             = ["10.0.201.0/24", "10.0.202.0/24", "10.0.203.0/24"]
+  create_database_subnet_group = true
+{{- end }}{{ end }}
 
   enable_nat_gateway   = true
   single_nat_gateway   = {{ if levelGte .Level.Number 2 }}false{{ else }}true{{ end }}
@@ -41,6 +48,11 @@ module "eks_{{ $cluster }}" {
   vpc_id                         = module.vpc.vpc_id
   subnet_ids                     = module.vpc.private_subnets
   cluster_endpoint_public_access = true
+
+  # Grant the identity running terraform cluster-admin through an EKS access
+  # entry; without it the kubeconfig petri assembles authenticates but is
+  # authorised for nothing.
+  enable_cluster_creator_admin_permissions = true
 
   eks_managed_node_groups = {
     main = {

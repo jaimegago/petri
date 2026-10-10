@@ -404,8 +404,10 @@ design rationale.
 # Get kubeconfig path from lab info
 petri info <lab-name>
 
-# Set kubeconfig
-export KUBECONFIG=~/.petri/labs/<lab-name>/kubeconfig-prod
+# Set kubeconfig (one file per cluster; cloud labs print the paths on create).
+# AWS kubeconfigs authenticate through `aws eks get-token`, so the aws CLI and
+# the same AWS credentials petri ran with must be available.
+export KUBECONFIG=~/.petri/labs/<lab-id>/kubeconfigs/<cluster-name>
 
 # Verify
 kubectl cluster-info

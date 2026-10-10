@@ -27,6 +27,7 @@ relative link the move breaks.
 
 | Slug | Title | Status | Priority |
 |------|-------|--------|----------|
+| [`cloud-kubeconfig-gcp-azure`](cloud-kubeconfig-gcp-azure.md) | cloud-kubeconfig-gcp-azure | open | |
 | [`lift-observability-signal-fixtures`](lift-observability-signal-fixtures.md) | lift-observability-signal-fixtures | open | |
 | [`ministack-aws-lab`](ministack-aws-lab.md) | ministack-aws-lab | open | |
 | [`node-state-entry-kind`](node-state-entry-kind.md) | node-state-entry-kind | open | |

@@ -23,7 +23,8 @@ type CredentialBundle struct {
 	Provider string `json:"provider"`
 	// ExpiresAt is when the lab will be auto-destroyed.
 	ExpiresAt time.Time `json:"expires_at"`
-	// Kubeconfig is the raw kubeconfig YAML for the primary cluster.
+	// Kubeconfig is the raw kubeconfig YAML for the lab's clusters; its current
+	// context is the primary cluster.
 	Kubeconfig string `json:"kubeconfig,omitempty"`
 	// GitRepos lists all git repositories created for the lab.
 	GitRepos []types.GitRepo `json:"git_repos,omitempty"`
