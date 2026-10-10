@@ -36,7 +36,7 @@ the rule for what each materialises and the mechanism it uses:
 |---|---|---|
 | `running` | a healthy Deployment whose pods reach Ready | container `app` on the spec image, exposing containerPort 80 |
 | `crashloopbackoff` | a pod stuck in CrashLoopBackOff | with a **`Fault`**: the application image (`docs/application-image.md`) with the declared env, misconfigured as the fault declares, failing its own startup validation; with declared env and no fault: the spec image with each ConfigMap reference required (`optional: false`) so the kubelet names an absent key; otherwise a symptom-only exit on the util image |
-| `oomkilled` | a container the kernel OOM-kills on start | a busy `dd` allocation under a `memory: 4Mi` limit |
+| `oomkilled` | a container the kernel OOM-kills on start | an unbounded `tail /dev/zero` allocation under a `memory: 16Mi` limit (`workloadstate.OOMKilledMemoryLimit`; below it the container's own init is OOM-killed first) |
 | `pending` | pods that never schedule, stuck Pending | an impossible `cpu: "100"` request → "Insufficient cpu" |
 | `degraded` | a partially-available Deployment | forces ≥2 replicas with a failing `/healthz` readiness probe so a subset of pods never become Ready |
 | `elevated_error_rate` (alias `elevated-error-rate`) | a service returning errors for a share of traffic | a Python HTTP server that returns HTTP 500 for a configurable percentage of requests (default 50%) |
@@ -99,6 +99,33 @@ null-routed by some networks).
 - `Provision(ctx, kube, spec) error` — renders then applies via the narrow
   `KubeClient` (`ApplyYAML`). Returns the validation error without applying when
   the state is unrecognized.
+- `Spec.Convergence() (Convergence, error)` — what the rendered workload looks
+  like once it has reached its state; see below.
+
+## Convergence: what readiness waits for
+
+Applying a manifest is not reaching a state: until the kubelet has acted, every
+state looks like `ContainerCreating`. `Spec.Convergence` says, for the workload
+`Render` produces, what the caller waits for before handing it over — a
+**rollout** for a healthy state, or a **symptom** every pod exhibits, matched by
+`fault.WaitForSymptom`, for an unhealthy one. It follows the renderer, not the
+state's name, and a test holds every accepted state to having one.
+
+| State | Converges when |
+|---|---|
+| `running` (and an omitted state) | the rollout completes |
+| `elevated_error_rate` | the rollout completes — the 5xx is in the responses, not the pod |
+| `crashloopbackoff` | every pod is `CrashLoopBackOff`; with declared env and no fault, `CreateContainerConfigError` |
+| `oomkilled` | every pod has recorded `OOMKilled` |
+| `pending` | every pod is `Unschedulable` (the PodScheduled condition) |
+| `degraded` | every pod's container is running — readiness is what fails |
+| `error` | every pod is `ErrImagePull` / `ImagePullBackOff` |
+| any state with a `Fault` | the class's symptom; the OASIS provider waits on the scenario's declared `expect` instead |
+
+`petri serve` waits on every declared Deployment this way before `/v1/provision`
+reports `ready`, and on every bare `pod` entry's container running. A workload
+that does not converge within the image-pull plus rollout budget fails the
+provision.
 
 See [ADR 0015](decisions/0015-workload-state-capability.md) for why this was
 extracted into a Petri-core capability and the seam choices, and

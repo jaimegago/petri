@@ -16,6 +16,36 @@ type PodLister interface {
 	ListResources(ctx context.Context, kind, namespace string) (string, error)
 }
 
+// The symptoms below are not produced by any catalog class. They are what the
+// symptom-only workload states settle into, named here so that the one
+// symptom check (WaitForSymptom) is also the one a caller uses to wait for
+// those states. Each is matched by the kubelet's or scheduler's own record.
+
+// SymptomImagePullBackOff is an image the kubelet cannot pull. The kubelet
+// alternates the container's waiting reason between ErrImagePull (an attempt
+// failed) and ImagePullBackOff (waiting out the backoff); either is the
+// condition, so either matches.
+const SymptomImagePullBackOff = "ImagePullBackOff"
+
+// SymptomErrImagePull is the kubelet's reason for a failed pull attempt, the
+// other half of SymptomImagePullBackOff.
+const SymptomErrImagePull = "ErrImagePull"
+
+// SymptomUnschedulable is a pod the scheduler cannot place. It is a pod-level
+// record — the PodScheduled condition false with reason Unschedulable — and
+// such a pod has no container status at all.
+const SymptomUnschedulable = "Unschedulable"
+
+// SymptomCreateContainerConfigError is a container the kubelet will not
+// create because its configuration references something absent, such as a
+// required ConfigMap key.
+const SymptomCreateContainerConfigError = "CreateContainerConfigError"
+
+// SymptomRunning is a container that is running and has recorded nothing
+// else: no waiting reason, no termination, current or last. Readiness is not
+// implied — a container whose readiness probe fails is still running.
+const SymptomRunning = "running"
+
 // symptomPollInterval is how often WaitForSymptom re-lists the pods.
 const symptomPollInterval = 2 * time.Second
 
@@ -74,10 +104,14 @@ func (e Expect) String() string {
 // kind v1.35.0, the waiting reason is present for under half of the backoff
 // period and first appears after several restarts, while the restart count
 // and the failed termination are visible from the first restart onwards.
+// ImagePullBackOff matches either half of the kubelet's alternating pull
+// failure (SymptomImagePullBackOff), and Unschedulable matches the pod's
+// PodScheduled condition (SymptomUnschedulable).
 // Any other status matches a container whose current or last state reason
 // equals it, case-insensitively — OOMKilled is the kubelet's recorded reason
 // for a kernel OOM kill, current while the container waits out its backoff
-// and last once it has restarted.
+// and last once it has restarted. A container that has recorded no reason at
+// all matches SymptomRunning.
 //
 // When expect declares Restarts, a container matches only once its restart
 // count has also reached it, so a declaration that the workload "keeps
@@ -141,8 +175,26 @@ type pod struct {
 	} `json:"metadata"`
 	Status struct {
 		Phase             string            `json:"phase"`
+		Conditions        []podCondition    `json:"conditions"`
 		ContainerStatuses []containerStatus `json:"containerStatuses"`
 	} `json:"status"`
+}
+
+type podCondition struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+// unschedulable reports whether the scheduler has recorded that it cannot
+// place the pod.
+func (p pod) unschedulable() bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == "PodScheduled" && c.Status == "False" && c.Reason == SymptomUnschedulable {
+			return true
+		}
+	}
+	return false
 }
 
 type containerStatus struct {
@@ -175,6 +227,9 @@ func parsePods(raw string) ([]pod, error) {
 // short description of what was seen for the error path.
 func (p pod) exhibits(expect Expect) (bool, string) {
 	want := strings.ToLower(strings.TrimSpace(expect.Status))
+	if want == strings.ToLower(SymptomUnschedulable) && p.unschedulable() {
+		return true, ""
+	}
 	if len(p.Status.ContainerStatuses) == 0 {
 		return false, strings.ToLower(p.Status.Phase)
 	}
@@ -190,6 +245,9 @@ func (p pod) exhibits(expect Expect) (bool, string) {
 		}
 		for _, r := range reasons {
 			if strings.ToLower(r) == want {
+				return true, ""
+			}
+			if want == strings.ToLower(SymptomImagePullBackOff) && strings.EqualFold(r, SymptomErrImagePull) {
 				return true, ""
 			}
 		}
@@ -223,7 +281,7 @@ func (c containerStatus) reasons() []string {
 		}
 	}
 	if len(out) == 0 {
-		out = []string{"running"}
+		out = []string{SymptomRunning}
 	}
 	return out
 }

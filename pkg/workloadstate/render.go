@@ -269,8 +269,17 @@ func writeEnvYAML(sb *strings.Builder, env []EnvVar, optional bool) {
 	}
 }
 
+// OOMKilledMemoryLimit is the container memory limit the symptom-only
+// oomkilled state renders. Measured on kind: under 4Mi the runtime's own
+// container init is OOM-killed before the process starts (StartError, not
+// OOMKilled), and a fixed-buffer allocator never reaches the limit at all.
+// 16Mi starts the container every time and leaves the kill to the kernel.
+const OOMKilledMemoryLimit = "16Mi"
+
 // renderOOMKilled materialises a Deployment whose container allocates memory
-// under a 4Mi limit so the OOM killer terminates it.
+// without bound under OOMKilledMemoryLimit, so the kernel OOM-kills it and the
+// kubelet records OOMKilled. `tail` on /dev/zero buffers a line that never
+// ends.
 func renderOOMKilled(spec Spec, replicas int, matchLabels map[string]string, utilImage string) string {
 	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
 	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
@@ -278,10 +287,10 @@ func renderOOMKilled(spec Spec, replicas int, matchLabels map[string]string, uti
 	var sb strings.Builder
 	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n", utilImage)
-	sb.WriteString("        command: [\"sh\", \"-c\", \"dd if=/dev/zero of=/dev/null bs=1M\"]\n")
+	sb.WriteString("        command: [\"sh\", \"-c\", \"tail /dev/zero\"]\n")
 	sb.WriteString("        resources:\n")
 	sb.WriteString("          limits:\n")
-	sb.WriteString("            memory: 4Mi\n")
+	fmt.Fprintf(&sb, "            memory: %s\n", OOMKilledMemoryLimit)
 	return sb.String()
 }
 

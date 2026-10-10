@@ -3,9 +3,11 @@ package oasis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,8 +15,26 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/jaimegago/petri/pkg/fault"
 	"github.com/jaimegago/petri/pkg/preflight"
 )
+
+// unhealthyStatePods is a pod list in which each symptom-only workload state
+// has settled into the record it converges to.
+const unhealthyStatePods = `{"items":[
+ {"metadata":{"name":"crash-app-1","labels":{"app":"crash-app"}},
+  "status":{"phase":"Running","containerStatuses":[{"restartCount":1,"state":{"waiting":{"reason":"CrashLoopBackOff"}},"lastState":{"terminated":{"reason":"Error","exitCode":1}}}]}},
+ {"metadata":{"name":"oom-app-1","labels":{"app":"oom-app"}},
+  "status":{"phase":"Running","containerStatuses":[{"restartCount":1,"state":{"waiting":{"reason":"CrashLoopBackOff"}},"lastState":{"terminated":{"reason":"OOMKilled","exitCode":137}}}]}},
+ {"metadata":{"name":"pend-app-1","labels":{"app":"pend-app"}},
+  "status":{"phase":"Pending","conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable"}]}},
+ {"metadata":{"name":"err-app-1","labels":{"app":"err-app"}},
+  "status":{"phase":"Pending","containerStatuses":[{"restartCount":0,"state":{"waiting":{"reason":"ErrImagePull"}}}]}},
+ {"metadata":{"name":"degraded-app-1","labels":{"app":"degraded-app"}},
+  "status":{"phase":"Running","containerStatuses":[{"restartCount":0,"ready":false,"state":{"running":{}}}]}},
+ {"metadata":{"name":"degraded-app-2","labels":{"app":"degraded-app"}},
+  "status":{"phase":"Running","containerStatuses":[{"restartCount":0,"ready":false,"state":{"running":{}}}]}}
+]}`
 
 func newTestProvider(mock *mockKubeClient) *petriProvider {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -304,9 +324,10 @@ func TestProvision(t *testing.T) {
 		}
 	})
 
-	t.Run("skips wait for unhealthy deployment statuses", func(t *testing.T) {
+	t.Run("waits for each unhealthy state's symptom instead of a rollout", func(t *testing.T) {
 		t.Parallel()
 		mock := newMockKube()
+		mock.resources["pods/ns1"] = unhealthyStatePods
 		p := newTestProvider(mock)
 
 		req := ProvisionRequest{
@@ -317,6 +338,7 @@ func TestProvision(t *testing.T) {
 					{Kind: "Deployment", Name: "oom-app", Namespace: "ns1", Spec: map[string]any{"status": "oomkilled"}},
 					{Kind: "Deployment", Name: "pend-app", Namespace: "ns1", Spec: map[string]any{"status": "pending"}},
 					{Kind: "Deployment", Name: "err-app", Namespace: "ns1", Spec: map[string]any{"status": "error"}},
+					{Kind: "Deployment", Name: "degraded-app", Namespace: "ns1", Spec: map[string]any{"status": "degraded"}},
 				},
 			},
 		}
@@ -327,9 +349,65 @@ func TestProvision(t *testing.T) {
 		if resp.Status != "ready" {
 			t.Errorf("status = %q, want %q", resp.Status, "ready")
 		}
-		// No WaitForRollout calls expected.
+		// None of these states completes a rollout.
 		if len(mock.waitRolloutCalls) != 0 {
 			t.Errorf("expected 0 WaitForRollout calls, got %d: %v", len(mock.waitRolloutCalls), mock.waitRolloutCalls)
+		}
+	})
+
+	t.Run("refuses ready while an unhealthy state's pods are still starting", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		mock.resources["pods/ns1"] = `{"items":[{"metadata":{"name":"err-app-1","labels":{"app":"err-app"}},
+  "status":{"phase":"Pending","containerStatuses":[{"restartCount":0,"state":{"waiting":{"reason":"ContainerCreating"}}}]}}]}`
+		p := newTestProvider(mock)
+		p.cfg.ImagePullTimeout, p.cfg.RolloutTimeout = time.Millisecond, time.Millisecond
+
+		_, err := p.Provision(context.Background(), ProvisionRequest{
+			ScenarioID: "starting-sc",
+			Environment: EnvSpec{State: []StateEntry{
+				{Kind: "Deployment", Name: "err-app", Namespace: "ns1", Spec: map[string]any{"status": "error"}},
+			}},
+		})
+		var unmet *fault.ErrSymptomUnmet
+		if !errors.As(err, &unmet) {
+			t.Fatalf("want *fault.ErrSymptomUnmet, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "ContainerCreating") {
+			t.Errorf("error should say what was observed: %v", err)
+		}
+	})
+
+	t.Run("waits for a bare pod's container to run", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		mock.resources["pods/ns1"] = `{"items":[{"metadata":{"name":"batch","labels":{"app":"batch"}},
+  "status":{"phase":"Pending","containerStatuses":[{"restartCount":0,"state":{"waiting":{"reason":"ContainerCreating"}}}]}}]}`
+		p := newTestProvider(mock)
+		p.cfg.ImagePullTimeout, p.cfg.RolloutTimeout = time.Millisecond, time.Millisecond
+
+		_, err := p.Provision(context.Background(), ProvisionRequest{
+			ScenarioID: "pod-sc",
+			Environment: EnvSpec{State: []StateEntry{
+				{Kind: "Pod", Name: "batch", Namespace: "ns1"},
+			}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "pod ns1/batch") {
+			t.Fatalf("expected the starting pod to hold readiness, got %v", err)
+		}
+
+		mock.mu.Lock()
+		mock.resources["pods/ns1"] = `{"items":[{"metadata":{"name":"batch","labels":{"app":"batch"}},
+  "status":{"phase":"Running","containerStatuses":[{"restartCount":0,"state":{"running":{}}}]}}]}`
+		mock.mu.Unlock()
+		resp, err := p.Provision(context.Background(), ProvisionRequest{
+			ScenarioID: "pod-sc",
+			Environment: EnvSpec{State: []StateEntry{
+				{Kind: "Pod", Name: "batch", Namespace: "ns1"},
+			}},
+		})
+		if err != nil || resp.Status != "ready" {
+			t.Fatalf("expected ready once the pod runs, got %q, %v", resp.Status, err)
 		}
 	})
 
@@ -368,31 +446,7 @@ func TestProvision(t *testing.T) {
 		}
 	})
 
-	t.Run("skips wait for degraded and elevated_error_rate deployments", func(t *testing.T) {
-		t.Parallel()
-		mock := newMockKube()
-		p := newTestProvider(mock)
-
-		req := ProvisionRequest{
-			ScenarioID: "mixed-sc",
-			Environment: EnvSpec{
-				State: []StateEntry{
-					{Kind: "Deployment", Name: "degraded-app", Namespace: "ns1", Spec: map[string]any{"status": "degraded"}},
-					{Kind: "Deployment", Name: "error-rate-app", Namespace: "ns1", Spec: map[string]any{"status": "elevated_error_rate"}},
-					{Kind: "Deployment", Name: "crash-app", Namespace: "ns1", Spec: map[string]any{"status": "CrashLoopBackOff"}},
-				},
-			},
-		}
-		if _, err := p.Provision(context.Background(), req); err != nil {
-			t.Fatalf("Provision() error: %v", err)
-		}
-		// Only status=running should be waited on; none of these qualify.
-		if len(mock.waitRolloutCalls) != 0 {
-			t.Fatalf("expected 0 WaitForRollout calls, got %d: %v", len(mock.waitRolloutCalls), mock.waitRolloutCalls)
-		}
-	})
-
-	t.Run("skips wait when spec has no status field", func(t *testing.T) {
+	t.Run("waits for the rollout of every healthy state, however declared", func(t *testing.T) {
 		t.Parallel()
 		mock := newMockKube()
 		p := newTestProvider(mock)
@@ -401,16 +455,22 @@ func TestProvision(t *testing.T) {
 			ScenarioID: "default-sc",
 			Environment: EnvSpec{
 				State: []StateEntry{
+					// No status: workloadstate renders it running, so it is
+					// as healthy as an explicit "running" and is waited on.
 					{Kind: "Deployment", Name: "my-app", Namespace: "prod", Spec: map[string]any{"replicas": float64(2)}},
+					{Kind: "Deployment", Name: "cased", Namespace: "prod", Spec: map[string]any{"status": "Running"}},
+					{Kind: "Deployment", Name: "error-rate-app", Namespace: "prod", Spec: map[string]any{"status": "elevated_error_rate"}},
 				},
 			},
 		}
 		if _, err := p.Provision(context.Background(), req); err != nil {
 			t.Fatalf("Provision() error: %v", err)
 		}
-		// No explicit status → skip wait (only explicit status=running is waited on).
-		if len(mock.waitRolloutCalls) != 0 {
-			t.Fatalf("expected 0 WaitForRollout calls, got %d", len(mock.waitRolloutCalls))
+		got := append([]string(nil), mock.waitRolloutCalls...)
+		sort.Strings(got)
+		want := []string{"prod/cased", "prod/error-rate-app", "prod/my-app"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("WaitForRollout calls = %v, want %v", got, want)
 		}
 	})
 

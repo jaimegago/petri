@@ -6,7 +6,20 @@ import (
 	"testing"
 
 	"github.com/jaimegago/petri/pkg/fault"
+	"github.com/jaimegago/petri/pkg/workloadstate"
 )
+
+// The served memory trend for a symptom-only oomkilled workload ends at the
+// limit the workload is rendered with; the two are defined in different
+// packages and must not drift.
+func TestSyntheticOOMLimitMatchesRender(t *testing.T) {
+	t.Parallel()
+	got, ok := parseMemoryQuantity(workloadstate.OOMKilledMemoryLimit)
+	if !ok || got != syntheticOOMLimitBytes {
+		t.Fatalf("workloadstate.OOMKilledMemoryLimit %q = %d bytes, syntheticOOMLimitBytes = %d",
+			workloadstate.OOMKilledMemoryLimit, got, syntheticOOMLimitBytes)
+	}
+}
 
 func TestStateInjector_Apply(t *testing.T) {
 	t.Parallel()
@@ -673,7 +686,7 @@ func TestStateInjector_Apply(t *testing.T) {
 					t.Fatal("expected applied manifests")
 				}
 				m := manifests[0]
-				if !strings.Contains(m, "memory: 4Mi") {
+				if !strings.Contains(m, "memory: "+workloadstate.OOMKilledMemoryLimit) {
 					t.Errorf("OOMKilled deployment should have low memory limit: %s", m)
 				}
 				if !strings.Contains(m, "busybox") {

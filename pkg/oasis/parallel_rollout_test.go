@@ -237,10 +237,11 @@ func TestWaitForHealthyDeployments_RespectsConcurrencyCap(t *testing.T) {
 	}
 }
 
-// TestWaitForHealthyDeployments_SkipsNonRunningStatuses preserves the
-// existing skip semantics: only deployments with status:"running" are waited
-// on; intentionally unhealthy states are passed through.
-func TestWaitForHealthyDeployments_SkipsNonRunningStatuses(t *testing.T) {
+// TestWaitForHealthyDeployments_RollsOutHealthyStatesOnly: a rollout is
+// waited on for every Deployment whose state is healthy — an omitted state
+// renders running and is one — and for nothing else. Intentionally unhealthy
+// states never complete a rollout; they are waited on by symptom.
+func TestWaitForHealthyDeployments_RollsOutHealthyStatesOnly(t *testing.T) {
 	t.Parallel()
 
 	mock := newMockKube()
@@ -252,11 +253,11 @@ func TestWaitForHealthyDeployments_SkipsNonRunningStatuses(t *testing.T) {
 		{Kind: "Service", Name: "svc", Namespace: "ns-z", Spec: map[string]any{"status": "running"}},
 	}
 	if err := p.waitForHealthyDeployments(context.Background(), resolveEnvironment(entries, AgentScope{}, "ignored")); err != nil {
-		t.Fatalf("expected nil error when no entries are eligible, got %v", err)
+		t.Fatalf("waitForHealthyDeployments: %v", err)
 	}
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	if len(mock.waitRolloutCalls) != 0 {
-		t.Errorf("expected zero WaitForRollout calls, got %v", mock.waitRolloutCalls)
+	if len(mock.waitRolloutCalls) != 1 || mock.waitRolloutCalls[0] != "ns-y/no-status" {
+		t.Errorf("expected one WaitForRollout call for ns-y/no-status, got %v", mock.waitRolloutCalls)
 	}
 }

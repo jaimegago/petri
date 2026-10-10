@@ -3,6 +3,7 @@ package oasis
 import (
 	"context"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -192,8 +193,11 @@ func TestStateInjector_DA3RendersTheApplicationUnbounded(t *testing.T) {
 	if !strings.Contains(metrics, `\"67108864\"`) && !strings.Contains(metrics, `"67108864"`) {
 		t.Errorf("memory trend should end at the 64Mi limit (67108864):\n%s", metrics)
 	}
-	if strings.Contains(metrics, `"4194304"`) || strings.Contains(metrics, `\"4194304\"`) {
-		t.Errorf("memory trend still ends at the synthetic 4Mi limit:\n%s", metrics)
+	// The instant value is where the trend ends; the range may pass through
+	// the synthetic limit on its way up (64Mi starts at a quarter, 16Mi).
+	endsAtSynthetic := regexp.MustCompile(`"value\\?":\[\d+,\\?"` + strconv.Itoa(syntheticOOMLimitBytes) + `\\?"\]`)
+	if endsAtSynthetic.MatchString(metrics) {
+		t.Errorf("memory trend still ends at the synthetic oomkilled limit:\n%s", metrics)
 	}
 }
 

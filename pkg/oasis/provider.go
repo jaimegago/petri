@@ -289,9 +289,10 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		return ProvisionResponse{}, fmt.Errorf("applying precondition state: %w", err)
 	}
 
-	// 3b. Wait for deployments with explicit status=running to finish rolling
-	// out. All other statuses and deployments without a status field are
-	// skipped — they represent intentionally unhealthy states.
+	// 3b. Wait for every declared Deployment whose state is healthy — an
+	// omitted state included, since it renders running — to finish rolling
+	// out. Intentionally unhealthy states never complete a rollout and are
+	// waited on by symptom in 3c. See readinessPlan.
 	if err := p.waitForHealthyDeployments(ctx, env); err != nil {
 		// Async cleanup: the typed error from waitForHealthyDeployments is
 		// fully populated; the response body does not depend on the
@@ -302,10 +303,11 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 		return ProvisionResponse{}, fmt.Errorf("waiting for deployments: %w", err)
 	}
 
-	// 3c. Wait for deployments that declare a fault to exhibit the symptom
-	// they declare. The environment is not handed over without it: an
-	// application that does not fail the way the scenario says is a
-	// provision-time error, never a cluster the agent is scored against.
+	// 3c. Wait for every other declared workload to exhibit the state it
+	// declares: a fault's declared symptom, an unhealthy state's symptom, a
+	// bare pod's running container. The environment is not handed over
+	// without it: a workload that does not reach the state the scenario says
+	// is a provision-time error, never a cluster the agent is scored against.
 	if err := p.waitForDeclaredSymptoms(ctx, env); err != nil {
 		p.scheduleNamespaceCleanup(namespace, owned, envID, asyncCleanupReason(err))
 		return ProvisionResponse{}, fmt.Errorf("verifying declared symptoms: %w", err)
@@ -966,43 +968,99 @@ func (p *petriProvider) rolloutBudget() time.Duration {
 	return p.cfg.RolloutTimeout
 }
 
-// waitForHealthyDeployments waits for deployments whose expected status is
-// explicitly set to "running" to finish rolling out. Only deployments with
-// an explicit status: running in their spec are waited on. All other statuses
-// (CrashLoopBackOff, ImagePullBackOff, Pending, OOMKilled, Error, Degraded,
-// etc.) and deployments with no status field are skipped — they represent
-// intentionally unhealthy states that would always time out.
+// rolloutWait is a declared workload whose state is healthy: provision waits
+// for its Deployment's rollout.
+type rolloutWait struct {
+	name, namespace string
+}
+
+// symptomWait is a declared workload whose state is reached when every pod it
+// selects exhibits expect.
+type symptomWait struct {
+	kind, name, namespace string
+	selector              map[string]string
+	replicas              int
+	expect                fault.Expect
+}
+
+// readinessPlan sorts every workload the environment declares by what
+// provision waits for before it reports ready. Nothing that runs pods is left
+// out: an environment handed over while a declared workload is still starting
+// is a different cluster from the one the scenario declares.
+//
+//   - A Deployment waits on its workload state's Convergence
+//     (workloadstate.Spec.Convergence): a healthy state — including an
+//     omitted one, which renders running — by rollout, an unhealthy one by the
+//     symptom its pods settle into. A declared fault waits on its declared
+//     expect instead.
+//   - A bare Pod is rendered healthy whatever it declares, and waits for its
+//     container to be running.
+func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptomWait, error) {
+	var rollouts []rolloutWait
+	var symptoms []symptomWait
+	for _, e := range env.State {
+		// e.Namespace is resolved; resolveEnvironment is the only place that
+		// reads a declared token.
+		switch strings.ToLower(e.Kind) {
+		case "deployment":
+			declared, expect, err := parseFault(e)
+			if err != nil {
+				// Already rejected by the injector before anything was
+				// applied; unreachable here, but never wait on a malformed
+				// declaration.
+				return nil, nil, fmt.Errorf("deployment %q: %w", e.Name, err)
+			}
+			if declared != nil {
+				symptoms = append(symptoms, symptomWait{
+					kind: "deployment", name: e.Name, namespace: e.Namespace,
+					selector: deploymentMatchLabels(e),
+					replicas: deploymentReplicas(e),
+					expect:   *expect,
+				})
+				continue
+			}
+			spec, err := p.injector.deploymentSpec(e, e.Namespace)
+			if err != nil {
+				return nil, nil, err
+			}
+			conv, err := spec.Convergence()
+			if err != nil {
+				return nil, nil, err
+			}
+			if conv.RollsOut {
+				rollouts = append(rollouts, rolloutWait{name: e.Name, namespace: e.Namespace})
+				continue
+			}
+			symptoms = append(symptoms, symptomWait{
+				kind: "deployment", name: e.Name, namespace: e.Namespace,
+				selector: spec.MatchLabels,
+				replicas: deploymentReplicas(e),
+				expect:   fault.Expect{Status: conv.Symptom},
+			})
+		case "pod":
+			symptoms = append(symptoms, symptomWait{
+				kind: "pod", name: e.Name, namespace: e.Namespace,
+				selector: podLabels(e.Name, e.Labels),
+				replicas: 1,
+				expect:   fault.Expect{Status: fault.SymptomRunning},
+			})
+		}
+	}
+	return rollouts, symptoms, nil
+}
+
+// waitForHealthyDeployments waits for every declared Deployment whose state
+// is healthy to finish rolling out (see readinessPlan). Intentionally
+// unhealthy states would never complete a rollout; waitForDeclaredSymptoms
+// waits for those.
 func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, env resolvedEnv) error {
 	pullTimeout := p.pullBudget()
 	rolloutTimeout := p.rolloutBudget()
 
-	type pendingDeploy struct {
-		name      string
-		namespace string
+	pending, _, err := p.readinessPlan(env)
+	if err != nil {
+		return err
 	}
-	var pending []pendingDeploy
-
-	for _, e := range env.State {
-		if strings.ToLower(e.Kind) != "deployment" {
-			continue
-		}
-		// Only wait when status is explicitly set to "running".
-		v, ok := e.Spec["status"]
-		if !ok {
-			continue
-		}
-		s, ok := v.(string)
-		if !ok || strings.ToLower(s) != "running" {
-			continue
-		}
-		// e.Namespace is resolved; resolveEnvironment is the only place that
-		// reads a declared token. This site used to resolve the empty string
-		// for itself and leave "default" alone, so a scenario declaring its
-		// deployments in "default" waited out the full rollout budget on a
-		// namespace provision had never used.
-		pending = append(pending, pendingDeploy{name: e.Name, namespace: e.Namespace})
-	}
-
 	if len(pending) == 0 {
 		return nil
 	}
@@ -1041,41 +1099,19 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, env resol
 	return nil
 }
 
-// waitForDeclaredSymptoms waits, for every deployment entry that declares a
-// fault and an expect, until every pod of that deployment exhibits the
-// expected symptom. The budget is the image pull budget plus the rollout
-// budget: the application image must be pulled before it can fail. Waits run
-// concurrently with first-failure-wins semantics, as the healthy rollouts do.
+// waitForDeclaredSymptoms waits, for every declared workload that is reached
+// by symptom rather than by rollout (see readinessPlan), until every pod of it
+// exhibits that symptom: a declared fault's expect, an unhealthy state's
+// symptom, a bare pod's running container. The budget is the image pull
+// budget plus the rollout budget: an image must be pulled before it can fail.
+// Waits run concurrently with first-failure-wins semantics, as the healthy
+// rollouts do.
 func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, env resolvedEnv) error {
 	timeout := p.pullBudget() + p.rolloutBudget()
 
-	type declared struct {
-		name, namespace string
-		selector        map[string]string
-		replicas        int
-		expect          fault.Expect
-	}
-	var pending []declared
-	for _, e := range env.State {
-		if strings.ToLower(e.Kind) != "deployment" {
-			continue
-		}
-		spec, expect, err := parseFault(e)
-		if err != nil {
-			// Already rejected by the injector before anything was applied;
-			// unreachable here, but never wait on a malformed declaration.
-			return fmt.Errorf("deployment %q: %w", e.Name, err)
-		}
-		if spec == nil {
-			continue
-		}
-		// Resolved upstream, as in waitForHealthyDeployments above.
-		pending = append(pending, declared{
-			name: e.Name, namespace: e.Namespace,
-			selector: deploymentMatchLabels(e),
-			replicas: deploymentReplicas(e),
-			expect:   *expect,
-		})
+	_, pending, err := p.readinessPlan(env)
+	if err != nil {
+		return err
 	}
 	if len(pending) == 0 {
 		return nil
@@ -1087,13 +1123,13 @@ func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, env resolve
 	for _, d := range pending {
 		d := d
 		g.Go(func() error {
-			p.log.Info("waiting for declared symptom", "deployment", d.name, "namespace", d.namespace, "expect", d.expect.Status, "restarts", d.expect.Restarts)
+			p.log.Info("waiting for declared symptom", d.kind, d.name, "namespace", d.namespace, "expect", d.expect.Status, "restarts", d.expect.Restarts)
 			err := fault.WaitForSymptom(gctx, p.kube, d.namespace, d.selector, d.replicas, d.expect, timeout)
 			if err != nil {
-				p.log.Warn("declared symptom not reached", "deployment", d.name, "namespace", d.namespace, "error", err)
-				return fmt.Errorf("deployment %s/%s: %w", d.namespace, d.name, err)
+				p.log.Warn("declared symptom not reached", d.kind, d.name, "namespace", d.namespace, "error", err)
+				return fmt.Errorf("%s %s/%s: %w", d.kind, d.namespace, d.name, err)
 			}
-			p.log.Info("declared symptom reached", "deployment", d.name, "namespace", d.namespace, "expect", d.expect.Status, "restarts", d.expect.Restarts)
+			p.log.Info("declared symptom reached", d.kind, d.name, "namespace", d.namespace, "expect", d.expect.Status, "restarts", d.expect.Restarts)
 			return nil
 		})
 	}

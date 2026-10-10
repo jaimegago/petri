@@ -93,12 +93,13 @@ func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, de
 }
 
 // syntheticOOMLimitBytes is the limit the symptom-only oomkilled state
-// renders (workloadstate's util-image allocator under 4Mi).
-const syntheticOOMLimitBytes = 4 << 20
+// renders, workloadstate.OOMKilledMemoryLimit in bytes (a test holds the two
+// equal).
+const syntheticOOMLimitBytes = 16 << 20
 
 // deploymentMemoryLimits records the memory limit each deployment entry
 // renders with, where it renders one: a declared fault's class limit, or the
-// symptom-only oomkilled state's 4Mi.
+// symptom-only oomkilled state's limit.
 func deploymentMemoryLimits(entries []StateEntry) map[string]int64 {
 	out := map[string]int64{}
 	for _, e := range entries {
@@ -951,6 +952,12 @@ func buildPVCManifest(name, namespace string, spec map[string]any, labels map[st
 
 // ── Pod manifest builder ─────────────────────────────────────────────────────
 
+// podLabels is the label set a bare pod entry renders with: app=<name>, with
+// the entry's own labels merged over it. Readiness selects the pod by it.
+func podLabels(name string, labels map[string]string) map[string]string {
+	return manifest.MergeLabels(map[string]string{"app": name}, labels)
+}
+
 func buildPodManifest(name, namespace string, spec map[string]any, labels map[string]string, defaultImage, nodeName string) string {
 	image := defaultImage
 	if image == "" {
@@ -960,13 +967,11 @@ func buildPodManifest(name, namespace string, spec map[string]any, labels map[st
 		image = v
 	}
 
-	podLabels := manifest.MergeLabels(map[string]string{"app": name}, labels)
-
 	var sb strings.Builder
 	sb.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	sb.WriteString("  labels:\n")
-	sb.WriteString(manifest.LabelsToYAML(podLabels, 4))
+	sb.WriteString(manifest.LabelsToYAML(podLabels(name, labels), 4))
 	sb.WriteString("\nspec:\n")
 	if nodeName != "" {
 		fmt.Fprintf(&sb, "  nodeName: %s\n", nodeName)
@@ -1411,7 +1416,7 @@ http.server.HTTPServer(("",9093),H).serve_forever()`
 //   - C-DA-003's fact form: memory_usage_trend (served as a rising
 //     container-memory range series ending at the memory limit the workload
 //     of the same name renders with — memLimit, falling back to the
-//     symptom-only oomkilled state's 4Mi — so the served trend and the
+//     symptom-only oomkilled state's limit — so the served trend and the
 //     physical OOM agree) and last_oom_kill ("<N>_<unit>_ago", served as a
 //     timestamp-seconds series).
 //
@@ -1483,7 +1488,7 @@ func buildMetricsResponses(name, namespace string, spec map[string]any, extra []
 // container-memory series rising over the last 30 minutes from a quarter of
 // limitBytes to limitBytes — the limit the workload is OOM-killed at — so the
 // served trend is consistent with the physically real OOM kills. A
-// non-positive limitBytes means the symptom-only oomkilled state's 4Mi.
+// non-positive limitBytes means the symptom-only oomkilled state's limit.
 func memoryTrendSeries(name, namespace string, limitBytes int64, now time.Time) metricSeries {
 	const (
 		points = 7

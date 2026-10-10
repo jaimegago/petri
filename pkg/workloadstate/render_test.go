@@ -44,7 +44,7 @@ func TestRender_RecognizedStates(t *testing.T) {
 			name:    "empty state resolves to running",
 			spec:    baseSpec("web", ""),
 			want:    []string{"registry.k8s.io/nginx-slim:0.27", "containerPort: 80"},
-			notWant: []string{"exit 1", "memory: 4Mi"},
+			notWant: []string{"exit 1", "memory: " + OOMKilledMemoryLimit},
 		},
 		{
 			name:    "whitespace-only state resolves to running",
@@ -122,7 +122,7 @@ func TestRender_RecognizedStates(t *testing.T) {
 				"name: CACHE_MAX_ENTRIES",
 				`value: "0"`,
 			},
-			notWant: []string{"memory: 4Mi", "dd if=/dev/zero", "busybox", "simulation", "petri", "inject", "chaos", "leak"},
+			notWant: []string{"memory: " + OOMKilledMemoryLimit, "/dev/zero", "busybox", "simulation", "petri", "inject", "chaos", "leak"},
 		},
 		{
 			name: "declared literal env renders as value",
@@ -137,7 +137,7 @@ func TestRender_RecognizedStates(t *testing.T) {
 		{
 			name:    "oomkilled has low memory limit on util image",
 			spec:    baseSpec("oom", "OOMKilled"),
-			want:    []string{"memory: 4Mi", "dd if=/dev/zero", "registry.k8s.io/e2e-test-images/busybox"},
+			want:    []string{"memory: " + OOMKilledMemoryLimit, "tail /dev/zero", "registry.k8s.io/e2e-test-images/busybox"},
 			notWant: []string{"containerPort: 80"},
 		},
 		{
@@ -446,7 +446,7 @@ func TestRender_OmittedStateYieldsRunning(t *testing.T) {
 	if omitted != explicit {
 		t.Errorf("omitted state should render identically to running:\nomitted:\n%s\nexplicit:\n%s", omitted, explicit)
 	}
-	if strings.Contains(omitted, "exit 1") || strings.Contains(omitted, "memory: 4Mi") {
+	if strings.Contains(omitted, "exit 1") || strings.Contains(omitted, "memory: "+OOMKilledMemoryLimit) {
 		t.Errorf("omitted-state deployment must be healthy:\n%s", omitted)
 	}
 }

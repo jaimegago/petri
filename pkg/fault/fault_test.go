@@ -121,6 +121,9 @@ type podJSON struct {
 	lastExit   *int
 	termReason string // defaults to Error
 	lastReason string // defaults to Error
+	// unschedulable renders a Pending pod the scheduler could not place:
+	// no container status, PodScheduled false with reason Unschedulable.
+	unschedulable bool
 }
 
 func reasonOr(r string) string {
@@ -157,6 +160,18 @@ func (f *fakePods) ListResources(_ context.Context, kind, _ string) (string, err
 		last := map[string]any{}
 		if p.lastExit != nil {
 			last["terminated"] = map[string]any{"reason": reasonOr(p.lastReason), "exitCode": *p.lastExit}
+		}
+		if p.unschedulable {
+			items = append(items, map[string]any{
+				"metadata": meta,
+				"status": map[string]any{
+					"phase": "Pending",
+					"conditions": []map[string]any{{
+						"type": "PodScheduled", "status": "False", "reason": "Unschedulable",
+					}},
+				},
+			})
+			continue
 		}
 		items = append(items, map[string]any{
 			"metadata": meta,
@@ -237,6 +252,41 @@ func TestWaitForSymptom_GenericStatusMatchesReason(t *testing.T) {
 	}}
 	if err := WaitForSymptom(context.Background(), f, "default", sel, 1, Expect{Status: "CreateContainerConfigError"}, 0); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// The symptom-only states settle into records the generic reason match does
+// not cover on its own: a pull failure alternates between two reasons, and an
+// unschedulable pod has no container to carry one.
+func TestWaitForSymptom_StateSymptoms(t *testing.T) {
+	t.Parallel()
+	sel := map[string]string{"app": "n"}
+	tests := []struct {
+		name   string
+		pod    podJSON
+		expect string
+		want   bool
+	}{
+		{"pull failure mid-attempt", podJSON{waiting: "ErrImagePull"}, SymptomImagePullBackOff, true},
+		{"pull failure in backoff", podJSON{waiting: "ImagePullBackOff"}, SymptomImagePullBackOff, true},
+		{"still creating is not a pull failure", podJSON{waiting: "ContainerCreating"}, SymptomImagePullBackOff, false},
+		{"scheduler cannot place it", podJSON{unschedulable: true}, SymptomUnschedulable, true},
+		{"a scheduled pod is not unschedulable", podJSON{}, SymptomUnschedulable, false},
+		{"started container is running", podJSON{}, SymptomRunning, true},
+		{"creating container is not running", podJSON{waiting: "ContainerCreating"}, SymptomRunning, false},
+		{"restarted container is not merely running", podJSON{restarts: 1, lastExit: intp(1)}, SymptomRunning, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := tt.pod
+			p.name, p.labels = "a", sel
+			f := &fakePods{lists: [][]podJSON{{p}}}
+			err := WaitForSymptom(context.Background(), f, "default", sel, 1, Expect{Status: tt.expect}, 0)
+			if got := err == nil; got != tt.want {
+				t.Fatalf("matched = %v, want %v (err: %v)", got, tt.want, err)
+			}
+		})
 	}
 }
 
