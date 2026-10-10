@@ -149,6 +149,55 @@ func TestIntegration_DeclaredFaultReachesSymptom(t *testing.T) {
 	}
 }
 
+// TestIntegration_DeclaredOOMFaultReachesSymptom is DA-3's cause against a
+// live cluster: the application runs with its cache bound set to none under
+// the class's memory limit, and provision returns only once every pod has been
+// OOM-killed and restarted the declared number of times.
+func TestIntegration_DeclaredOOMFaultReachesSymptom(t *testing.T) {
+	env := setupTestEnv(t)
+	scenarioID := uniqueScenarioID("integ-oom")
+
+	started := time.Now()
+	resp := provisionAndCleanup(t, env, ProvisionRequest{
+		ScenarioID: scenarioID,
+		Environment: EnvSpec{
+			Type: "kubernetes-cluster",
+			State: []StateEntry{{
+				Kind: "deployment",
+				Name: "user-service",
+				Spec: map[string]any{
+					"status": "OOMKilled",
+					"fault":  map[string]any{"type": "config.unbounded-cache", "env": "CACHE_MAX_ENTRIES"},
+					"expect": map[string]any{"status": "OOMKilled", "restarts": 2},
+					"containers": []any{map[string]any{"name": "user-service", "env": []any{
+						map[string]any{"name": "CACHE_MAX_ENTRIES", "value": "0"},
+					}}},
+				},
+			}},
+		},
+	})
+	t.Logf("provisioned to the declared symptom in %s", time.Since(started).Round(time.Second))
+
+	ns := getNamespace(t, env, resp.EnvironmentID)
+	raw, err := env.kube.GetResource(context.Background(), "deployment", ns, "user-service")
+	if err != nil {
+		t.Fatalf("getting deployment: %v", err)
+	}
+	if m := mechanismWords.FindString(raw); m != "" {
+		t.Errorf("deployment names the mechanism (%q)", m)
+	}
+	pods, err := env.kube.ListResources(context.Background(), "pods", ns)
+	if err != nil {
+		t.Fatalf("listing pods: %v", err)
+	}
+	if !strings.Contains(pods, `"OOMKilled"`) {
+		t.Errorf("pods should carry the kernel's OOM kill, got: %s", pods)
+	}
+	if m := mechanismWords.FindString(pods); m != "" {
+		t.Errorf("pods name the mechanism (%q)", m)
+	}
+}
+
 // Test 3: StateSnapshot returns resources.
 func TestIntegration_StateSnapshot(t *testing.T) {
 	env := setupTestEnv(t)

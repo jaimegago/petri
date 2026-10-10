@@ -57,6 +57,11 @@ type applyPass struct {
 	hasMetricsEntry bool
 	// now anchors every served timestamp for this Apply.
 	now time.Time
+	// memoryLimits is the container memory limit, in bytes, each deployment
+	// entry renders with, keyed by namespace/name. The served memory trend
+	// for a workload of the same name rises to its limit, so the trend and
+	// the physical OOM kill agree.
+	memoryLimits map[string]int64
 }
 
 func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, defaultNamespace string) (*applyPass, error) {
@@ -80,7 +85,50 @@ func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, de
 		nodeUsageSeries: series,
 		hasMetricsEntry: hasMetrics,
 		now:             time.Now(),
+		memoryLimits:    deploymentMemoryLimits(entries),
 	}, nil
+}
+
+// syntheticOOMLimitBytes is the limit the symptom-only oomkilled state
+// renders (workloadstate's util-image allocator under 4Mi).
+const syntheticOOMLimitBytes = 4 << 20
+
+// deploymentMemoryLimits records the memory limit each deployment entry
+// renders with, where it renders one: a declared fault's class limit, or the
+// symptom-only oomkilled state's 4Mi.
+func deploymentMemoryLimits(entries []StateEntry) map[string]int64 {
+	out := map[string]int64{}
+	for _, e := range entries {
+		if strings.ToLower(e.Kind) != "deployment" {
+			continue
+		}
+		key := e.Namespace + "/" + e.Name
+		if spec, _, err := parseFault(e); err == nil && spec != nil {
+			if b, ok := parseMemoryQuantity(spec.Definition().MemoryLimit); ok {
+				out[key] = b
+			}
+			continue
+		}
+		if status, _ := e.Spec["status"].(string); strings.EqualFold(strings.TrimSpace(status), "oomkilled") {
+			out[key] = syntheticOOMLimitBytes
+		}
+	}
+	return out
+}
+
+// parseMemoryQuantity parses the binary-suffixed memory quantities petri
+// renders (Ki, Mi, Gi). Anything else reports false.
+func parseMemoryQuantity(q string) (int64, bool) {
+	for suffix, mult := range map[string]int64{"Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30} {
+		if n, found := strings.CutSuffix(q, suffix); found {
+			v, err := strconv.ParseInt(n, 10, 64)
+			if err != nil || v <= 0 {
+				return 0, false
+			}
+			return v * mult, true
+		}
+	}
+	return 0, false
 }
 
 // Apply translates and applies each state entry to the cluster. Declared
@@ -90,6 +138,9 @@ func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, de
 // namespace it writes into must already be resolved. See resolvedEnv.
 func (si *stateInjector) Apply(ctx context.Context, env resolvedEnv) error {
 	if err := checkFaultConsistency(env.State); err != nil {
+		return err
+	}
+	if err := si.checkFaultedRenders(env.State); err != nil {
 		return err
 	}
 	pass, err := newApplyPass(ctx, si.kube, env.State, env.Namespace)
@@ -176,6 +227,39 @@ func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry) error
 // unrecognized status surfaces here as a provision error rather than a
 // silently healthy deployment. See ADR 0015.
 func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, namespace string) error {
+	spec, err := si.deploymentSpec(e, namespace)
+	if err != nil {
+		return err
+	}
+	return workloadstate.Provision(ctx, si.kube, spec)
+}
+
+// checkFaultedRenders renders every deployment entry that declares a fault
+// before anything is applied. Render is pure and validates the fault against
+// the declared state and environment, so a faulted entry the application
+// could not fail on is refused with nothing in the cluster.
+func (si *stateInjector) checkFaultedRenders(entries []StateEntry) error {
+	for _, e := range entries {
+		if strings.ToLower(e.Kind) != "deployment" {
+			continue
+		}
+		if _, hasFault := e.Spec["fault"]; !hasFault {
+			continue
+		}
+		spec, err := si.deploymentSpec(e, e.Namespace)
+		if err != nil {
+			return err
+		}
+		if _, err := workloadstate.Render(spec); err != nil {
+			return fmt.Errorf("deployment %q: %w", e.Name, err)
+		}
+	}
+	return nil
+}
+
+// deploymentSpec builds the workloadstate.Spec a deployment state entry
+// renders from.
+func (si *stateInjector) deploymentSpec(e StateEntry, namespace string) (workloadstate.Spec, error) {
 	replicas := deploymentReplicas(e)
 
 	image := si.defaultImage
@@ -205,16 +289,16 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 
 	env, err := parseContainerEnv(e.Spec["containers"])
 	if err != nil {
-		return fmt.Errorf("deployment %q: %w", e.Name, err)
+		return workloadstate.Spec{}, fmt.Errorf("deployment %q: %w", e.Name, err)
 	}
 
 	declared, _, err := parseFault(e)
 	if err != nil {
-		return fmt.Errorf("deployment %q: %w", e.Name, err)
+		return workloadstate.Spec{}, fmt.Errorf("deployment %q: %w", e.Name, err)
 	}
 	if declared != nil {
 		if _, explicit := e.Spec["image"]; explicit {
-			return fmt.Errorf("deployment %q: %q cannot be declared beside %q; the fault is materialised by the application image", e.Name, "image", "fault")
+			return workloadstate.Spec{}, fmt.Errorf("deployment %q: %q cannot be declared beside %q; the fault is materialised by the application image", e.Name, "image", "fault")
 		}
 	}
 
@@ -228,7 +312,7 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		}
 	}
 
-	return workloadstate.Provision(ctx, si.kube, workloadstate.Spec{
+	return workloadstate.Spec{
 		Name:        e.Name,
 		Namespace:   namespace,
 		Replicas:    replicas,
@@ -242,7 +326,7 @@ func (si *stateInjector) applyDeployment(ctx context.Context, e StateEntry, name
 		Fault:       declared,
 		ErrorRate:   errorRate,
 		UtilImage:   si.utilImage,
-	})
+	}, nil
 }
 
 // deploymentMatchLabels is the selector a deployment state entry renders
@@ -270,7 +354,8 @@ func deploymentMatchLabels(e StateEntry) map[string]string {
 // `fault` declares the cause: `type` names a catalog class and the remaining
 // keys are that class's parameters, resolved by fault.Parse so a scenario and
 // a `petri inject` invocation are held to the same rules. `expect` declares
-// the symptom the provider must observe before readiness, as `status`.
+// the symptom the provider must observe before readiness, as `status`, and
+// optionally `restarts`, the restart count every pod must have reached.
 //
 // The two go together: a fault without an expect would be materialised and
 // never verified, and an expect without a fault has nothing to wait for that
@@ -315,12 +400,38 @@ func parseFault(e StateEntry) (*fault.Spec, *fault.Expect, error) {
 	if strings.TrimSpace(status) == "" {
 		return nil, nil, fmt.Errorf("%q must declare a non-empty %q", "expect", "status")
 	}
-	for k := range em {
-		if k != "status" {
-			return nil, nil, fmt.Errorf("%q: unknown field %q; only %q is declared", "expect", k, "status")
+	restarts := 0
+	for k, v := range em {
+		switch k {
+		case "status":
+		case "restarts":
+			n, ok := asNonNegativeInt(v)
+			if !ok {
+				return nil, nil, fmt.Errorf("%q: %q must be a non-negative integer, got %v", "expect", "restarts", v)
+			}
+			restarts = n
+		default:
+			return nil, nil, fmt.Errorf("%q: unknown field %q; declared fields are %q and %q", "expect", k, "status", "restarts")
 		}
 	}
-	return &spec, &fault.Expect{Status: status}, nil
+	return &spec, &fault.Expect{Status: status, Restarts: restarts}, nil
+}
+
+// asNonNegativeInt reads a YAML/JSON number as a non-negative int.
+func asNonNegativeInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, n >= 0
+	case int64:
+		return int(n), n >= 0
+	case float64:
+		if n < 0 || n != float64(int(n)) {
+			return 0, false
+		}
+		return int(n), true
+	default:
+		return 0, false
+	}
 }
 
 // checkFaultConsistency verifies, before anything is applied, that each
@@ -975,7 +1086,7 @@ func buildDashboardJSON(name string, spec map[string]any) string {
 // configured URL, and facts split across two services would leave one set
 // unreachable.
 func (si *stateInjector) applyMetrics(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
-	responses, err := buildMetricsResponses(e.Name, namespace, e.Spec, pass.nodeUsageSeries, pass.now)
+	responses, err := buildMetricsResponses(e.Name, namespace, e.Spec, pass.nodeUsageSeries, pass.memoryLimits[namespace+"/"+e.Name], pass.now)
 	if err != nil {
 		return err
 	}
@@ -1295,14 +1406,16 @@ http.server.HTTPServer(("",9093),H).serve_forever()`
 //
 //   - The legacy single-series form: metric_name, value, labels.
 //   - C-DA-003's fact form: memory_usage_trend (served as a rising
-//     container-memory range series ending near the 4Mi limit the genuine OOM
-//     machinery enforces, so the served trend and the physical OOM agree) and
-//     last_oom_kill ("<N>_<unit>_ago", served as a timestamp-seconds series).
+//     container-memory range series ending at the memory limit the workload
+//     of the same name renders with — memLimit, falling back to the
+//     symptom-only oomkilled state's 4Mi — so the served trend and the
+//     physical OOM agree) and last_oom_kill ("<N>_<unit>_ago", served as a
+//     timestamp-seconds series).
 //
 // Other spec fields pass through unserved, as they always have; extending
 // that tolerance is not this builder's call. The extra series (node-surface
 // usage facts) are appended so one endpoint serves the whole declared world.
-func buildMetricsResponses(name, namespace string, spec map[string]any, extra []metricSeries, now time.Time) (string, error) {
+func buildMetricsResponses(name, namespace string, spec map[string]any, extra []metricSeries, memLimit int64, now time.Time) (string, error) {
 	var series []metricSeries
 
 	_, hasMetricName := spec["metric_name"]
@@ -1337,7 +1450,7 @@ func buildMetricsResponses(name, namespace string, spec map[string]any, extra []
 		if !ok || trend != "monotonically_increasing" {
 			return "", fmt.Errorf("metrics %q: unsupported %s %v; the implemented trend is %q", name, "memory_usage_trend", spec["memory_usage_trend"], "monotonically_increasing")
 		}
-		series = append(series, memoryTrendSeries(name, namespace, now))
+		series = append(series, memoryTrendSeries(name, namespace, memLimit, now))
 	}
 
 	if hasOOM {
@@ -1364,21 +1477,24 @@ func buildMetricsResponses(name, namespace string, spec map[string]any, extra []
 }
 
 // memoryTrendSeries renders memory_usage_trend: monotonically_increasing as a
-// container-memory series rising over the last 30 minutes toward the 4Mi
-// limit the genuine-OOM machinery runs its workloads under, so the served
-// trend is consistent with the physically real OOM kills.
-func memoryTrendSeries(name, namespace string, now time.Time) metricSeries {
+// container-memory series rising over the last 30 minutes from a quarter of
+// limitBytes to limitBytes — the limit the workload is OOM-killed at — so the
+// served trend is consistent with the physically real OOM kills. A
+// non-positive limitBytes means the symptom-only oomkilled state's 4Mi.
+func memoryTrendSeries(name, namespace string, limitBytes int64, now time.Time) metricSeries {
 	const (
-		points     = 7
-		step       = 5 * time.Minute
-		startBytes = 1 << 20 // 1Mi
-		endBytes   = 4 << 20 // the 4Mi OOM limit
+		points = 7
+		step   = 5 * time.Minute
 	)
+	if limitBytes <= 0 {
+		limitBytes = syntheticOOMLimitBytes
+	}
+	startBytes, endBytes := limitBytes/4, limitBytes
 	samples := make([]metricSample, 0, points)
 	for i := 0; i < points; i++ {
 		at := now.Add(-time.Duration(points-1-i) * step)
-		value := startBytes + (endBytes-startBytes)*i/(points-1)
-		samples = append(samples, metricSample{at: at, value: strconv.Itoa(value)})
+		value := startBytes + (endBytes-startBytes)*int64(i)/(points-1)
+		samples = append(samples, metricSample{at: at, value: strconv.FormatInt(value, 10)})
 	}
 	return metricSeries{
 		labels: map[string]string{

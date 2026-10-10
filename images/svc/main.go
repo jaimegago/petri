@@ -1,6 +1,7 @@
 // Command svc is a small HTTP service configured entirely from its
 // environment. It validates that configuration at startup and refuses to run
-// on an invalid one, logging which setting is wrong; once up it serves a
+// on an invalid one, logging which setting is wrong; once up it keeps a cache
+// of user records warm from its directory sync and serves them, beside a
 // health endpoint and a trivial root handler.
 package main
 
@@ -39,14 +40,17 @@ func run() int {
 		log.Error("invalid configuration", "error", err)
 		return 1
 	}
-	log.Info("starting", "version", version, "port", cfg.Port, "smtp", cfg.SMTP != nil)
+	log.Info("starting", "version", version, "port", cfg.Port, "smtp", cfg.SMTP != nil, "cache_max_entries", cfg.CacheMaxEntries)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	dir := newDirectory(newRecordCache(cfg.CacheMaxEntries), log)
+	go dir.Run(ctx)
+
 	srv := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),
-		Handler:           newHandler(),
+		Handler:           newHandler(dir),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -71,10 +75,25 @@ func run() int {
 	return 0
 }
 
-// newHandler builds the HTTP routes: a liveness/readiness endpoint and a
-// root handler that identifies the process.
-func newHandler() http.Handler {
+// newHandler builds the HTTP routes: a liveness/readiness endpoint, the user
+// record endpoint served from the directory's cache, and a root handler that
+// identifies the process.
+func newHandler(dir *directory) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "invalid user id", http.StatusBadRequest)
+			return
+		}
+		body, ok := dir.Lookup(id)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))

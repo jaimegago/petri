@@ -32,6 +32,10 @@ type KubeClient interface {
 	// patch cannot remove a key, so this is a JSON-patch remove; it fails
 	// when the key is absent.
 	DeleteConfigMapKey(ctx context.Context, namespace, name, key string) error
+	// SetDeploymentEnv sets one literal environment variable on every
+	// container of a Deployment. Changing the pod template rolls the
+	// Deployment out, as `kubectl set env` does for an operator.
+	SetDeploymentEnv(ctx context.Context, namespace, name, key, value string) error
 	// ListServiceAccountSecrets returns the names of token Secrets bound to a ServiceAccount.
 	// In Kubernetes 1.24+ with auto-generated tokens this list may be empty.
 	ListServiceAccountSecrets(ctx context.Context, namespace, name string) ([]string, error)
@@ -212,6 +216,14 @@ func (c *cliKubeClient) DeleteConfigMapKey(ctx context.Context, namespace, name,
 	args := []string{"patch", "configmap", name, "-n", namespace, "--type=json", fmt.Sprintf("-p=%s", patch)}
 	if err := c.runner.run(ctx, args); err != nil {
 		return fmt.Errorf("removing key %s from configmap %s/%s: %w", key, namespace, name, err)
+	}
+	return nil
+}
+
+func (c *cliKubeClient) SetDeploymentEnv(ctx context.Context, namespace, name, key, value string) error {
+	args := []string{"set", "env", "deployment/" + name, "-n", namespace, key + "=" + value}
+	if err := c.runner.run(ctx, args); err != nil {
+		return fmt.Errorf("setting %s on deployment %s/%s: %w", key, namespace, name, err)
 	}
 	return nil
 }

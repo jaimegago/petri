@@ -25,6 +25,7 @@ const appPort = 8080
 // rendered as either.
 var faultStates = map[string]State{
 	fault.SymptomCrashLoopBackOff: StateCrashLoopBackOff,
+	fault.SymptomOOMKilled:        StateOOMKilled,
 }
 
 // Render produces the Deployment manifest for spec. It is a pure function: no
@@ -51,7 +52,9 @@ func Render(spec Spec) (string, error) {
 		utilImage = DefaultUtilImage
 	}
 
-	if len(spec.Env) > 0 && !stateRunsCallerImage(state) {
+	// A faulted workload runs the application whatever its state, so its
+	// declared environment always has a container to land on.
+	if spec.Fault == nil && len(spec.Env) > 0 && !stateRunsCallerImage(state) {
 		return "", fmt.Errorf(
 			"workload %q: state %q synthesises its own container, so a declared container environment would not be rendered; declared env is supported for %s",
 			spec.Name, state, callerImageStatesList(),
@@ -156,6 +159,24 @@ func (s Spec) validateFault(state State) error {
 		return fmt.Errorf("workload %q: fault %s produces %s and must be declared with state %q, not %q",
 			s.Name, def.Class, def.Symptom, want, state)
 	}
+	if s.Fault.Class == fault.ClassConfigUnboundedCache {
+		for _, e := range s.Env {
+			if e.Name != s.Fault.Key {
+				continue
+			}
+			if e.ConfigMapKeyRef != nil {
+				return fmt.Errorf("workload %q: fault %s needs %s declared as a literal value %q; a ConfigMap reference is not supported for this class",
+					s.Name, def.Class, s.Fault.Key, def.Value)
+			}
+			if e.Value != def.Value {
+				return fmt.Errorf("workload %q: fault %s declares %s unbounded, but the declared env sets it to %q; the application would stay bounded",
+					s.Name, def.Class, s.Fault.Key, e.Value)
+			}
+			return nil
+		}
+		return fmt.Errorf("workload %q: fault %s names %s but no declared container env sets it to %q; the application would use its bounded default",
+			s.Name, def.Class, s.Fault.Key, def.Value)
+	}
 	if s.Fault.Class == fault.ClassConfigMissingKey {
 		reads := false
 		for _, e := range s.Env {
@@ -175,10 +196,11 @@ func (s Spec) validateFault(state State) error {
 // renderFaulted materialises a Deployment running the application with the
 // declared environment, misconfigured as the fault declares. The manifest is
 // what an operator would have written for a healthy instance: the
-// application image under the workload's own name, its port, and the
-// declared environment. ConfigMap references are optional so that an absent
-// key reaches the application as an unset variable; the application's own
-// validation is then what fails, in its own log, naming the key.
+// application image under the workload's own name, its port, the declared
+// environment, and — for a class whose symptom is memory exhaustion — the
+// memory limit the class names. ConfigMap references are optional so that an
+// absent key reaches the application as an unset variable; the application's
+// own validation is then what fails, in its own log, naming the key.
 func renderFaulted(spec Spec, replicas int, matchLabels map[string]string) string {
 	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
 	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
@@ -190,6 +212,9 @@ func renderFaulted(spec Spec, replicas int, matchLabels map[string]string) strin
 	var sb strings.Builder
 	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: %d\n", image, appPort)
+	if limit := spec.Fault.Definition().MemoryLimit; limit != "" {
+		fmt.Fprintf(&sb, "        resources:\n          limits:\n            memory: %s\n", limit)
+	}
 	writeEnvYAML(&sb, spec.Env, true)
 	return sb.String()
 }

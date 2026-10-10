@@ -29,11 +29,17 @@ type Class string
 // fails its own startup validation naming the key.
 const ClassConfigMissingKey Class = "config.missing-key"
 
+// ClassConfigUnboundedCache is a cache bound set to the value the
+// application reads as "no bound". The application's own record cache then
+// grows with its directory sync until the container's memory limit is
+// reached and the kernel OOM-kills it.
+const ClassConfigUnboundedCache Class = "config.unbounded-cache"
+
 // AppImage is the pinned application image. It is a release surface:
 // Catalog documents, per class, what this version of the image genuinely
 // does, and a declaration outside that coverage is refused rather than
 // provisioned against an application that would not fail.
-const AppImage = "ghcr.io/jaimegago/svc:0.1.0"
+const AppImage = "ghcr.io/jaimegago/svc:0.2.0"
 
 // AppRepository is the image repository AppImage is pinned from. Inject uses
 // it to recognise a Deployment that runs the application, whatever version.
@@ -41,6 +47,10 @@ const AppRepository = "ghcr.io/jaimegago/svc"
 
 // SymptomCrashLoopBackOff is the symptom a startup failure produces.
 const SymptomCrashLoopBackOff = "CrashLoopBackOff"
+
+// SymptomOOMKilled is the symptom memory growth past the container's limit
+// produces: the kernel kills the process and the kubelet records OOMKilled.
+const SymptomOOMKilled = "OOMKilled"
 
 // Definition is one catalog entry: what a class needs declared, what the
 // pinned application does with it, and the symptom it produces.
@@ -55,10 +65,20 @@ type Definition struct {
 	// Symptom is the status the class produces, and what Inject waits for
 	// when the caller declares no expect of its own.
 	Symptom string
-	// Keys documents, for config.missing-key, which keys the pinned
-	// application validates and under what condition. A Spec naming a key
-	// outside this set is refused: the application would start.
+	// Keys documents which configuration keys the pinned application gives
+	// this class's semantics, and how: for config.missing-key the keys it
+	// requires and under what condition, for config.unbounded-cache the
+	// settings whose Value it reads as no bound. A Spec naming a key outside
+	// this set is refused: the application would not fail.
 	Keys map[string]string
+	// Value is, for classes that set a key rather than remove one, the
+	// value that is the misconfiguration.
+	Value string
+	// MemoryLimit is the container memory limit a class whose symptom is
+	// memory exhaustion renders on the application, and the limit a runtime
+	// injection requires the target to already carry. Empty for classes
+	// that need none.
+	MemoryLimit string
 }
 
 // catalog is the single source of truth. Order is documented order.
@@ -71,6 +91,17 @@ var catalog = []Definition{
 		Keys: map[string]string{
 			"SMTP_PORT": "required when SMTP_HOST is set",
 		},
+	},
+	{
+		Class:   ClassConfigUnboundedCache,
+		Summary: "a cache bound is set to the value the application reads as no bound; its record cache grows until the container is OOM-killed",
+		Params:  []string{"env"},
+		Symptom: SymptomOOMKilled,
+		Keys: map[string]string{
+			"CACHE_MAX_ENTRIES": "0 means no bound; the record cache keeps every record the directory sync delivers",
+		},
+		Value:       "0",
+		MemoryLimit: "64Mi",
 	},
 }
 
@@ -97,16 +128,24 @@ func Classes() []string {
 // Spec is a declared fault, resolved against the catalog.
 type Spec struct {
 	Class Class
-	// ConfigMap and Key apply to config.missing-key.
+	// ConfigMap applies to config.missing-key: the ConfigMap the key is
+	// absent from.
 	ConfigMap string
-	Key       string
+	// Key is the configuration key the fault concerns: the key absent from
+	// ConfigMap for config.missing-key, the environment variable set to the
+	// class's Value for config.unbounded-cache.
+	Key string
 }
 
 // Expect is a declared symptom: the status the workload must exhibit before
-// the environment is handed over. Status is matched against the pod's
-// container state reasons (see WaitForSymptom).
+// the environment is handed over, and optionally the restart count each pod
+// must have reached. Status is matched against the pod's container state
+// reasons (see WaitForSymptom).
 type Expect struct {
 	Status string
+	// Restarts is the minimum restart count every pod must reach. Zero
+	// asks for none beyond what Status implies.
+	Restarts int
 }
 
 // Parse resolves a class name and its parameters into a Spec, validating
@@ -136,6 +175,12 @@ func Parse(class string, params map[string]string) (Spec, error) {
 			return Spec{}, fmt.Errorf("fault %s: key %q is not one %s validates (%s); the application would start",
 				def.Class, spec.Key, AppImage, describeKeys(def.Keys))
 		}
+	case ClassConfigUnboundedCache:
+		spec.Key = params["env"]
+		if _, covered := def.Keys[spec.Key]; !covered {
+			return Spec{}, fmt.Errorf("fault %s: setting %q is not one %s reads as a cache bound (%s); the application would stay bounded",
+				def.Class, spec.Key, AppImage, describeKeys(def.Keys))
+		}
 	}
 	return spec, nil
 }
@@ -150,6 +195,8 @@ func (s Spec) String() string {
 	switch s.Class {
 	case ClassConfigMissingKey:
 		return fmt.Sprintf("%s configMap=%s key=%s", s.Class, s.ConfigMap, s.Key)
+	case ClassConfigUnboundedCache:
+		return fmt.Sprintf("%s env=%s", s.Class, s.Key)
 	default:
 		return string(s.Class)
 	}

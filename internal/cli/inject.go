@@ -95,8 +95,8 @@ the symptom is verified before the command returns):
   %s
 
 A cause takes its class parameters as --param (config.missing-key: configMap,
-key) and optionally --param expect=<status> to override the symptom waited
-for. --target must name a Deployment. Only the second trigger of the same
+key; config.unbounded-cache: env) and optionally --param expect=<status> to
+override the symptom waited for. --target must name a Deployment. Only the second trigger of the same
 catalog petri serve materialises at provision time.
 
 Scenario mode (--scenario <file.yaml>) replays the ordered steps of a
@@ -121,6 +121,7 @@ Examples:
   petri inject cpu_pressure --lab eval-lab --target apps/Pod/api --param duration=30s --param workers=2
   petri inject kill_pod --kubeconfig ~/.kube/config --target apps/Pod/frontend --dry-run
   petri inject config.missing-key --lab eval-lab --target default/Deployment/notification-service --param configMap=smtp-config --param key=SMTP_PORT
+  petri inject config.unbounded-cache --lab eval-lab --target default/Deployment/user-service --param env=CACHE_MAX_ENTRIES
   petri inject --scenario scenarios/db-cascade.yaml --lab eval-lab --dry-run
   petri inject --state oomkilled --lab eval-lab --target apps/Deployment/batch-worker`, accepted, causes, states),
 		Args: cobra.MaximumNArgs(1),

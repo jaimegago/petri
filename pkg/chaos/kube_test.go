@@ -122,6 +122,23 @@ func TestCLIKubeClient_RestartDeployment(t *testing.T) {
 	}
 }
 
+func TestCLIKubeClient_SetDeploymentEnv(t *testing.T) {
+	t.Parallel()
+
+	r := newFakeRunner(nil)
+	c := newKubeClientWithRunner(r)
+	if err := c.SetDeploymentEnv(context.Background(), "ns", "user-service", "CACHE_MAX_ENTRIES", "0"); err != nil {
+		t.Fatalf("SetDeploymentEnv() error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("calls = %v", r.calls)
+	}
+	got := strings.Join(r.calls[0], " ")
+	if got != "set env deployment/user-service -n ns CACHE_MAX_ENTRIES=0" {
+		t.Errorf("unexpected args: %s", got)
+	}
+}
+
 func TestCLIKubeClient_ScaleDeployment(t *testing.T) {
 	t.Parallel()
 

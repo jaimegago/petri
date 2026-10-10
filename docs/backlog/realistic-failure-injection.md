@@ -106,3 +106,8 @@ application with the symptom verified before readiness.
 
 This item stays open until slices 2–4 (DA-3, DA-2, DA-4) have landed their
 fault classes.
+
+**Slice 2 (DA-3) landed 2026-10-10:** `config.unbounded-cache` on `svc` `0.2.0`
+— `CACHE_MAX_ENTRIES=0` grows the record cache until the kernel OOM-kills it,
+verified as `expect: {status: OOMKilled, restarts: 2}`
+(`joe-pm/threads/da3-real-app.md`).

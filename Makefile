@@ -3,7 +3,7 @@ CMD := ./cmd/petri
 
 SVC_DIR := images/svc
 SVC_IMAGE := ghcr.io/jaimegago/svc
-SVC_VERSION ?= 0.1.0
+SVC_VERSION ?= 0.2.0
 
 .PHONY: run dev test build clean install svc-test svc-image svc-push
 

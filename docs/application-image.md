@@ -19,6 +19,11 @@ that it exits on purpose. See [ADR 0017](decisions/0017-causes-through-the-appli
 - Identity comes from the scenario: one image runs under whatever name the
   Deployment gives it (`notification-service`, `api-service`, …).
 - It listens on `PORT` (default 8080).
+- Its record cache is bounded by `CACHE_MAX_ENTRIES` (default 1024, least
+  recently used evicted; `0` means no bound). The directory sync delivers a
+  page of 64 records of 16 KiB every 250 ms, so a bounded cache holds about
+  16 MiB and an unbounded one grows by about 4 MiB/s. It logs its
+  configuration at startup and the cache's entry count and bytes every 5 s.
 
 ## Pin and coverage
 
@@ -30,11 +35,18 @@ would start, and the declared symptom would never arrive.
 | Version | Fault class | What the application does |
 |---|---|---|
 | `0.1.0` | `config.missing-key` | `SMTP_PORT` is required when `SMTP_HOST` is set; startup fails with `SMTP_PORT is required when SMTP_HOST is set`, exit 1 |
+| `0.2.0` | `config.missing-key` | unchanged from `0.1.0` |
+| `0.2.0` | `config.unbounded-cache` | `CACHE_MAX_ENTRIES=0` means no bound: the record cache keeps every record the directory sync delivers and grows until the container's memory limit, where the kernel OOM-kills it (`OOMKilled`, exit 137). Provision renders a `64Mi` limit; measured on kind v1.35.0, each run lasts about 13 s, and the restart count reaches 1 at ~13 s, 2 at ~40 s, 3 at ~80 s and 4 at ~145 s under the kubelet's backoff |
+
+A version covers every class of the versions before it unless the table says
+otherwise; the pin moves forward, never sideways.
 
 Every failure is a plausible misconfiguration with the semantics a real
-application gives it, never a switch: there is no `ENABLE_CRASH`, and the
-dependency between `SMTP_HOST` and `SMTP_PORT` is how a mail-sending service
-behaves. Adding a fault class means adding real behaviour the class selects by
+application gives it, never a switch: there is no `ENABLE_CRASH` and no
+`ENABLE_LEAK`. The dependency between `SMTP_HOST` and `SMTP_PORT` is how a
+mail-sending service behaves, and `0` meaning "no bound" is what most
+in-process caches give it — an operator who sets it meaning "no cache" gets
+the opposite. Adding a fault class means adding real behaviour the class selects by
 ordinary configuration, a new image version, and a new catalog row here and in
 `fault.Catalog`.
 
@@ -42,8 +54,8 @@ ordinary configuration, a new image version, and a new catalog row here and in
 
 ```bash
 make svc-test                       # unit tests of the nested module
-make svc-image SVC_VERSION=0.1.0    # local single-arch build, tagged as the pin
-make svc-push  SVC_VERSION=0.1.0    # multi-arch (amd64, arm64) build and push to ghcr.io
+make svc-image SVC_VERSION=0.2.0    # local single-arch build, tagged as the pin
+make svc-push  SVC_VERSION=0.2.0    # multi-arch (amd64, arm64) build and push to ghcr.io
 ```
 
 **Publishing is a release surface CI owns; no human holds a registry
@@ -55,7 +67,7 @@ not the one `fault.AppImage` pins, and `TestAppImagePinMatchesMakefile` keeps
 the Makefile default on that same version. To release:
 
 ```bash
-git tag svc/v0.1.0 && git push origin svc/v0.1.0
+git tag svc/v0.2.0 && git push origin svc/v0.2.0
 ```
 
 The package is public, so a lab pulls it anonymously. `svc-push` run by hand
@@ -67,8 +79,9 @@ then `kind load docker-image ghcr.io/jaimegago/svc:<version> --name <lab>`.
 
 Nothing that names the mechanism. The rendered Deployment is what an operator
 would have written for a healthy instance — the image, the port, the declared
-environment with its ConfigMap references — and the failure is the
-application's own. Checked in tests with a word-bounded match on
-`simulation|petri|fault|inject|chaos` (word-bounded because `default`
+environment with its ConfigMap references, and a memory limit where the class
+needs one — and the failure is the application's own. Checked in tests with a word-bounded match on
+`simulation|petri|fault|inject|chaos|leak` (word-bounded because `default`
 contains `fault`). The binary's own strings contain Go runtime identifiers
-such as `runtime.injectglist` and the DNS class `CHAOS`; they are not petri's.
+such as `runtime.(*sigctxt).fault` (and, in `0.1.0`, `runtime.injectglist`
+and the DNS class `CHAOS`); they are not petri's.

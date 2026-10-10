@@ -15,7 +15,14 @@ type Config struct {
 	// SMTP is the outbound mail configuration. Present only when SMTP_HOST is
 	// set; a service that is not configured to send mail does not need it.
 	SMTP *SMTPConfig
+	// CacheMaxEntries bounds the record cache. CACHE_MAX_ENTRIES, default
+	// DefaultCacheMaxEntries. Zero means no bound: nothing is ever evicted.
+	CacheMaxEntries int
 }
+
+// DefaultCacheMaxEntries is the record cache bound when CACHE_MAX_ENTRIES is
+// unset.
+const DefaultCacheMaxEntries = 1024
 
 // SMTPConfig is the outbound mail relay the service delivers through.
 type SMTPConfig struct {
@@ -34,7 +41,7 @@ type Getenv func(key string) (string, bool)
 // Errors are joined so an operator sees every problem in one start attempt.
 func LoadConfig(env Getenv) (Config, error) {
 	var errs []error
-	cfg := Config{Port: 8080}
+	cfg := Config{Port: 8080, CacheMaxEntries: DefaultCacheMaxEntries}
 
 	if raw, ok := env("PORT"); ok {
 		port, err := parsePort("PORT", raw)
@@ -42,6 +49,15 @@ func LoadConfig(env Getenv) (Config, error) {
 			errs = append(errs, err)
 		} else {
 			cfg.Port = port
+		}
+	}
+
+	if raw, ok := env("CACHE_MAX_ENTRIES"); ok {
+		n, err := parseCacheMaxEntries(raw)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			cfg.CacheMaxEntries = n
 		}
 	}
 
@@ -88,4 +104,18 @@ func parsePort(name, raw string) (int, error) {
 		return 0, fmt.Errorf("%s must be in 1..65535, got %d", name, port)
 	}
 	return port, nil
+}
+
+// parseCacheMaxEntries parses the cache bound. Zero is accepted and means the
+// cache is unbounded, as it does for most in-process caches; a negative bound
+// is meaningless and refused.
+func parseCacheMaxEntries(raw string) (int, error) {
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("CACHE_MAX_ENTRIES must be an integer, got %q", raw)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("CACHE_MAX_ENTRIES must be >= 0, got %d", n)
+	}
+	return n, nil
 }

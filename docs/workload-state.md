@@ -67,8 +67,11 @@ null-routed by some networks).
 - `Fault` — a `fault.Spec` from the cause catalog (`pkg/fault`). When set the
   state is materialised through the application rather than a synthetic
   container, ConfigMap references render `optional: true` so the absence
-  reaches the application, and the state must be the one the fault's class
-  produces. The caller verifies the declared symptom afterwards with
+  reaches the application, a class whose symptom is memory exhaustion renders
+  its memory limit, and the state must be the one the fault's class produces
+  (`config.missing-key` under `crashloopbackoff`, `config.unbounded-cache`
+  under `oomkilled`). A declared `Env` is rendered under a fault whatever the
+  state, since the application is always the container. The caller verifies the declared symptom afterwards with
   `fault.WaitForSymptom`; `Render` only materialises. See
   [ADR 0017](decisions/0017-causes-through-the-application.md).
 - `AppImage` — override for the application image; defaults to `fault.AppImage`.
@@ -108,7 +111,8 @@ A state names a symptom. When the *cause* of that symptom is what an agent is
 evaluated on diagnosing, the symptom alone is not enough — a container built
 to crash announces that it was built to crash. `pkg/fault` is the catalog of
 causes: a `Spec` names a misconfiguration (`config.missing-key` carries the
-ConfigMap and key) and the symptom it produces, and `Spec.Fault` hands it to
+ConfigMap and key; `config.unbounded-cache` the setting the application reads
+as its cache bound) and the symptom it produces, and `Spec.Fault` hands it to
 this package, which renders the application born misconfigured. The runtime
 trigger, `petri inject <class>`, applies the same misconfiguration to a
 healthy running application. Both verify the symptom before reporting

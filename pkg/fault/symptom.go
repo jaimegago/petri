@@ -47,8 +47,16 @@ func (e *ErrSymptomUnmet) Error() string {
 	if len(parts) > 0 {
 		seen = strings.Join(parts, ", ")
 	}
-	return fmt.Sprintf("workload %s/%s did not reach declared symptom %q within %s; observed: %s",
-		e.Namespace, e.Workload, e.Expect.Status, e.Timeout, seen)
+	return fmt.Sprintf("workload %s/%s did not reach declared symptom %s within %s; observed: %s",
+		e.Namespace, e.Workload, e.Expect.String(), e.Timeout, seen)
+}
+
+// String renders the expectation for logs and errors.
+func (e Expect) String() string {
+	if e.Restarts > 0 {
+		return fmt.Sprintf("%q with restarts>=%d", e.Status, e.Restarts)
+	}
+	return fmt.Sprintf("%q", e.Status)
 }
 
 // WaitForSymptom polls the pods selected by selector in namespace until every
@@ -67,7 +75,13 @@ func (e *ErrSymptomUnmet) Error() string {
 // period and first appears after several restarts, while the restart count
 // and the failed termination are visible from the first restart onwards.
 // Any other status matches a container whose current or last state reason
-// equals it, case-insensitively.
+// equals it, case-insensitively — OOMKilled is the kubelet's recorded reason
+// for a kernel OOM kill, current while the container waits out its backoff
+// and last once it has restarted.
+//
+// When expect declares Restarts, a container matches only once its restart
+// count has also reached it, so a declaration that the workload "keeps
+// restarting" is verified rather than assumed.
 func WaitForSymptom(ctx context.Context, kube PodLister, namespace string, selector map[string]string, minPods int, expect Expect, timeout time.Duration) error {
 	if minPods < 1 {
 		minPods = 1
@@ -168,6 +182,9 @@ func (p pod) exhibits(expect Expect) (bool, string) {
 	for _, c := range p.Status.ContainerStatuses {
 		reasons := c.reasons()
 		seen = append(seen, fmt.Sprintf("%s(restarts=%d)", strings.Join(reasons, "/"), c.RestartCount))
+		if c.RestartCount < expect.Restarts {
+			continue
+		}
 		if want == strings.ToLower(SymptomCrashLoopBackOff) && c.crashLooping() {
 			return true, ""
 		}

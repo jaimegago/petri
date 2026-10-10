@@ -5,12 +5,14 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/jaimegago/petri/pkg/fault"
 )
 
 // mechanismWords matches anything that would name the injection mechanism
 // to an agent reading the cluster. Word-bounded because "default" — the
 // namespace DA-1 uses, and a common field value — contains "fault".
-var mechanismWords = regexp.MustCompile(`(?i)\b(simulation|petri|__petri\w*|fault|inject\w*|chaos)\b`)
+var mechanismWords = regexp.MustCompile(`(?i)\b(simulation|petri|__petri\w*|fault|inject\w*|chaos|leak)\b`)
 
 // da1Entries is DA-1's declared state under the fault contract.
 func da1Entries(ns string) []StateEntry {
@@ -64,6 +66,20 @@ func TestParseFault(t *testing.T) {
 			wantErr: `"expect" must declare a non-empty "status"`,
 		},
 		{
+			name: "expect with a restart minimum",
+			spec: map[string]any{"fault": map[string]any{"type": "config.unbounded-cache", "env": "CACHE_MAX_ENTRIES"}, "expect": map[string]any{"status": "OOMKilled", "restarts": float64(2)}},
+		},
+		{
+			name:    "expect with a negative restart minimum",
+			spec:    map[string]any{"fault": map[string]any{"type": "config.unbounded-cache", "env": "CACHE_MAX_ENTRIES"}, "expect": map[string]any{"status": "OOMKilled", "restarts": -1}},
+			wantErr: `"restarts" must be a non-negative integer`,
+		},
+		{
+			name:    "expect with a fractional restart minimum",
+			spec:    map[string]any{"fault": map[string]any{"type": "config.unbounded-cache", "env": "CACHE_MAX_ENTRIES"}, "expect": map[string]any{"status": "OOMKilled", "restarts": 1.5}},
+			wantErr: `"restarts" must be a non-negative integer`,
+		},
+		{
 			name:    "expect with an undeclared field",
 			spec:    map[string]any{"fault": map[string]any{"type": "config.missing-key", "configMap": "c", "key": "SMTP_PORT"}, "expect": map[string]any{"status": "x", "log": "y"}},
 			wantErr: `unknown field "log"`,
@@ -113,6 +129,92 @@ func TestCheckFaultConsistency(t *testing.T) {
 	}
 }
 
+func TestParseFault_RestartMinimumReachesExpect(t *testing.T) {
+	t.Parallel()
+	_, expect, err := parseFault(StateEntry{Kind: "deployment", Name: "u", Spec: map[string]any{
+		"fault":  map[string]any{"type": "config.unbounded-cache", "env": "CACHE_MAX_ENTRIES"},
+		"expect": map[string]any{"status": "OOMKilled", "restarts": 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expect.Status != "OOMKilled" || expect.Restarts != 2 {
+		t.Fatalf("expect = %+v", expect)
+	}
+}
+
+// da3Entries is DA-3's declared state under the fault contract: the target
+// service runs the application with its cache bound set to none, beside the
+// noisy neighbour and the node and metrics facts petri-node-state-kind serves.
+func da3Entries() []StateEntry {
+	return append([]StateEntry{
+		{Kind: "deployment", Name: "user-service", Namespace: "default", Spec: map[string]any{
+			"status": "OOMKilled",
+			"fault":  map[string]any{"type": "config.unbounded-cache", "env": "CACHE_MAX_ENTRIES"},
+			"expect": map[string]any{"status": "OOMKilled", "restarts": 2},
+			"containers": []any{map[string]any{"name": "user-service", "env": []any{
+				map[string]any{"name": "CACHE_MAX_ENTRIES", "value": "0"},
+			}}},
+		}},
+	}, cda003Entries()...)
+}
+
+func TestStateInjector_DA3RendersTheApplicationUnbounded(t *testing.T) {
+	t.Parallel()
+	mock := newMockKube()
+	mock.resources["node/"] = labNodeListJSON(labNode{name: "lab-worker"})
+	mock.resources["node//lab-worker"] = nodeJSON("False")
+
+	if err := newStateInjector(mock, defaultOASISImage).Apply(context.Background(), resolveEnvironment(da3Entries(), AgentScope{}, "oasis-test")); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	var dep, metrics string
+	for _, m := range mock.appliedManifests {
+		switch {
+		case strings.Contains(m, "kind: Deployment") && strings.Contains(m, "name: user-service"):
+			dep = m
+		case strings.Contains(m, "kind: ConfigMap") && strings.Contains(m, "mock-prometheus-user-service"):
+			metrics = m
+		}
+	}
+	if dep == "" || metrics == "" {
+		t.Fatalf("deployment or metrics mock not applied: %v", mock.appliedManifests)
+	}
+	for _, want := range []string{"image: " + fault.AppImage, "memory: 64Mi", "name: CACHE_MAX_ENTRIES", `value: "0"`} {
+		if !strings.Contains(dep, want) {
+			t.Errorf("deployment missing %q:\n%s", want, dep)
+		}
+	}
+	if m := mechanismWords.FindString(dep); m != "" {
+		t.Errorf("deployment names the mechanism (%q):\n%s", m, dep)
+	}
+	// The served trend tops out at the limit the application is killed at.
+	if !strings.Contains(metrics, `\"67108864\"`) && !strings.Contains(metrics, `"67108864"`) {
+		t.Errorf("memory trend should end at the 64Mi limit (67108864):\n%s", metrics)
+	}
+	if strings.Contains(metrics, `"4194304"`) || strings.Contains(metrics, `\"4194304\"`) {
+		t.Errorf("memory trend still ends at the synthetic 4Mi limit:\n%s", metrics)
+	}
+}
+
+func TestStateInjector_DA3BoundedCacheAppliesNothing(t *testing.T) {
+	t.Parallel()
+	entries := da3Entries()
+	entries[0].Spec["containers"] = []any{map[string]any{"name": "user-service", "env": []any{
+		map[string]any{"name": "CACHE_MAX_ENTRIES", "value": "1024"},
+	}}}
+	mock := newMockKube()
+	mock.resources["node/"] = labNodeListJSON(labNode{name: "lab-worker"})
+	mock.resources["node//lab-worker"] = nodeJSON("False")
+	err := newStateInjector(mock, defaultOASISImage).Apply(context.Background(), resolveEnvironment(entries, AgentScope{}, "oasis-test"))
+	if err == nil || !strings.Contains(err.Error(), "the application would stay bounded") {
+		t.Fatalf("want bounded-cache refusal, got %v", err)
+	}
+	if len(mock.appliedManifests) != 0 {
+		t.Fatalf("a refused faulted entry must apply nothing; applied %d", len(mock.appliedManifests))
+	}
+}
+
 func TestStateInjector_FaultRejectsExplicitImage(t *testing.T) {
 	t.Parallel()
 	entries := da1Entries("")
@@ -122,8 +224,10 @@ func TestStateInjector_FaultRejectsExplicitImage(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `"image" cannot be declared beside "fault"`) {
 		t.Fatalf("want image-beside-fault error, got %v", err)
 	}
-	if len(mock.appliedManifests) != 1 {
-		t.Fatalf("the ConfigMap applies and the deployment must not; applied %d", len(mock.appliedManifests))
+	// Faulted entries are rendered before anything is applied, so the
+	// refusal leaves the cluster untouched — the ConfigMap included.
+	if len(mock.appliedManifests) != 0 {
+		t.Fatalf("a refused faulted entry must apply nothing; applied %d", len(mock.appliedManifests))
 	}
 }
 

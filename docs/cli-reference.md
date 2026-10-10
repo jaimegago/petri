@@ -237,14 +237,20 @@ trigger into the catalog `petri serve` materialises at provision time — see
 [application-image.md](application-image.md) and
 [ADR 0017](decisions/0017-causes-through-the-application.md). A cause is a
 misconfiguration the application genuinely fails on, applied to a running
-Deployment **of the application image**; the command removes the key, restarts
-the rollout, and returns only when the new generation exhibits the symptom
-(`symptom reached`) or the timeout elapses. It refuses a target on any other
-image, a target that does not read the named ConfigMap, and a key already
-absent.
+Deployment **of the application image**; the command applies the
+misconfiguration, rolls the Deployment out, and returns only when the new
+generation exhibits the symptom (`symptom reached`) or the timeout elapses. It
+refuses a target on any other image, and a target already misconfigured.
 
 - `config.missing-key` — `--param configMap=<name> --param key=<KEY>`; symptom
-  `CrashLoopBackOff`. The key must be one the pinned image validates.
+  `CrashLoopBackOff`. Removes the key from the ConfigMap and restarts the
+  rollout. The key must be one the pinned image validates; the target must
+  read the ConfigMap.
+- `config.unbounded-cache` — `--param env=<SETTING>`; symptom `OOMKilled`.
+  Sets the setting to the value the application reads as no bound
+  (`CACHE_MAX_ENTRIES=0`), which is itself the rollout. The target must carry
+  a memory limit — without one the growth would exhaust the node, not the
+  container — and must not already be unbounded.
 
 `--param expect=<status>` overrides the symptom waited for. `--target` must
 name a Deployment.
@@ -253,6 +259,10 @@ name a Deployment.
 # Remove SMTP_PORT from smtp-config and wait for notification-service to crash-loop
 petri inject config.missing-key --lab eval-lab --target default/Deployment/notification-service \
   --param configMap=smtp-config --param key=SMTP_PORT
+
+# Unbound user-service's record cache and wait for its new pod to be OOM-killed
+petri inject config.unbounded-cache --lab eval-lab --target default/Deployment/user-service \
+  --param env=CACHE_MAX_ENTRIES
 ```
 
 **Scenario mode.** `--scenario <file.yaml>` loads a `pkg/scenarios` file and

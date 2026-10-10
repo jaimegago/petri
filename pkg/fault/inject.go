@@ -16,6 +16,7 @@ type InjectClient interface {
 	GetConfigMap(ctx context.Context, namespace, name string) (map[string]string, error)
 	DeleteConfigMapKey(ctx context.Context, namespace, name, key string) error
 	RestartDeployment(ctx context.Context, namespace, name string) error
+	SetDeploymentEnv(ctx context.Context, namespace, name, key, value string) error
 }
 
 // Target is the Deployment a runtime injection applies to.
@@ -26,8 +27,8 @@ type Target struct {
 
 // Inject applies spec to a healthy running application at runtime and waits
 // for expect. It is the second trigger into the same catalog as provision
-// time, and leaves the trail a real bad change leaves: the ConfigMap edited,
-// a rollout restarted, a previous ReplicaSet that was fine.
+// time, and leaves the trail a real bad change leaves: the ConfigMap edited
+// or the environment changed, a rollout, a previous ReplicaSet that was fine.
 //
 // It refuses a target that does not run the application image, because only
 // the application genuinely fails on the misconfiguration — anything else
@@ -74,6 +75,24 @@ func Inject(ctx context.Context, kube InjectClient, target Target, spec Spec, ex
 			return err
 		}
 		if err := kube.RestartDeployment(ctx, target.Namespace, target.Name); err != nil {
+			return err
+		}
+	case ClassConfigUnboundedCache:
+		def := spec.Definition()
+		// Without a memory limit the growth is bounded only by the node: the
+		// symptom would arrive as node pressure and evictions across the lab,
+		// not as this workload's OOM kill.
+		if !dep.hasMemoryLimit() {
+			return fmt.Errorf("deployment %s/%s sets no memory limit; fault %s needs one (provision renders %s) or the growth would exhaust the node rather than the container",
+				target.Namespace, target.Name, spec.Class, def.MemoryLimit)
+		}
+		if v, set := dep.envValue(spec.Key); set && v == def.Value {
+			return fmt.Errorf("deployment %s/%s already sets %s=%s; the application is not healthy with respect to this fault",
+				target.Namespace, target.Name, spec.Key, def.Value)
+		}
+		// Changing the pod template is itself the rollout, as an operator's
+		// `kubectl set env` would be.
+		if err := kube.SetDeploymentEnv(ctx, target.Namespace, target.Name, spec.Key, def.Value); err != nil {
 			return err
 		}
 	default:
@@ -158,8 +177,13 @@ type deployment struct {
 		Template struct {
 			Spec struct {
 				Containers []struct {
-					Image string `json:"image"`
-					Env   []struct {
+					Image     string `json:"image"`
+					Resources struct {
+						Limits map[string]string `json:"limits"`
+					} `json:"resources"`
+					Env []struct {
+						Name      string `json:"name"`
+						Value     string `json:"value"`
 						ValueFrom *struct {
 							ConfigMapKeyRef *struct {
 								Name string `json:"name"`
@@ -220,4 +244,33 @@ func (d deployment) referencesConfigMap(name string) bool {
 
 func (d deployment) selector() map[string]string {
 	return d.Spec.Selector.MatchLabels
+}
+
+// hasMemoryLimit reports whether every container of the application image
+// carries a memory limit.
+func (d deployment) hasMemoryLimit() bool {
+	found := false
+	for _, c := range d.Spec.Template.Spec.Containers {
+		if !strings.HasPrefix(c.Image, AppRepository+":") && !strings.HasPrefix(c.Image, AppRepository+"@") {
+			continue
+		}
+		if c.Resources.Limits["memory"] == "" {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
+// envValue returns the literal value a container sets for name, and whether
+// any container sets it literally.
+func (d deployment) envValue(name string) (string, bool) {
+	for _, c := range d.Spec.Template.Spec.Containers {
+		for _, e := range c.Env {
+			if e.Name == name && e.ValueFrom == nil {
+				return e.Value, true
+			}
+		}
+	}
+	return "", false
 }

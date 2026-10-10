@@ -45,7 +45,25 @@ func TestParse(t *testing.T) {
 			name:    "a key the application does not validate is refused",
 			class:   "config.missing-key",
 			params:  map[string]string{"configMap": "smtp-config", "key": "SMTP_USER"},
-			wantErr: `key "SMTP_USER" is not one ghcr.io/jaimegago/svc:0.1.0 validates`,
+			wantErr: `key "SMTP_USER" is not one ` + AppImage + ` validates`,
+		},
+		{
+			name:   "config.unbounded-cache with a covered setting",
+			class:  "config.unbounded-cache",
+			params: map[string]string{"env": "CACHE_MAX_ENTRIES"},
+			want:   Spec{Class: ClassConfigUnboundedCache, Key: "CACHE_MAX_ENTRIES"},
+		},
+		{
+			name:    "a setting the application does not read as a bound is refused",
+			class:   "config.unbounded-cache",
+			params:  map[string]string{"env": "CACHE_TTL"},
+			wantErr: `setting "CACHE_TTL" is not one ` + AppImage + ` reads as a cache bound`,
+		},
+		{
+			name:    "config.unbounded-cache requires its setting",
+			class:   "config.unbounded-cache",
+			params:  map[string]string{},
+			wantErr: `parameter "env" is required`,
 		},
 	}
 	for _, tc := range tests {
@@ -94,13 +112,22 @@ type fakePods struct {
 }
 
 type podJSON struct {
-	name     string
-	labels   map[string]string
-	deleting bool
-	restarts int
-	waiting  string
-	termExit *int
-	lastExit *int
+	name       string
+	labels     map[string]string
+	deleting   bool
+	restarts   int
+	waiting    string
+	termExit   *int
+	lastExit   *int
+	termReason string // defaults to Error
+	lastReason string // defaults to Error
+}
+
+func reasonOr(r string) string {
+	if r == "" {
+		return "Error"
+	}
+	return r
 }
 
 func intp(i int) *int { return &i }
@@ -125,11 +152,11 @@ func (f *fakePods) ListResources(_ context.Context, kind, _ string) (string, err
 			state["waiting"] = map[string]any{"reason": p.waiting}
 		}
 		if p.termExit != nil {
-			state["terminated"] = map[string]any{"reason": "Error", "exitCode": *p.termExit}
+			state["terminated"] = map[string]any{"reason": reasonOr(p.termReason), "exitCode": *p.termExit}
 		}
 		last := map[string]any{}
 		if p.lastExit != nil {
-			last["terminated"] = map[string]any{"reason": "Error", "exitCode": *p.lastExit}
+			last["terminated"] = map[string]any{"reason": reasonOr(p.lastReason), "exitCode": *p.lastExit}
 		}
 		items = append(items, map[string]any{
 			"metadata": meta,
@@ -213,6 +240,53 @@ func TestWaitForSymptom_GenericStatusMatchesReason(t *testing.T) {
 	}
 }
 
+func TestWaitForSymptom_OOMKilledWithRestartMinimum(t *testing.T) {
+	t.Parallel()
+	sel := map[string]string{"app": "u"}
+	f := &fakePods{lists: [][]podJSON{
+		// Running before the first kill.
+		{{name: "a", labels: sel}},
+		// Killed once: the reason is there, the restart count is not yet.
+		{{name: "a", labels: sel, restarts: 1, lastExit: intp(137), lastReason: "OOMKilled"}},
+		// Waiting out its backoff after the second kill.
+		{{name: "a", labels: sel, restarts: 2, termExit: intp(137), termReason: "OOMKilled", lastExit: intp(137), lastReason: "OOMKilled"}},
+	}}
+	err := WaitForSymptom(context.Background(), f, "default", sel, 1, Expect{Status: "OOMKilled", Restarts: 2}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if f.calls != 3 {
+		t.Fatalf("expected 3 polls, got %d", f.calls)
+	}
+}
+
+func TestWaitForSymptom_RestartMinimumUnmetIsReported(t *testing.T) {
+	t.Parallel()
+	sel := map[string]string{"app": "u"}
+	f := &fakePods{lists: [][]podJSON{
+		{{name: "a", labels: sel, restarts: 1, lastExit: intp(137), lastReason: "OOMKilled"}},
+	}}
+	err := WaitForSymptom(context.Background(), f, "default", sel, 1, Expect{Status: "OOMKilled", Restarts: 3}, 0)
+	var unmet *ErrSymptomUnmet
+	if !errors.As(err, &unmet) {
+		t.Fatalf("want *ErrSymptomUnmet, got %v", err)
+	}
+	if got := unmet.Error(); !strings.Contains(got, `"OOMKilled" with restarts>=3`) || !strings.Contains(got, "a=OOMKilled(restarts=1)") {
+		t.Fatalf("unexpected message: %s", got)
+	}
+}
+
+func TestWaitForSymptom_OOMKilledDoesNotMatchCrashLoop(t *testing.T) {
+	t.Parallel()
+	sel := map[string]string{"app": "u"}
+	f := &fakePods{lists: [][]podJSON{
+		{{name: "a", labels: sel, restarts: 3, waiting: "CrashLoopBackOff", lastExit: intp(1)}},
+	}}
+	if err := WaitForSymptom(context.Background(), f, "default", sel, 1, Expect{Status: "OOMKilled"}, 0); err == nil {
+		t.Fatal("a crash loop on exit 1 is not an OOM kill")
+	}
+}
+
 // fakeInjectClient scripts the runtime trigger's cluster surface.
 type fakeInjectClient struct {
 	*fakePods
@@ -220,6 +294,12 @@ type fakeInjectClient struct {
 	cm         map[string]string
 	deleted    []string
 	restarted  []string
+	setEnv     []string
+}
+
+func (f *fakeInjectClient) SetDeploymentEnv(_ context.Context, ns, name, key, value string) error {
+	f.setEnv = append(f.setEnv, ns+"/"+name+"/"+key+"="+value)
+	return nil
 }
 
 func (f *fakeInjectClient) GetResource(_ context.Context, kind, _, _ string) (string, error) {
@@ -308,6 +388,69 @@ func TestInject_Refusals(t *testing.T) {
 			}
 			if len(tc.kube.deleted) != 0 || len(tc.kube.restarted) != 0 {
 				t.Fatalf("refusal must not mutate: deleted=%v restarted=%v", tc.kube.deleted, tc.kube.restarted)
+			}
+		})
+	}
+}
+
+func cacheDeployment(image, limit, cacheValue string) string {
+	resources := `{}`
+	if limit != "" {
+		resources = `{"limits":{"memory":"` + limit + `"}}`
+	}
+	env := `[]`
+	if cacheValue != "" {
+		env = `[{"name":"CACHE_MAX_ENTRIES","value":"` + cacheValue + `"}]`
+	}
+	return `{"spec":{"replicas":1,"selector":{"matchLabels":{"app":"u"}},"template":{"spec":{"containers":[{"image":"` + image +
+		`","resources":` + resources + `,"env":` + env + `}]}}}}`
+}
+
+func TestInject_UnboundedCacheSetsEnvAndWaitsForOOMKill(t *testing.T) {
+	t.Parallel()
+	sel := map[string]string{"app": "u"}
+	pods := &fakePods{lists: [][]podJSON{
+		{{name: "old-1", labels: sel}},
+		{{name: "old-1", labels: sel}, {name: "new-1", labels: sel, restarts: 1, lastExit: intp(137), lastReason: "OOMKilled"}},
+	}}
+	kube := &fakeInjectClient{fakePods: pods, deployment: cacheDeployment(AppImage, "64Mi", "")}
+	spec, err := Parse("config.unbounded-cache", map[string]string{"env": "CACHE_MAX_ENTRIES"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Inject(context.Background(), kube, Target{Namespace: "default", Name: "u"}, spec, Expect{}, 5*time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(kube.setEnv) != 1 || kube.setEnv[0] != "default/u/CACHE_MAX_ENTRIES=0" {
+		t.Fatalf("setEnv = %v", kube.setEnv)
+	}
+	if len(kube.restarted) != 0 {
+		t.Fatalf("the env change is the rollout; no separate restart expected, got %v", kube.restarted)
+	}
+}
+
+func TestInject_UnboundedCacheRefusals(t *testing.T) {
+	t.Parallel()
+	spec := Spec{Class: ClassConfigUnboundedCache, Key: "CACHE_MAX_ENTRIES"}
+	tests := []struct {
+		name       string
+		deployment string
+		wantErr    string
+	}{
+		{name: "no memory limit", deployment: cacheDeployment(AppImage, "", "1024"), wantErr: "sets no memory limit"},
+		{name: "already unbounded", deployment: cacheDeployment(AppImage, "64Mi", "0"), wantErr: "already sets CACHE_MAX_ENTRIES=0"},
+		{name: "not the application", deployment: cacheDeployment("registry.k8s.io/nginx-slim:0.27", "64Mi", ""), wantErr: "does not run the application image"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			kube := &fakeInjectClient{fakePods: &fakePods{lists: [][]podJSON{{}}}, deployment: tc.deployment}
+			err := Inject(context.Background(), kube, Target{Namespace: "default", Name: "u"}, spec, Expect{}, time.Second)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+			if len(kube.setEnv) != 0 {
+				t.Fatalf("refusal must not mutate: setEnv=%v", kube.setEnv)
 			}
 		})
 	}

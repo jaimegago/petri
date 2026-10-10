@@ -105,6 +105,26 @@ func TestRender_RecognizedStates(t *testing.T) {
 			notWant: []string{"optional: false", "exit 1", "nginx-slim", "simulation", "petri", "inject", "chaos"},
 		},
 		{
+			// DA-3's shape: the application runs bounded only by the memory
+			// limit the class names, with its cache bound declared as the
+			// value it reads as none. Nothing names the mechanism.
+			name: "oomkilled with a fault runs the application with an unbounded cache",
+			spec: func() Spec {
+				s := baseSpec("user-service", "OOMKilled")
+				s.Fault = &fault.Spec{Class: fault.ClassConfigUnboundedCache, Key: "CACHE_MAX_ENTRIES"}
+				s.Env = []EnvVar{{Name: "CACHE_MAX_ENTRIES", Value: "0"}}
+				return s
+			}(),
+			want: []string{
+				"image: " + fault.AppImage,
+				"containerPort: 8080",
+				"memory: 64Mi",
+				"name: CACHE_MAX_ENTRIES",
+				`value: "0"`,
+			},
+			notWant: []string{"memory: 4Mi", "dd if=/dev/zero", "busybox", "simulation", "petri", "inject", "chaos", "leak"},
+		},
+		{
 			name: "declared literal env renders as value",
 			spec: func() Spec {
 				s := baseSpec("api", "crashloopbackoff")
@@ -277,6 +297,49 @@ func TestRender_FaultValidation(t *testing.T) {
 			wantErr: "no declared container env reads it",
 		},
 	}
+	cache := &fault.Spec{Class: fault.ClassConfigUnboundedCache, Key: "CACHE_MAX_ENTRIES"}
+	tests = append(tests, []struct {
+		name    string
+		spec    Spec
+		wantErr string
+	}{
+		{
+			name: "unbounded cache under a state it does not produce",
+			spec: func() Spec {
+				s := baseSpec("u", "crashloopbackoff")
+				s.Fault, s.Env = cache, []EnvVar{{Name: "CACHE_MAX_ENTRIES", Value: "0"}}
+				return s
+			}(),
+			wantErr: `must be declared with state "oomkilled", not "crashloopbackoff"`,
+		},
+		{
+			name: "unbounded cache whose setting is not declared",
+			spec: func() Spec {
+				s := baseSpec("u", "OOMKilled")
+				s.Fault = cache
+				return s
+			}(),
+			wantErr: "would use its bounded default",
+		},
+		{
+			name: "unbounded cache whose declared setting is bounded",
+			spec: func() Spec {
+				s := baseSpec("u", "OOMKilled")
+				s.Fault, s.Env = cache, []EnvVar{{Name: "CACHE_MAX_ENTRIES", Value: "512"}}
+				return s
+			}(),
+			wantErr: `sets it to "512"; the application would stay bounded`,
+		},
+		{
+			name: "unbounded cache declared through a ConfigMap",
+			spec: func() Spec {
+				s := baseSpec("u", "OOMKilled")
+				s.Fault, s.Env = cache, []EnvVar{{Name: "CACHE_MAX_ENTRIES", ConfigMapKeyRef: &ConfigMapKeySelector{Name: "c", Key: "CACHE_MAX_ENTRIES"}}}
+				return s
+			}(),
+			wantErr: "a ConfigMap reference is not supported for this class",
+		},
+	}...)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Render(tc.spec)

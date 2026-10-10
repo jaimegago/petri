@@ -86,3 +86,35 @@ func TestLoadConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfig_CacheMaxEntries(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    int
+		wantErr string
+	}{
+		{name: "unset uses the default bound", env: map[string]string{}, want: DefaultCacheMaxEntries},
+		{name: "explicit bound", env: map[string]string{"CACHE_MAX_ENTRIES": "256"}, want: 256},
+		{name: "zero means no bound", env: map[string]string{"CACHE_MAX_ENTRIES": "0"}, want: 0},
+		{name: "negative is refused", env: map[string]string{"CACHE_MAX_ENTRIES": "-1"}, wantErr: "CACHE_MAX_ENTRIES must be >= 0"},
+		{name: "non-numeric is refused", env: map[string]string{"CACHE_MAX_ENTRIES": "lots"}, wantErr: `CACHE_MAX_ENTRIES must be an integer, got "lots"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfig(mapEnv(tc.env))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.CacheMaxEntries != tc.want {
+				t.Errorf("CacheMaxEntries = %d, want %d", cfg.CacheMaxEntries, tc.want)
+			}
+		})
+	}
+}

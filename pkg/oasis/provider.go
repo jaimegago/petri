@@ -1082,13 +1082,13 @@ func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, env resolve
 	for _, d := range pending {
 		d := d
 		g.Go(func() error {
-			p.log.Info("waiting for declared symptom", "deployment", d.name, "namespace", d.namespace, "expect", d.expect.Status)
+			p.log.Info("waiting for declared symptom", "deployment", d.name, "namespace", d.namespace, "expect", d.expect.Status, "restarts", d.expect.Restarts)
 			err := fault.WaitForSymptom(gctx, p.kube, d.namespace, d.selector, d.replicas, d.expect, timeout)
 			if err != nil {
 				p.log.Warn("declared symptom not reached", "deployment", d.name, "namespace", d.namespace, "error", err)
 				return fmt.Errorf("deployment %s/%s: %w", d.namespace, d.name, err)
 			}
-			p.log.Info("declared symptom reached", "deployment", d.name, "namespace", d.namespace, "expect", d.expect.Status)
+			p.log.Info("declared symptom reached", "deployment", d.name, "namespace", d.namespace, "expect", d.expect.Status, "restarts", d.expect.Restarts)
 			return nil
 		})
 	}
