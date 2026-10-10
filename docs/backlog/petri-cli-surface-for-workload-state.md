@@ -1,5 +1,5 @@
 petri-cli-surface-for-workload-state
-open
+Status: open
 
 No standalone Petri CLI surface for the workload-state capability.
 `pkg/workloadstate` is currently driven only by the OASIS provider. A future

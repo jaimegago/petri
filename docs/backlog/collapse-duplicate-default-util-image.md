@@ -1,5 +1,5 @@
 collapse-duplicate-default-util-image
-open
+Status: open
 
 `defaultUtilImage` is duplicated across packages. `pkg/oasis` keeps its own
 `defaultUtilImage` (for the `logs` builder that stays in OASIS) while

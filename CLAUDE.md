@@ -47,3 +47,17 @@ make svc-test                     # the nested images/svc module; root go test d
 - OASIS kind clusters (`--oasis` flag on `petri create`) disable the default CNI and install Calico for NetworkPolicy enforcement.
 - YAML manifests built by hand (not templates) in `pkg/chaos/kube.go`, `pkg/oasis/translate.go`, and `pkg/workloadstate` must quote all label/annotation values to prevent YAML bool/number coercion — the shared `pkg/manifest` helpers do this for you.
 - OASIS Deployment/Pod state entries that omit `spec.image` resolve to `config.OASIS.DefaultImage` (default: `registry.k8s.io/nginx-slim:0.27`). Internal builders for unhealthy states (CrashLoop, OOMKilled, logs) use `registry.k8s.io/e2e-test-images/busybox:1.37.0-2`. Never default to Docker Hub images — its blob storage runs on Cloudflare R2, which is null-routed by some ISPs and corporate networks.
+
+## Project Management
+
+Work is ordered from the maintainer's ledger (`joe-pm`), which dispatches sessions into
+this repository. The repository's own surfaces:
+
+- **Backlog**: `docs/backlog/`, one file per item, indexed by `docs/backlog/INDEX.md`
+  (the item format lives there). Regenerate the index whenever an item is created,
+  changed, or archived; a finished item moves to `docs/backlog/done/`.
+- **Decisions**: `docs/decisions/NNNN-*.md`, petri's own numbering.
+- **Issues**: GitHub Issues are inbound reports, not work orders — work on one starts by
+  filing or citing a backlog item.
+- **Commits** begin with the work's slug (`<slug>: summary`). Push to `origin main` is
+  done; there is no PR gate.

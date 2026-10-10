@@ -1,5 +1,5 @@
 ministack-aws-lab
-open
+Status: open
 
 Petri's AWS path (`templates/terraform/aws/*.tf.tmpl` through
 `pkg/provisioners/terraform`) runs only against a real account — VPC, EKS, RDS

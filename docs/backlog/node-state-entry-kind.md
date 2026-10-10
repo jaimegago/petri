@@ -1,5 +1,5 @@
 node-state-entry-kind
-open — the original defect is fixed; what remains is the operation's other half
+Status: open — the original defect is fixed; what remains is the operation's other half
 
 **The `node` state entry kind is accepted since 2026-08-24** — the
 `unsupported state entry kind "node"` provision error is gone, and C-DA-003

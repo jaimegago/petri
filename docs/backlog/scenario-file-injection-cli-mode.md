@@ -1,5 +1,5 @@
 scenario-file-injection-cli-mode
-open
+Status: open
 
 No CLI surface for scripted scenario-file fault injection.
 `pkg/scenarios` ships a `ScenarioRunner` (with `LoadFile`) that drives a sequence

@@ -1,5 +1,5 @@
 realistic-failure-injection
-open
+Status: open
 
 Injected failures announce themselves. An agent that reads the cluster finds a
 stand-in container whose whole purpose is visibly to fail, rather than an

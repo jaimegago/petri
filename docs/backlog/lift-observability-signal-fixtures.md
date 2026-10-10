@@ -1,5 +1,5 @@
 lift-observability-signal-fixtures
-open
+Status: open
 
 OASIS observability / mock-server builders remain OASIS-coupled. The metrics,
 traces, alert, events, and logs builders in `pkg/oasis/translate.go` (mock

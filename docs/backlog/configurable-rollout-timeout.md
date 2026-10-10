@@ -1,5 +1,7 @@
 # Make the per-deployment rollout timeout configurable
 
+Status: open
+
 **Still open, but narrower than when this was filed.** The image-pull budget
 was split out of the rollout budget and made configurable
 (`oasis.image_pull_timeout`, `petri serve --image-pull-timeout`). The rollout
