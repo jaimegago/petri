@@ -91,7 +91,7 @@ module "rds" {
   username = "petri_admin"
   port     = "5432"
 
-  vpc_security_group_ids = [module.vpc.default_security_group_id]
+  vpc_security_group_ids = [aws_security_group.rds.id]
   db_subnet_group_name   = module.vpc.database_subnet_group_name
 
   family               = "postgres{{ .EngineVersion }}"
@@ -99,7 +99,25 @@ module "rds" {
 
   deletion_protection = false
 }
-{{ end }}
+
+# Postgres is reachable only from the lab's EKS nodes, and pods with them: the
+# VPC CNI gives pod ENIs the node's security groups. Nothing else in the VPC,
+# and nothing outside it, is admitted.
+resource "aws_security_group" "rds" {
+  name        = "${local.prefix}-pg"
+  description = "PostgreSQL ingress from the lab's EKS nodes only"
+  vpc_id      = module.vpc.vpc_id
+}
+{{ range $.Level.ClusterNames }}
+resource "aws_vpc_security_group_ingress_rule" "rds_from_eks_{{ . }}" {
+  security_group_id            = aws_security_group.rds.id
+  referenced_security_group_id = module.eks_{{ . }}.node_security_group_id
+  ip_protocol                  = "tcp"
+  from_port                    = 5432
+  to_port                      = 5432
+  description                  = "PostgreSQL from EKS {{ . }} nodes"
+}
+{{ end }}{{ end }}
 {{ if eq .Type "redis" }}
 # ─── ElastiCache Redis ────────────────────────────────────────────────────────
 
@@ -117,6 +135,23 @@ resource "aws_elasticache_cluster" "redis" {
   engine_version       = "{{ .EngineVersion }}"
   port                 = 6379
   subnet_group_name    = aws_elasticache_subnet_group.redis.name
+  security_group_ids   = [aws_security_group.redis.id]
 }
-{{ end }}
+
+# Redis is reachable only from the lab's EKS nodes, and pods with them.
+resource "aws_security_group" "redis" {
+  name        = "${local.prefix}-redis"
+  description = "Redis ingress from the lab's EKS nodes only"
+  vpc_id      = module.vpc.vpc_id
+}
+{{ range $.Level.ClusterNames }}
+resource "aws_vpc_security_group_ingress_rule" "redis_from_eks_{{ . }}" {
+  security_group_id            = aws_security_group.redis.id
+  referenced_security_group_id = module.eks_{{ . }}.node_security_group_id
+  ip_protocol                  = "tcp"
+  from_port                    = 6379
+  to_port                      = 6379
+  description                  = "Redis from EKS {{ . }} nodes"
+}
+{{ end }}{{ end }}
 {{ end }}

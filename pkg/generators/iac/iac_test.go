@@ -171,6 +171,77 @@ func TestGenerate_Terraform_WithEmbeddedFS(t *testing.T) {
 	}
 }
 
+// TestAWSDatastoreIngress holds RDS and ElastiCache to their own security
+// groups, admitting their port only from every cluster's EKS node security
+// group: never the VPC's ingress-less default group, never a CIDR.
+func TestAWSDatastoreIngress(t *testing.T) {
+	ctx := baseContext("terraform", "aws", 3)
+	ctx.Level.ClusterNames = []string{"prod", "staging", "management"}
+	ctx.Level.NodeCounts = []int{4, 2, 2}
+	ctx.Level.InstanceTypes = []string{"t3.xlarge", "t3.large", "t3.medium"}
+	ctx.Level.Databases = []generators.DatabaseInfo{
+		{Type: "postgresql", EngineVersion: "15", InstanceClass: "db.t3.medium"},
+		{Type: "redis", EngineVersion: "7.0", NodeType: "cache.t3.small"},
+	}
+	mainTF := func(tc generators.TemplateContext) string {
+		t.Helper()
+		files, err := iac.New().Generate(context.Background(), tc)
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		for _, f := range files {
+			if f.Path == "main.tf" {
+				return f.Content
+			}
+		}
+		t.Fatal("no main.tf rendered")
+		return ""
+	}
+
+	main := mainTF(ctx)
+	for _, forbidden := range []string{"default_security_group_id", "cidr_ipv4", "cidr_blocks", "0.0.0.0/0"} {
+		if strings.Contains(main, forbidden) {
+			t.Errorf("main.tf contains %q; datastore ingress must come from node security groups only", forbidden)
+		}
+	}
+	for _, want := range []string{
+		`vpc_security_group_ids = [aws_security_group.rds.id]`,
+		`security_group_ids   = [aws_security_group.redis.id]`,
+		`resource "aws_security_group" "rds"`,
+		`resource "aws_security_group" "redis"`,
+	} {
+		if !strings.Contains(main, want) {
+			t.Errorf("main.tf missing %q", want)
+		}
+	}
+	for _, db := range []struct{ sg, port string }{{"rds", "5432"}, {"redis", "6379"}} {
+		for _, c := range ctx.Level.ClusterNames {
+			rule := `resource "aws_vpc_security_group_ingress_rule" "` + db.sg + `_from_eks_` + c + `" {`
+			i := strings.Index(main, rule)
+			if i < 0 {
+				t.Errorf("main.tf missing %s ingress rule for cluster %s", db.sg, c)
+				continue
+			}
+			body := main[i : i+strings.Index(main[i:], "\n}")]
+			for _, want := range []string{
+				"aws_security_group." + db.sg + ".id",
+				"module.eks_" + c + ".node_security_group_id",
+				"from_port                    = " + db.port,
+				"to_port                      = " + db.port,
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("%s rule for %s missing %q", db.sg, c, want)
+				}
+			}
+		}
+	}
+
+	ctx.Level.Databases = ctx.Level.Databases[:1]
+	if strings.Contains(mainTF(ctx), `"aws_security_group" "redis"`) {
+		t.Error("main.tf declares a Redis security group for a level with no Redis")
+	}
+}
+
 func TestGenerate_Pulumi_WithEmbeddedFS(t *testing.T) {
 	gen := iac.New()
 	ctx := baseContext("pulumi", "azure", 1)
