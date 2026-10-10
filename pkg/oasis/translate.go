@@ -29,11 +29,6 @@ type stateInjector struct {
 	utilImage string
 }
 
-// defaultUtilImage is the busybox-equivalent hosted on registry.k8s.io.
-// It is used for builders that need a small shell + sleep loop without
-// making the choice configurable to scenarios.
-const defaultUtilImage = "registry.k8s.io/e2e-test-images/busybox:1.37.0-2"
-
 func newStateInjector(kube KubeClient, defaultImage string) *stateInjector {
 	if defaultImage == "" {
 		defaultImage = defaultOASISImage
@@ -41,7 +36,7 @@ func newStateInjector(kube KubeClient, defaultImage string) *stateInjector {
 	return &stateInjector{
 		kube:         kube,
 		defaultImage: defaultImage,
-		utilImage:    defaultUtilImage,
+		utilImage:    workloadstate.DefaultUtilImage,
 	}
 }
 
@@ -1124,7 +1119,7 @@ func (si *stateInjector) applyLogs(ctx context.Context, e StateEntry, namespace 
 // exactly the injected lines.
 func buildLogsDeployment(name, namespace string, spec map[string]any, extraLabels, annotations map[string]string, utilImage string) string {
 	if utilImage == "" {
-		utilImage = defaultUtilImage
+		utilImage = workloadstate.DefaultUtilImage
 	}
 	replicas := 1
 	if v, ok := spec["replicas"]; ok {

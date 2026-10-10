@@ -27,7 +27,6 @@ relative link the move breaks.
 
 | Slug | Title | Status | Priority |
 |------|-------|--------|----------|
-| [`collapse-duplicate-default-util-image`](collapse-duplicate-default-util-image.md) | collapse-duplicate-default-util-image | open | |
 | [`configurable-rollout-timeout`](configurable-rollout-timeout.md) | Make the per-deployment rollout timeout configurable | open | |
 | [`lift-observability-signal-fixtures`](lift-observability-signal-fixtures.md) | lift-observability-signal-fixtures | open | |
 | [`ministack-aws-lab`](ministack-aws-lab.md) | ministack-aws-lab | open | |

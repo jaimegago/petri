@@ -8,14 +8,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jaimegago/petri/pkg/preflight"
+	"github.com/jaimegago/petri/pkg/workloadstate"
 )
-
-// utilImage is the OCI image used internally to construct intentionally
-// unhealthy or behavioural pod states. It must match
-// pkg/oasis.defaultUtilImage. Kept as a constant here (not imported) because
-// pkg/oasis keeps it package-private; preflight needs the value to verify
-// pullability without taking a dependency on pkg/oasis.
-const utilImage = "registry.k8s.io/e2e-test-images/busybox:1.37.0-2"
 
 type verifyOptions struct {
 	deep           bool
@@ -131,7 +125,7 @@ func (c *CLI) buildPreflightOptions(ctx context.Context, in verifyResolverInput)
 		defaultImage = c.cfg.OASIS.DefaultImage
 	}
 
-	util := utilImage
+	util := workloadstate.DefaultUtilImage
 	if c.preflightUtilImage != "" {
 		util = c.preflightUtilImage
 	}
