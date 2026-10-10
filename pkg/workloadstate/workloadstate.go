@@ -1,5 +1,5 @@
-// Package workloadstate provisions a Kubernetes Deployment that is born
-// exhibiting a named operational state — healthy ("running") or one of several
+// Package workloadstate provisions a Kubernetes workload — a Deployment, or a
+// bare Pod — that is born exhibiting a named operational state — healthy ("running") or one of several
 // intentionally unhealthy states (CrashLoopBackOff, OOMKilled, Pending,
 // degraded, elevated error rate, image-pull error).
 //
@@ -47,7 +47,8 @@ const (
 	// probe so a subset of pods never become Ready.
 	StateDegraded State = "degraded"
 	// StateElevatedErrorRate is a Deployment running an HTTP server that
-	// returns 5xx for a configurable percentage of requests.
+	// returns 5xx for a configurable percentage of requests. The server is
+	// HTTPServerImage, never a Docker Hub image.
 	StateElevatedErrorRate State = "elevated_error_rate"
 	// StateError is a Deployment referencing a non-existent image, producing
 	// ErrImagePull / ImagePullBackOff.
@@ -81,19 +82,39 @@ func AcceptedStates() []State {
 	return out
 }
 
-// Spec describes the Deployment to synthesise. Callers populate it; the
+// Kind is the Kubernetes workload kind a Spec renders as.
+type Kind string
+
+const (
+	// KindDeployment renders a Deployment. It is what an empty Spec.Kind
+	// means.
+	KindDeployment Kind = "Deployment"
+	// KindPod renders a bare Pod: one replica, no controller. A state that
+	// is a property of a replica set rather than of one pod (degraded) is
+	// refused for it rather than rendered as something else.
+	KindPod Kind = "Pod"
+)
+
+// Spec describes the workload to synthesise. Callers populate it; the
 // package does not reach back into any provider model. Defaulting that belongs
 // to the caller's domain (e.g. resolving a registry-safe default image) must
 // be done before constructing the Spec — workloadstate only applies the
 // state-specific defaults documented on each field.
 type Spec struct {
-	// Name is the Deployment metadata.name.
+	// Kind is the workload kind to render. Empty means KindDeployment.
+	Kind Kind
+	// Name is the workload metadata.name.
 	Name string
-	// Namespace is the Deployment metadata.namespace.
+	// Namespace is the workload metadata.namespace.
 	Namespace string
 	// Replicas is the desired replica count. Values < 1 are treated as 1,
-	// except StateDegraded which forces a minimum of 2.
+	// except StateDegraded which forces a minimum of 2. A Pod is one
+	// replica, and any other count is refused.
 	Replicas int
+	// NodeName, for a Pod only, binds it to a node, bypassing the
+	// scheduler. A Pod bound this way is refused the pending state, which
+	// needs the scheduler to refuse it.
+	NodeName string
 	// Image is the container image for states that run a real workload
 	// (running, pending, degraded, and the ConfigMap variant of
 	// crashloopbackoff). Ignored by states that supply their own image
@@ -102,12 +123,13 @@ type Spec struct {
 	Image string
 	// Labels are extra pod/template labels merged over the selector labels.
 	Labels map[string]string
-	// Annotations are Deployment metadata.annotations.
+	// Annotations are the workload's metadata.annotations.
 	Annotations map[string]string
 	// ManagedBy, when non-empty, adds an app.kubernetes.io/managed-by
 	// annotation.
 	ManagedBy string
-	// MatchLabels is the selector. When empty, {"app": Name} is used.
+	// MatchLabels is the selector. When empty, {"app": Name} is used. A Pod
+	// carries it as labels, so it is selected the same way.
 	MatchLabels map[string]string
 	// State is the requested operational state as a raw string. Empty
 	// resolves to running. Matching is case-insensitive and trims spaces;
@@ -140,10 +162,11 @@ type Spec struct {
 }
 
 // EnvVar is one container environment variable. Exactly one source applies:
-// a literal Value, or a ConfigMapKeyRef sourcing it from a ConfigMap key. A
-// ConfigMapKeyRef renders as a required reference, so a missing key stops the
-// container from starting rather than leaving the variable unset — that is
-// what makes a deliberately omitted key visible to an agent as a named cause.
+// a literal Value, a ConfigMapKeyRef sourcing it from a ConfigMap key, or a
+// SecretKeyRef sourcing it from a Secret key. A key reference renders as a
+// required reference, so a missing key stops the container from starting
+// rather than leaving the variable unset — that is what makes a deliberately
+// omitted key visible to an agent as a named cause.
 type EnvVar struct {
 	// Name is the environment variable name.
 	Name string
@@ -151,6 +174,16 @@ type EnvVar struct {
 	Value string
 	// ConfigMapKeyRef sources the value from a ConfigMap key.
 	ConfigMapKeyRef *ConfigMapKeySelector
+	// SecretKeyRef sources the value from a Secret key.
+	SecretKeyRef *SecretKeySelector
+}
+
+// SecretKeySelector names a Secret and a key within it.
+type SecretKeySelector struct {
+	// Name is the Secret metadata.name.
+	Name string
+	// Key is the key within the Secret's data.
+	Key string
 }
 
 // ConfigMapKeySelector names a ConfigMap and a key within it.
@@ -170,7 +203,7 @@ type KubeClient interface {
 	ApplyYAML(ctx context.Context, manifest string) error
 }
 
-// Provision renders the Deployment manifest for spec and applies it via kube.
+// Provision renders the workload manifest for spec and applies it via kube.
 // It fails loud: a non-empty Spec.State outside the recognised vocabulary
 // returns a descriptive error from Render and nothing is applied.
 func Provision(ctx context.Context, kube KubeClient, spec Spec) error {
@@ -182,6 +215,51 @@ func Provision(ctx context.Context, kube KubeClient, spec Spec) error {
 		return fmt.Errorf("applying %s workload %q: %w", spec.normalizedStateForError(), spec.Name, err)
 	}
 	return nil
+}
+
+// kind resolves Spec.Kind, an empty value meaning KindDeployment.
+func (s Spec) kind() (Kind, error) {
+	switch s.Kind {
+	case "", KindDeployment:
+		return KindDeployment, nil
+	case KindPod:
+		return KindPod, nil
+	default:
+		return "", fmt.Errorf("workload %q: unsupported kind %q; supported kinds are %s and %s", s.Name, s.Kind, KindDeployment, KindPod)
+	}
+}
+
+// resolve validates everything Render and Convergence both depend on: the
+// state, the kind, and the combinations a kind cannot materialise. A
+// combination it refuses would otherwise render as some other state.
+func (s Spec) resolve() (Kind, State, error) {
+	state, err := s.normalizeState()
+	if err != nil {
+		return "", "", err
+	}
+	kind, err := s.kind()
+	if err != nil {
+		return "", "", err
+	}
+	if kind == KindDeployment {
+		if s.NodeName != "" {
+			return "", "", fmt.Errorf("workload %q: a node binding is supported for a %s, not a %s", s.Name, KindPod, KindDeployment)
+		}
+		return kind, state, nil
+	}
+	if s.Replicas > 1 {
+		return "", "", fmt.Errorf("workload %q: a %s is one replica, not %d; declare a deployment for more", s.Name, KindPod, s.Replicas)
+	}
+	if s.Fault != nil {
+		return "", "", fmt.Errorf("workload %q: a fault is materialised through a %s, not a bare %s", s.Name, KindDeployment, KindPod)
+	}
+	switch {
+	case state == StateDegraded:
+		return "", "", fmt.Errorf("workload %q: state %q is a replica set some of whose pods are not Ready, which a bare %s cannot be; declare a deployment", s.Name, state, KindPod)
+	case state == StatePending && s.NodeName != "":
+		return "", "", fmt.Errorf("workload %q: state %q needs the scheduler to refuse the pod, and a pod bound to a node bypasses it", s.Name, state)
+	}
+	return kind, state, nil
 }
 
 // normalizeState resolves the raw Spec.State to a canonical State. An empty

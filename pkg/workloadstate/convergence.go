@@ -28,7 +28,27 @@ type Convergence struct {
 // required reference rather than crashing, and converges to that. A faulted
 // spec converges to its class's symptom; a caller holding a declared expect
 // waits on that instead, as it is at least as strict.
+//
+// A bare Pod has no rollout: where its Deployment counterpart would roll
+// out, it converges when its container is running. A combination Render
+// refuses is refused here with the same error.
 func (s Spec) Convergence() (Convergence, error) {
+	kind, _, err := s.resolve()
+	if err != nil {
+		return Convergence{}, err
+	}
+	c, err := s.deploymentConvergence()
+	if err != nil {
+		return Convergence{}, err
+	}
+	if kind == KindPod && c.RollsOut {
+		return Convergence{Symptom: fault.SymptomRunning}, nil
+	}
+	return c, nil
+}
+
+// deploymentConvergence is Convergence for the Deployment Render produces.
+func (s Spec) deploymentConvergence() (Convergence, error) {
 	state, err := s.normalizeState()
 	if err != nil {
 		return Convergence{}, err

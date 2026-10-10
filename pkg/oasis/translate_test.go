@@ -748,7 +748,7 @@ func TestStateInjector_Apply(t *testing.T) {
 			},
 		},
 		{
-			name: "elevated_error_rate deployment runs python error server",
+			name: "elevated_error_rate deployment runs the nginx error server",
 			entries: []StateEntry{
 				{Kind: "Deployment", Name: "error-app", Spec: map[string]any{"status": "elevated_error_rate", "error_rate": float64(30)}},
 			},
@@ -759,11 +759,11 @@ func TestStateInjector_Apply(t *testing.T) {
 					t.Fatal("expected applied manifests")
 				}
 				m := manifests[0]
-				if !strings.Contains(m, "python:3-alpine") {
-					t.Errorf("elevated_error_rate should use python image: %s", m)
+				if !strings.Contains(m, "image: "+workloadstate.HTTPServerImage) {
+					t.Errorf("elevated_error_rate should use the HTTP server image: %s", m)
 				}
-				if !strings.Contains(m, "500") {
-					t.Errorf("elevated_error_rate script should reference HTTP 500: %s", m)
+				if !strings.Contains(m, "30% 1;") || !strings.Contains(m, "return 500;") {
+					t.Errorf("elevated_error_rate should fail 30%% of requests with HTTP 500: %s", m)
 				}
 			},
 		},
@@ -818,9 +818,9 @@ func TestStateInjector_Apply(t *testing.T) {
 				if !strings.Contains(manifests[0], "http_request_duration_seconds") {
 					t.Errorf("configmap should contain metric name: %s", manifests[0])
 				}
-				// Pod with python server.
-				if !strings.Contains(manifests[1], "python:3-alpine") {
-					t.Errorf("pod should use python image: %s", manifests[1])
+				// Pod serving the files with nginx.
+				if !strings.Contains(manifests[1], "image: "+workloadstate.HTTPServerImage) {
+					t.Errorf("pod should use the HTTP server image: %s", manifests[1])
 				}
 				if !strings.Contains(manifests[1], "9090") {
 					t.Errorf("pod should expose port 9090: %s", manifests[1])

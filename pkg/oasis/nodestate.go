@@ -468,8 +468,8 @@ func parseAgoTimestamp(field, v string, now time.Time) (time.Time, error) {
 	return now.Add(-time.Duration(n) * unit), nil
 }
 
-// renderPromResponses serializes the series set into the responses.json the
-// mock Prometheus serves: an instant-query vector always, and a range-query
+// renderPromResponses serializes the series set into the responses document
+// the mock Prometheus serves: an instant-query vector always, and a range-query
 // matrix whenever any series declares a range shape (constant series are
 // rendered flat across the same window so every channel of the mock tells
 // the same story).

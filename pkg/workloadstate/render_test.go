@@ -163,26 +163,38 @@ func TestRender_RecognizedStates(t *testing.T) {
 			notWant: []string{"replicas: 1"},
 		},
 		{
-			name: "elevated_error_rate runs python server with configured rate",
+			name: "elevated_error_rate runs the HTTP server with configured rate",
 			spec: func() Spec {
 				s := baseSpec("errs", "elevated_error_rate")
 				s.ErrorRate = 30
 				return s
 			}(),
-			want:    []string{"python:3-alpine", "<=30", "send_response(500)", "containerPort: 8080"},
-			notWant: nil,
+			want:    []string{"image: " + HTTPServerImage, "30% 1;", "return 500;", "listen 8080;", "containerPort: 8080"},
+			notWant: []string{"python"},
 		},
 		{
 			name:    "elevated-error-rate alias is accepted",
 			spec:    baseSpec("errs", "elevated-error-rate"),
-			want:    []string{"python:3-alpine", "send_response(500)"},
+			want:    []string{"image: " + HTTPServerImage, "return 500;"},
 			notWant: nil,
 		},
 		{
 			name:    "elevated_error_rate defaults rate to 50 when unset",
 			spec:    baseSpec("errs", "elevated_error_rate"),
-			want:    []string{"<=50"},
+			want:    []string{"50% 1;"},
 			notWant: nil,
+		},
+		{
+			// split_clients refuses shares over 100%, and nginx would not
+			// start; every request fails instead.
+			name: "elevated_error_rate at 100 or more fails every request",
+			spec: func() Spec {
+				s := baseSpec("errs", "elevated_error_rate")
+				s.ErrorRate = 150
+				return s
+			}(),
+			want:    []string{"* 1;"},
+			notWant: []string{"150%"},
 		},
 		{
 			name:    "error uses invalid image",
@@ -523,5 +535,96 @@ func TestProvision_UnrecognizedStateDoesNotApply(t *testing.T) {
 	}
 	if len(kube.applied) != 0 {
 		t.Errorf("nothing should be applied on validation failure, got %d manifests", len(kube.applied))
+	}
+}
+
+// onDockerHub reports whether an image reference resolves to Docker Hub: a
+// first path segment that is not a registry host (no "." or ":", not
+// localhost) means Docker Hub, as does a Docker Hub host named outright.
+func onDockerHub(ref string) bool {
+	first, _, found := strings.Cut(ref, "/")
+	if !found || (!strings.ContainsAny(first, ".:") && first != "localhost") {
+		return true
+	}
+	switch first {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return true
+	}
+	return false
+}
+
+// renderedImages returns every container image a manifest names.
+func renderedImages(manifest string) []string {
+	var out []string
+	for _, line := range strings.Split(manifest, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "image:"); ok {
+			out = append(out, strings.TrimSpace(rest))
+		}
+	}
+	return out
+}
+
+func TestOnDockerHub(t *testing.T) {
+	t.Parallel()
+	for ref, want := range map[string]bool{
+		"python:3-alpine":                   true,
+		"prom/prometheus:v2.48.0":           true,
+		"docker.io/library/nginx:1.27":      true,
+		"registry.k8s.io/nginx-slim:0.27":   false,
+		"ghcr.io/jaimegago/svc:0.2.0":       false,
+		"localhost/img:1":                   false,
+		"invalid-registry.example.com/x:v0": false,
+	} {
+		if got := onDockerHub(ref); got != want {
+			t.Errorf("onDockerHub(%q) = %v, want %v", ref, got, want)
+		}
+	}
+}
+
+// No image this package supplies is on Docker Hub, whose blob storage some
+// networks null-route. Every state is rendered for every kind that accepts
+// it, and the faulted path besides; an image the caller handed in is the
+// caller's to choose and is excluded by a sentinel.
+func TestRender_NoSuppliedImageIsOnDockerHub(t *testing.T) {
+	t.Parallel()
+	const callerImage = "caller.example/app:1"
+
+	var specs []Spec
+	for _, kind := range []Kind{KindDeployment, KindPod} {
+		for _, st := range AcceptedStates() {
+			s := baseSpec("svc", string(st))
+			s.Kind = kind
+			s.Image = callerImage
+			s.UtilImage = ""
+			specs = append(specs, s)
+		}
+	}
+	faulted := baseSpec("svc", "oomkilled")
+	faulted.Fault = &fault.Spec{Class: fault.ClassConfigUnboundedCache, Key: "CACHE_MAX_ENTRIES"}
+	faulted.Env = []EnvVar{{Name: "CACHE_MAX_ENTRIES", Value: "0"}}
+	specs = append(specs, faulted)
+
+	rendered := 0
+	for _, s := range specs {
+		m, err := Render(s)
+		if err != nil {
+			if s.Kind == KindPod {
+				continue // a state a bare pod refuses renders nothing
+			}
+			t.Fatalf("%s %q: Render() error = %v", s.Kind, s.State, err)
+		}
+		rendered++
+		images := renderedImages(m)
+		if len(images) == 0 {
+			t.Errorf("%s %q: no image rendered", s.Kind, s.State)
+		}
+		for _, img := range images {
+			if img != callerImage && onDockerHub(img) {
+				t.Errorf("%s %q renders Docker Hub image %q", s.Kind, s.State, img)
+			}
+		}
+	}
+	if rendered < len(AcceptedStates()) {
+		t.Fatalf("rendered %d specs, fewer than the %d accepted states", rendered, len(AcceptedStates()))
 	}
 }

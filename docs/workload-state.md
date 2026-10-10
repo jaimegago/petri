@@ -1,8 +1,9 @@
 # Workload State Capability
 
-`pkg/workloadstate` provisions a Kubernetes **Deployment that is born exhibiting
+`pkg/workloadstate` provisions a Kubernetes **workload that is born exhibiting
 a named operational state** — healthy, or one of several intentionally unhealthy
-states. The caller hands it a spec describing the deployment plus the requested
+states. The workload is a Deployment, or a bare Pod when `Spec.Kind` is
+`KindPod`. The caller hands it a spec describing the workload plus the requested
 state; the capability renders the corresponding manifest and applies it. The pod
 materialises directly into the requested state — there is no healthy
 intermediate that later degrades.
@@ -39,31 +40,51 @@ the rule for what each materialises and the mechanism it uses:
 | `oomkilled` | a container the kernel OOM-kills on start | an unbounded `tail /dev/zero` allocation under a `memory: 16Mi` limit (`workloadstate.OOMKilledMemoryLimit`; below it the container's own init is OOM-killed first) |
 | `pending` | pods that never schedule, stuck Pending | an impossible `cpu: "100"` request → "Insufficient cpu" |
 | `degraded` | a partially-available Deployment | forces ≥2 replicas with a failing `/healthz` readiness probe so a subset of pods never become Ready |
-| `elevated_error_rate` (alias `elevated-error-rate`) | a service returning errors for a share of traffic | a Python HTTP server that returns HTTP 500 for a configurable percentage of requests (default 50%) |
+| `elevated_error_rate` (alias `elevated-error-rate`) | a service returning errors for a share of traffic | nginx (`workloadstate.HTTPServerImage`) on port 8080 answering HTTP 500 to a configurable percentage of requests (default 50%) and 200 to the rest, split per request by `split_clients` on `$request_id` |
 | `error` | pods stuck ErrImagePull / ImagePullBackOff | a reference to a non-existent image |
 
-The unhealthy states deliberately avoid Docker Hub for their utility images:
-`crashloopbackoff` and `oomkilled` source their shell image from
-`registry.k8s.io` (Docker Hub blob storage runs on Cloudflare R2, which is
-null-routed by some networks).
+No image the capability supplies is on Docker Hub, whose blob storage runs on
+Cloudflare R2 and is null-routed by some networks: `crashloopbackoff` and
+`oomkilled` take their shell image from `registry.k8s.io`, `elevated_error_rate`
+its server from `registry.k8s.io`, and a fault the application from `ghcr.io`.
+`TestRender_NoSuppliedImageIsOnDockerHub` holds every state of every kind to it.
+
+## Bare pods
+
+A `KindPod` spec renders a Pod whose single container is the one the
+Deployment's pods would run, so a bare pod honours the same vocabulary. Three
+combinations are refused rather than rendered as something else:
+
+- `degraded` — a replica set some of whose pods are not Ready; one pod cannot be
+  that.
+- `pending` with a `NodeName` — a pod bound to a node bypasses the scheduler, so
+  it is never refused scheduling.
+- a `Fault` or `Replicas` above 1 — a fault goes through a Deployment, and a pod
+  is one replica.
+
+`NodeName` is accepted for a Pod only.
 
 ## Spec fields
 
 `workloadstate.Spec` is populated by the caller:
 
-- `Name`, `Namespace` — Deployment identity.
+- `Kind` — `KindDeployment` (the default when empty) or `KindPod`.
+- `Name`, `Namespace` — workload identity.
+- `NodeName` — Pod only: the node it is bound to.
 - `Replicas` — desired count (values < 1 become 1; `degraded` forces ≥ 2).
 - `Image` — container image for states that run a real workload (`running`,
   `pending`, `degraded`, and the declared-env variant of `crashloopbackoff`).
   States that supply their own image (`oomkilled`, `error`, the exit-1 variant
   of `crashloopbackoff`, `elevated_error_rate`) ignore it, and so does a
   `Fault`, which runs the application image.
-- `Labels`, `Annotations` — extra pod/template labels and Deployment
+- `Labels`, `Annotations` — extra pod/template labels and workload
   annotations.
 - `ManagedBy` — when set, adds an `app.kubernetes.io/managed-by` annotation.
 - `MatchLabels` — selector; defaults to `{"app": Name}`.
 - `State` — the requested state as a raw string (see rules below).
-- `Env` — the container environment as declared; rendered verbatim.
+- `Env` — the container environment as declared; rendered verbatim. A
+  variable is a literal value, a ConfigMap key reference, or a Secret key
+  reference.
 - `Fault` — a `fault.Spec` from the cause catalog (`pkg/fault`). When set the
   state is materialised through the application rather than a synthetic
   container, ConfigMap references render `optional: true` so the absence
@@ -94,7 +115,7 @@ null-routed by some networks).
 ## Entry points
 
 - `Render(spec) (string, error)` — pure: validates the state and returns the
-  Deployment manifest with no cluster access. Unit-testable on manifest output
+  Deployment or Pod manifest with no cluster access. Unit-testable on manifest output
   alone.
 - `Provision(ctx, kube, spec) error` — renders then applies via the narrow
   `KubeClient` (`ApplyYAML`). Returns the validation error without applying when
@@ -122,8 +143,13 @@ state's name, and a test holds every accepted state to having one.
 | `error` | every pod is `ErrImagePull` / `ImagePullBackOff` |
 | any state with a `Fault` | the class's symptom; the OASIS provider waits on the scenario's declared `expect` instead |
 
-`petri serve` waits on every declared Deployment this way before `/v1/provision`
-reports `ready`, and on every bare `pod` entry's container running. A workload
+A bare Pod has no rollout: where its Deployment counterpart rolls out, it
+converges when its container is running; otherwise it converges as the table
+says.
+
+`petri serve` waits on every declared Deployment and every bare `pod` entry this
+way before `/v1/provision` reports `ready`. A `pod` entry's `status` is its
+state, as a deployment's is. A workload
 that does not converge within the image-pull plus rollout budget fails the
 provision.
 

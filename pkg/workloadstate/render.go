@@ -28,13 +28,20 @@ var faultStates = map[string]State{
 	fault.SymptomOOMKilled:        StateOOMKilled,
 }
 
-// Render produces the Deployment manifest for spec. It is a pure function: no
-// cluster access, deterministic for a given spec (modulo Go map iteration
-// order in label/annotation blocks, matching the existing builders). It
-// validates the requested state first, so an unrecognized non-empty state
-// returns an error and no manifest.
+// HTTPServerImage is the HTTP server elevated_error_rate runs. It is nginx on
+// registry.k8s.io, pinned because the rendered configuration depends on this
+// build (split_clients, $request_id). Docker Hub is never used: its blob
+// storage runs on Cloudflare R2, which some networks null-route.
+const HTTPServerImage = "registry.k8s.io/nginx-slim:0.27"
+
+// Render produces the manifest for spec: a Deployment, or a bare Pod when
+// spec.Kind is KindPod. It is a pure function: no cluster access,
+// deterministic for a given spec (modulo Go map iteration order in
+// label/annotation blocks, matching the existing builders). It validates the
+// requested state first, so an unrecognized non-empty state — or a state the
+// kind cannot materialise — returns an error and no manifest.
 func Render(spec Spec) (string, error) {
-	state, err := spec.normalizeState()
+	kind, state, err := spec.resolve()
 	if err != nil {
 		return "", err
 	}
@@ -61,36 +68,88 @@ func Render(spec Spec) (string, error) {
 		)
 	}
 
+	var container string
 	if spec.Fault != nil {
 		if err := spec.validateFault(state); err != nil {
 			return "", err
 		}
-		return renderFaulted(spec, replicas, matchLabels), nil
+		container = renderFaulted(spec)
+	} else {
+		switch state {
+		case StateCrashLoopBackOff:
+			container = renderCrashLoop(spec, utilImage)
+		case StateOOMKilled:
+			container = renderOOMKilled(utilImage)
+		case StatePending:
+			container = renderPending(spec)
+		case StateDegraded:
+			if replicas < 2 {
+				replicas = 2 // Need at least 2 replicas for partial failure.
+			}
+			container = renderDegraded(spec)
+		case StateElevatedErrorRate:
+			rate := spec.ErrorRate
+			if rate < 1 {
+				rate = defaultErrorRate
+			}
+			container = renderElevatedErrorRate(rate)
+		case StateError:
+			container = renderError()
+		case StateRunning:
+			container = renderRunning(spec)
+		default:
+			// Unreachable: normalizeState only returns recognised states or err.
+			return "", fmt.Errorf("workload %q: unhandled state %q", spec.Name, state)
+		}
 	}
 
-	switch state {
-	case StateCrashLoopBackOff:
-		return renderCrashLoop(spec, replicas, matchLabels, utilImage), nil
-	case StateOOMKilled:
-		return renderOOMKilled(spec, replicas, matchLabels, utilImage), nil
-	case StatePending:
-		return renderPending(spec, replicas, matchLabels), nil
-	case StateDegraded:
-		return renderDegraded(spec, replicas, matchLabels), nil
-	case StateElevatedErrorRate:
-		rate := spec.ErrorRate
-		if rate < 1 {
-			rate = defaultErrorRate
-		}
-		return renderElevatedErrorRate(spec, replicas, rate, matchLabels), nil
-	case StateError:
-		return renderError(spec, replicas, matchLabels), nil
-	case StateRunning:
-		return renderRunning(spec, replicas, matchLabels), nil
-	default:
-		// Unreachable: normalizeState only returns recognised states or err.
-		return "", fmt.Errorf("workload %q: unhandled state %q", spec.Name, state)
+	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
+	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
+	var sb strings.Builder
+	if kind == KindPod {
+		writePodHead(&sb, spec.Name, spec.Namespace, spec.NodeName, podLabels, annotations)
+		sb.WriteString(podContainer(container))
+		return sb.String(), nil
 	}
+	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
+	sb.WriteString(container)
+	return sb.String(), nil
+}
+
+// The state builders below write the body of container `app` — every field
+// after its name — at a Deployment's indentation, eight spaces. A Pod's
+// container sits four spaces shallower; podContainer shifts the block there.
+const (
+	deploymentContainerIndent = "        "
+	podContainerIndent        = "    "
+)
+
+// podContainer re-indents a container body written at a Deployment's
+// indentation to a Pod's. Every line of the body carries at least the
+// Deployment's indentation, so the shift preserves the block's structure.
+func podContainer(body string) string {
+	lines := strings.SplitAfter(body, "\n")
+	for i, l := range lines {
+		if rest, ok := strings.CutPrefix(l, deploymentContainerIndent); ok {
+			lines[i] = podContainerIndent + rest
+		}
+	}
+	return strings.Join(lines, "")
+}
+
+// writePodHead writes a bare Pod's apiVersion/kind/metadata/spec preamble up
+// to (but not including) the body of its single container `app`.
+func writePodHead(sb *strings.Builder, name, namespace, nodeName string, labels, annotations map[string]string) {
+	sb.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n")
+	fmt.Fprintf(sb, "  name: %s\n  namespace: %s\n", name, namespace)
+	manifest.WriteAnnotationsYAML(sb, annotations)
+	sb.WriteString("  labels:\n")
+	sb.WriteString(manifest.LabelsToYAML(labels, 4))
+	sb.WriteString("\nspec:\n")
+	if nodeName != "" {
+		fmt.Fprintf(sb, "  nodeName: %s\n", nodeName)
+	}
+	sb.WriteString("  containers:\n  - name: app\n")
 }
 
 // writeDeploymentHead writes the apiVersion/kind/metadata/spec preamble shared
@@ -108,20 +167,16 @@ func writeDeploymentHead(sb *strings.Builder, name, namespace string, replicas i
 	sb.WriteString("\n    spec:\n      containers:\n      - name: app\n")
 }
 
-// renderRunning materialises a healthy Deployment: container `app` on the given
+// renderRunning materialises a healthy workload: container `app` on the given
 // image exposing containerPort 80.
-func renderRunning(spec Spec, replicas int, matchLabels map[string]string) string {
-	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
-	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
-
+func renderRunning(spec Spec) string {
 	var sb strings.Builder
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: 80\n", spec.Image)
 	writeEnvYAML(&sb, spec.Env, false)
 	return sb.String()
 }
 
-// renderCrashLoop materialises a Deployment that lands in CrashLoopBackOff
+// renderCrashLoop materialises a workload that lands in CrashLoopBackOff
 // without a declared cause. With declared Env the container runs spec.Image
 // and each ConfigMap reference is required, so an absent key stops the
 // container with the key named by the kubelet; otherwise the container is a
@@ -129,12 +184,8 @@ func renderRunning(spec Spec, replicas int, matchLabels map[string]string) strin
 // scenery rather than the thing under diagnosis. Neither path names its
 // mechanism: a cause under diagnosis is declared as a Fault and goes through
 // the application (see renderFaulted).
-func renderCrashLoop(spec Spec, replicas int, matchLabels map[string]string, utilImage string) string {
-	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
-	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
-
+func renderCrashLoop(spec Spec, utilImage string) string {
 	var sb strings.Builder
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	if len(spec.Env) > 0 {
 		fmt.Fprintf(&sb, "        image: %s\n", spec.Image)
 		writeEnvYAML(&sb, spec.Env, false)
@@ -201,16 +252,13 @@ func (s Spec) validateFault(state State) error {
 // memory limit the class names. ConfigMap references are optional so that an
 // absent key reaches the application as an unset variable; the application's
 // own validation is then what fails, in its own log, naming the key.
-func renderFaulted(spec Spec, replicas int, matchLabels map[string]string) string {
-	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
-	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
+func renderFaulted(spec Spec) string {
 	image := spec.AppImage
 	if image == "" {
 		image = fault.AppImage
 	}
 
 	var sb strings.Builder
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: %d\n", image, appPort)
 	if limit := spec.Fault.Definition().MemoryLimit; limit != "" {
 		fmt.Fprintf(&sb, "        resources:\n          limits:\n            memory: %s\n", limit)
@@ -251,8 +299,9 @@ func callerImageStatesList() string {
 // A ConfigMapKeyRef is written with `optional: false` so an absent key stops
 // the container from starting and the kubelet reports the key by name — or,
 // when optional is true (the application path), with `optional: true` so the
-// application sees the variable unset and validates it itself. A literal
-// value is written as `value:`.
+// application sees the variable unset and validates it itself. A
+// SecretKeyRef is always a required reference. A literal value is written as
+// `value:`.
 func writeEnvYAML(sb *strings.Builder, env []EnvVar, optional bool) {
 	if len(env) == 0 {
 		return
@@ -263,6 +312,11 @@ func writeEnvYAML(sb *strings.Builder, env []EnvVar, optional bool) {
 		if e.ConfigMapKeyRef != nil {
 			fmt.Fprintf(sb, "          valueFrom:\n            configMapKeyRef:\n              name: %s\n              key: %s\n              optional: %t\n",
 				e.ConfigMapKeyRef.Name, e.ConfigMapKeyRef.Key, optional)
+			continue
+		}
+		if e.SecretKeyRef != nil {
+			fmt.Fprintf(sb, "          valueFrom:\n            secretKeyRef:\n              name: %s\n              key: %s\n",
+				e.SecretKeyRef.Name, e.SecretKeyRef.Key)
 			continue
 		}
 		fmt.Fprintf(sb, "          value: %q\n", e.Value)
@@ -276,16 +330,12 @@ func writeEnvYAML(sb *strings.Builder, env []EnvVar, optional bool) {
 // 16Mi starts the container every time and leaves the kill to the kernel.
 const OOMKilledMemoryLimit = "16Mi"
 
-// renderOOMKilled materialises a Deployment whose container allocates memory
+// renderOOMKilled materialises a workload whose container allocates memory
 // without bound under OOMKilledMemoryLimit, so the kernel OOM-kills it and the
 // kubelet records OOMKilled. `tail` on /dev/zero buffers a line that never
 // ends.
-func renderOOMKilled(spec Spec, replicas int, matchLabels map[string]string, utilImage string) string {
-	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
-	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
-
+func renderOOMKilled(utilImage string) string {
 	var sb strings.Builder
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n", utilImage)
 	sb.WriteString("        command: [\"sh\", \"-c\", \"tail /dev/zero\"]\n")
 	sb.WriteString("        resources:\n")
@@ -294,14 +344,10 @@ func renderOOMKilled(spec Spec, replicas int, matchLabels map[string]string, uti
 	return sb.String()
 }
 
-// renderPending materialises a Deployment with an unschedulable CPU request so
+// renderPending materialises a workload with an unschedulable CPU request so
 // pods stay Pending with "Insufficient cpu".
-func renderPending(spec Spec, replicas int, matchLabels map[string]string) string {
-	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
-	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
-
+func renderPending(spec Spec) string {
 	var sb strings.Builder
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n", spec.Image)
 	sb.WriteString("        resources:\n")
 	sb.WriteString("          requests:\n")
@@ -310,17 +356,11 @@ func renderPending(spec Spec, replicas int, matchLabels map[string]string) strin
 	return sb.String()
 }
 
-// renderDegraded materialises a Deployment (min 2 replicas) with a failing
-// readiness probe so a subset of pods never become Ready.
-func renderDegraded(spec Spec, replicas int, matchLabels map[string]string) string {
-	if replicas < 2 {
-		replicas = 2 // Need at least 2 replicas for partial failure.
-	}
-	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
-	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
-
+// renderDegraded materialises the container of a Deployment (Render forces
+// min 2 replicas) with a failing readiness probe so a subset of pods never
+// become Ready.
+func renderDegraded(spec Spec) string {
 	var sb strings.Builder
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: 80\n", spec.Image)
 	sb.WriteString("        readinessProbe:\n")
 	sb.WriteString("          httpGet:\n")
@@ -333,39 +373,54 @@ func renderDegraded(spec Spec, replicas int, matchLabels map[string]string) stri
 	return sb.String()
 }
 
-// renderElevatedErrorRate materialises a Deployment running a Python HTTP
-// server that returns HTTP 500 for errorRate percent of requests.
-func renderElevatedErrorRate(spec Spec, replicas, errorRate int, matchLabels map[string]string) string {
-	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
-	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
+// errorRateServerPort is the port elevated_error_rate's server listens on.
+const errorRateServerPort = 8080
 
-	script := fmt.Sprintf(`import http.server,random
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if random.randint(1,100)<=%d:
-            self.send_response(500)
-        else:
-            self.send_response(200)
-        self.end_headers()
-    def log_message(self,*a):pass
-http.server.HTTPServer(("",8080),H).serve_forever()`, errorRate)
+// renderElevatedErrorRate materialises a workload whose HTTP server
+// (HTTPServerImage) answers HTTP 500 to errorRate percent of requests and 200
+// to the rest. nginx's split_clients assigns each request by a hash of its
+// random request id, so the share holds per request rather than per client.
+// The configuration is written at startup by the image's own shell; a rate of
+// 100 or more fails every request.
+func renderElevatedErrorRate(errorRate int) string {
+	split := fmt.Sprintf("%d%% 1;\n        * \"\";", errorRate)
+	if errorRate >= 100 {
+		split = "* 1;"
+	}
+	conf := fmt.Sprintf(`worker_processes 1;
+daemon off;
+pid /tmp/nginx.pid;
+error_log stderr;
+events {}
+http {
+    access_log off;
+    split_clients "${request_id}" $failed {
+        %s
+    }
+    server {
+        listen %d;
+        location / {
+            if ($failed) {
+                return 500;
+            }
+            return 200;
+        }
+    }
+}
+`, split, errorRateServerPort)
+	script := "cat > /tmp/nginx.conf <<'EOF'\n" + conf + "EOF\nexec nginx -c /tmp/nginx.conf\n"
 
 	var sb strings.Builder
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
-	sb.WriteString("        image: python:3-alpine\n")
-	fmt.Fprintf(&sb, "        command: [\"python3\", \"-c\", %q]\n", script)
-	sb.WriteString("        ports:\n        - containerPort: 8080\n")
+	fmt.Fprintf(&sb, "        image: %s\n", HTTPServerImage)
+	fmt.Fprintf(&sb, "        command: [\"sh\", \"-c\", %q]\n", script)
+	fmt.Fprintf(&sb, "        ports:\n        - containerPort: %d\n", errorRateServerPort)
 	return sb.String()
 }
 
-// renderError materialises a Deployment referencing a non-existent image,
+// renderError materialises a workload referencing a non-existent image,
 // producing ErrImagePull / ImagePullBackOff.
-func renderError(spec Spec, replicas int, matchLabels map[string]string) string {
-	podLabels := manifest.MergeLabels(matchLabels, spec.Labels)
-	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
-
+func renderError() string {
 	var sb strings.Builder
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
 	sb.WriteString("        image: invalid-registry.example.com/does-not-exist:v0.0.0\n")
 	return sb.String()
 }

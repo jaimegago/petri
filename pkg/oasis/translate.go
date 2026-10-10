@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -641,27 +643,66 @@ func (si *stateInjector) applyPVC(ctx context.Context, e StateEntry, namespace s
 	return si.kube.ApplyYAML(ctx, manifest)
 }
 
-// applyPod renders a pod state entry. A declared `node` reference is resolved
-// through the pass's bindings so the pod is genuinely scheduled onto the bound
-// real node — its nodeName then agrees with the served metrics' node label,
-// and the declared (scenario-internal) node name never reaches the cluster. A
-// reference to a node the scenario does not declare is a loud error: the
-// binding is the only thing that keeps the channels consistent.
+// applyPod renders a pod state entry through pkg/workloadstate, so a bare
+// pod honours the same state vocabulary a deployment does: its declared
+// `status` is the state it is born into, and a state a bare pod cannot be is
+// refused rather than rendered healthy. A declared `node` reference is
+// resolved through the pass's bindings so the pod is genuinely scheduled onto
+// the bound real node — its nodeName then agrees with the served metrics'
+// node label, and the declared (scenario-internal) node name never reaches
+// the cluster. A reference to a node the scenario does not declare is a loud
+// error: the binding is the only thing that keeps the channels consistent.
 func (si *stateInjector) applyPod(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
-	nodeName := ""
+	spec, err := si.podSpec(e, namespace)
+	if err != nil {
+		return err
+	}
+	if spec.NodeName != "" {
+		bound, ok := pass.nodeBindings[spec.NodeName]
+		if !ok {
+			return fmt.Errorf("pod %q declares node %q, which the scenario does not declare as a node state entry", e.Name, spec.NodeName)
+		}
+		spec.NodeName = bound
+	}
+	return workloadstate.Provision(ctx, si.kube, spec)
+}
+
+// podSpec builds the workloadstate.Spec a pod state entry renders from. Its
+// NodeName is the declared node reference, unresolved; applyPod binds it to
+// the real node. Readiness reads the same spec for what the pod converges to.
+func (si *stateInjector) podSpec(e StateEntry, namespace string) (workloadstate.Spec, error) {
+	image := si.defaultImage
+	if v, ok := e.Spec["image"].(string); ok && v != "" {
+		image = v
+	}
+	status := ""
+	if v, ok := e.Spec["status"]; ok {
+		s, ok := v.(string)
+		if !ok {
+			return workloadstate.Spec{}, fmt.Errorf("pod %q: %q must be a string, got %v", e.Name, "status", v)
+		}
+		status = s
+	}
+	nodeRef := ""
 	if v, ok := e.Spec["node"]; ok {
 		ref, ok := v.(string)
 		if !ok || ref == "" {
-			return fmt.Errorf("pod %q: %q must be a non-empty string", e.Name, "node")
+			return workloadstate.Spec{}, fmt.Errorf("pod %q: %q must be a non-empty string", e.Name, "node")
 		}
-		bound, ok := pass.nodeBindings[ref]
-		if !ok {
-			return fmt.Errorf("pod %q declares node %q, which the scenario does not declare as a node state entry", e.Name, ref)
-		}
-		nodeName = bound
+		nodeRef = ref
 	}
-	manifest := buildPodManifest(e.Name, namespace, e.Spec, e.Labels, si.defaultImage, nodeName)
-	return si.kube.ApplyYAML(ctx, manifest)
+	return workloadstate.Spec{
+		Kind:        workloadstate.KindPod,
+		Name:        e.Name,
+		Namespace:   namespace,
+		Image:       image,
+		MatchLabels: podLabels(e.Name, e.Labels),
+		Annotations: e.Annotations,
+		State:       status,
+		Env:         parsePodEnv(e.Spec["env"]),
+		NodeName:    nodeRef,
+		UtilImage:   si.utilImage,
+	}, nil
 }
 
 func (si *stateInjector) applyDashboard(ctx context.Context, e StateEntry, namespace string) error {
@@ -958,66 +999,47 @@ func podLabels(name string, labels map[string]string) map[string]string {
 	return manifest.MergeLabels(map[string]string{"app": name}, labels)
 }
 
-func buildPodManifest(name, namespace string, spec map[string]any, labels map[string]string, defaultImage, nodeName string) string {
-	image := defaultImage
-	if image == "" {
-		image = defaultOASISImage
+// parsePodEnv reads a pod state entry's `env` list: a literal `value`, or a
+// `secretKeyRef` or `configMapKeyRef` source. It keeps the bare-pod reader's
+// historical tolerance — an entry it cannot read is skipped — which the
+// deployment reader (parseContainerEnv) does not share.
+func parsePodEnv(raw any) []workloadstate.EnvVar {
+	envList, ok := raw.([]any)
+	if !ok {
+		return nil
 	}
-	if v, ok := spec["image"].(string); ok && v != "" {
-		image = v
-	}
-
-	var sb strings.Builder
-	sb.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n")
-	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
-	sb.WriteString("  labels:\n")
-	sb.WriteString(manifest.LabelsToYAML(podLabels(name, labels), 4))
-	sb.WriteString("\nspec:\n")
-	if nodeName != "" {
-		fmt.Fprintf(&sb, "  nodeName: %s\n", nodeName)
-	}
-	sb.WriteString("  containers:\n  - name: app\n")
-	fmt.Fprintf(&sb, "    image: %s\n", image)
-
-	// Support env vars from secrets (secretKeyRef).
-	if envList, ok := spec["env"].([]any); ok && len(envList) > 0 {
-		sb.WriteString("    env:\n")
-		for _, envItem := range envList {
-			envMap, ok := envItem.(map[string]any)
-			if !ok {
+	var out []workloadstate.EnvVar
+	for _, envItem := range envList {
+		envMap, ok := envItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		envName, _ := envMap["name"].(string)
+		if envName == "" {
+			continue
+		}
+		if val, ok := envMap["value"].(string); ok {
+			out = append(out, workloadstate.EnvVar{Name: envName, Value: val})
+			continue
+		}
+		if ref, ok := envMap["secretKeyRef"].(map[string]any); ok {
+			name, _ := ref["name"].(string)
+			key, _ := ref["key"].(string)
+			if name != "" && key != "" {
+				out = append(out, workloadstate.EnvVar{Name: envName, SecretKeyRef: &workloadstate.SecretKeySelector{Name: name, Key: key}})
 				continue
 			}
-			envName, _ := envMap["name"].(string)
-			if envName == "" {
+		}
+		if ref, ok := envMap["configMapKeyRef"].(map[string]any); ok {
+			name, _ := ref["name"].(string)
+			key, _ := ref["key"].(string)
+			if name != "" && key != "" {
+				out = append(out, workloadstate.EnvVar{Name: envName, ConfigMapKeyRef: &workloadstate.ConfigMapKeySelector{Name: name, Key: key}})
 				continue
-			}
-			// Direct value.
-			if val, ok := envMap["value"].(string); ok {
-				fmt.Fprintf(&sb, "    - name: %s\n      value: %q\n", envName, val)
-				continue
-			}
-			// secretKeyRef.
-			if ref, ok := envMap["secretKeyRef"].(map[string]any); ok {
-				secretName, _ := ref["name"].(string)
-				secretKey, _ := ref["key"].(string)
-				if secretName != "" && secretKey != "" {
-					fmt.Fprintf(&sb, "    - name: %s\n      valueFrom:\n        secretKeyRef:\n          name: %s\n          key: %s\n", envName, secretName, secretKey)
-					continue
-				}
-			}
-			// configMapKeyRef.
-			if ref, ok := envMap["configMapKeyRef"].(map[string]any); ok {
-				cmName, _ := ref["name"].(string)
-				cmKey, _ := ref["key"].(string)
-				if cmName != "" && cmKey != "" {
-					fmt.Fprintf(&sb, "    - name: %s\n      valueFrom:\n        configMapKeyRef:\n          name: %s\n          key: %s\n", envName, cmName, cmKey)
-					continue
-				}
 			}
 		}
 	}
-
-	return sb.String()
+	return out
 }
 
 // ── Dashboard manifest builder ───────────────────────────────────────────────
@@ -1119,23 +1141,13 @@ func (si *stateInjector) applyNodeUsageMock(ctx context.Context, pass *applyPass
 }
 
 // applyPrometheusMock deploys one mock Prometheus (ConfigMap, pod, Service)
-// named mock-prometheus-<name>, serving the given responses.json.
+// named mock-prometheus-<name>, serving the given responses document.
 func (si *stateInjector) applyPrometheusMock(ctx context.Context, name, namespace, responses string) error {
-	configMap := buildMockServerConfigMap("mock-prometheus-"+name, namespace, "responses.json", responses, map[string]string{
+	if err := si.applyMockServer(ctx, prometheusMock, "mock-prometheus-"+name, namespace, responses, map[string]string{
 		"petri.io/mock":    "prometheus",
 		"petri.io/metrics": "true",
-	})
-	pod := buildMockServerPod("mock-prometheus-"+name, namespace, "mock-prometheus-"+name, 9090, mockPrometheusScript(), map[string]string{
-		"app": "mock-prometheus-" + name,
-	})
-	svc := buildServiceManifest("mock-prometheus-"+name, namespace, 9090, 9090, map[string]string{
-		"petri.io/mock": "prometheus",
-	})
-
-	for _, m := range []string{configMap, pod, svc} {
-		if err := si.kube.ApplyYAML(ctx, m); err != nil {
-			return fmt.Errorf("applying metrics mock for %s: %w", name, err)
-		}
+	}); err != nil {
+		return fmt.Errorf("applying metrics mock for %s: %w", name, err)
 	}
 	return nil
 }
@@ -1144,21 +1156,11 @@ func (si *stateInjector) applyPrometheusMock(ctx context.Context, name, namespac
 // The agent queries /api/traces/{traceID} and /api/services.
 func (si *stateInjector) applyTraces(ctx context.Context, e StateEntry, namespace string) error {
 	responses := buildTracesResponses(e.Name, e.Spec)
-	configMap := buildMockServerConfigMap("mock-jaeger-"+e.Name, namespace, "responses.json", responses, map[string]string{
+	if err := si.applyMockServer(ctx, jaegerMock, "mock-jaeger-"+e.Name, namespace, responses, map[string]string{
 		"petri.io/mock":   "jaeger",
 		"petri.io/traces": "true",
-	})
-	pod := buildMockServerPod("mock-jaeger-"+e.Name, namespace, "mock-jaeger-"+e.Name, 16686, mockJaegerScript(), map[string]string{
-		"app": "mock-jaeger-" + e.Name,
-	})
-	svc := buildServiceManifest("mock-jaeger-"+e.Name, namespace, 16686, 16686, map[string]string{
-		"petri.io/mock": "jaeger",
-	})
-
-	for _, m := range []string{configMap, pod, svc} {
-		if err := si.kube.ApplyYAML(ctx, m); err != nil {
-			return fmt.Errorf("applying traces mock for %s: %w", e.Name, err)
-		}
+	}); err != nil {
+		return fmt.Errorf("applying traces mock for %s: %w", e.Name, err)
 	}
 	return nil
 }
@@ -1167,20 +1169,32 @@ func (si *stateInjector) applyTraces(ctx context.Context, e StateEntry, namespac
 // a mock Alertmanager/Prometheus alerts endpoint pod.
 func (si *stateInjector) applyAlert(ctx context.Context, e StateEntry, namespace string) error {
 	responses := buildAlertResponses(e.Name, e.Spec)
-	configMap := buildMockServerConfigMap("mock-alertmanager-"+e.Name, namespace, "responses.json", responses, map[string]string{
+	if err := si.applyMockServer(ctx, alertmanagerMock, "mock-alertmanager-"+e.Name, namespace, responses, map[string]string{
 		"petri.io/mock":  "alertmanager",
 		"petri.io/alert": "true",
-	})
-	pod := buildMockServerPod("mock-alertmanager-"+e.Name, namespace, "mock-alertmanager-"+e.Name, 9093, mockAlertmanagerScript(), map[string]string{
-		"app": "mock-alertmanager-" + e.Name,
-	})
-	svc := buildServiceManifest("mock-alertmanager-"+e.Name, namespace, 9093, 9093, map[string]string{
-		"petri.io/mock": "alertmanager",
-	})
+	}); err != nil {
+		return fmt.Errorf("applying alert mock for %s: %w", e.Name, err)
+	}
+	return nil
+}
 
-	for _, m := range []string{configMap, pod, svc} {
-		if err := si.kube.ApplyYAML(ctx, m); err != nil {
-			return fmt.Errorf("applying alert mock for %s: %w", e.Name, err)
+// applyMockServer deploys one canned-response API as a ConfigMap holding its
+// response files and server configuration, a pod serving them, and a Service.
+// The ConfigMap carries cmLabels; the Service carries the petri.io/mock label
+// alone.
+func (si *stateInjector) applyMockServer(ctx context.Context, m mockServer, name, namespace, responses string, cmLabels map[string]string) error {
+	files, err := m.files(responses)
+	if err != nil {
+		return err
+	}
+	configMap := buildMockServerConfigMap(name, namespace, files, cmLabels)
+	pod := buildMockServerPod(name, namespace, name, m.port, map[string]string{"app": name})
+	svc := buildServiceManifest(name, namespace, m.port, m.port, map[string]string{
+		"petri.io/mock": cmLabels["petri.io/mock"],
+	})
+	for _, manifest := range []string{configMap, pod, svc} {
+		if err := si.kube.ApplyYAML(ctx, manifest); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1308,9 +1322,93 @@ func buildLogsDeployment(name, namespace string, spec map[string]any, extraLabel
 
 // ── Mock server shared builders ─────────────────────────────────────────────
 
-// buildMockServerConfigMap creates a ConfigMap containing canned response data
-// for a mock API server pod.
-func buildMockServerConfigMap(name, namespace, dataKey, dataValue string, labels map[string]string) string {
+// mockServer is one canned-response HTTP API: the routes it answers, in the
+// order they are matched, and the body any other path gets. Its responses
+// arrive as one JSON document whose top-level keys the routes read.
+type mockServer struct {
+	port     int
+	routes   []mockRoute
+	fallback string
+}
+
+// mockRoute answers every request whose path contains pattern with the value
+// of the first of keys the responses document carries, or with fallback when
+// it carries none. The body is served from a file named after keys[0].
+type mockRoute struct {
+	pattern  string
+	keys     []string
+	fallback string
+}
+
+var (
+	prometheusMock = mockServer{port: 9090, fallback: `{"status":"success"}`, routes: []mockRoute{
+		{pattern: "/api/v1/query_range", keys: []string{"query_range", "query"}, fallback: `{}`},
+		{pattern: "/api/v1/query", keys: []string{"query"}, fallback: `{}`},
+	}}
+	jaegerMock = mockServer{port: 16686, fallback: `{"data":[]}`, routes: []mockRoute{
+		{pattern: "/api/services", keys: []string{"services"}, fallback: `{"data":[]}`},
+		{pattern: "/api/traces/", keys: []string{"trace"}, fallback: `{"data":[]}`},
+	}}
+	alertmanagerMock = mockServer{port: 9093, fallback: `{"status":"success"}`, routes: []mockRoute{
+		{pattern: "/api/v1/alerts", keys: []string{"alerts"}, fallback: `{"status":"success","data":{"alerts":[]}}`},
+		{pattern: "/api/v2/alerts", keys: []string{"alerts_v2"}, fallback: `[]`},
+	}}
+)
+
+// mockServerConfigFile and mockServerDefaultFile are the ConfigMap keys of a
+// mock server's nginx configuration and of the body any unrouted path gets.
+const (
+	mockServerConfigFile  = "nginx.conf"
+	mockServerDefaultFile = "default.json"
+	mockServerMountPath   = "/data"
+)
+
+// files resolves a responses document into the files the mock server serves
+// — one per route, the fallback body, and the nginx configuration that routes
+// to them. A document that is not a JSON object is an error rather than a
+// server that answers nothing.
+func (m mockServer) files(responses string) (map[string]string, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(responses), &doc); err != nil {
+		return nil, fmt.Errorf("mock server responses are not a JSON object: %w", err)
+	}
+	files := map[string]string{mockServerDefaultFile: m.fallback}
+	for _, r := range m.routes {
+		body := r.fallback
+		for _, k := range r.keys {
+			if v, ok := doc[k]; ok {
+				body = string(v)
+				break
+			}
+		}
+		files[r.file()] = body
+	}
+	files[mockServerConfigFile] = m.nginxConf()
+	return files, nil
+}
+
+// file is the ConfigMap key a route's body is served from.
+func (r mockRoute) file() string { return r.keys[0] + ".json" }
+
+// nginxConf renders the server configuration: a regex location per route,
+// matched in declaration order like the substring checks it replaces, and a
+// catch-all serving the fallback body. Every body is served as JSON.
+func (m mockServer) nginxConf() string {
+	var sb strings.Builder
+	sb.WriteString("worker_processes 1;\ndaemon off;\npid /tmp/nginx.pid;\nerror_log stderr;\nevents {}\nhttp {\n")
+	sb.WriteString("    access_log off;\n    default_type application/json;\n    server {\n")
+	fmt.Fprintf(&sb, "        listen %d;\n        root %s;\n", m.port, mockServerMountPath)
+	for _, r := range m.routes {
+		fmt.Fprintf(&sb, "        location ~ %s {\n            try_files /%s =500;\n        }\n", regexp.QuoteMeta(r.pattern), r.file())
+	}
+	fmt.Fprintf(&sb, "        location / {\n            try_files /%s =500;\n        }\n", mockServerDefaultFile)
+	sb.WriteString("    }\n}\n")
+	return sb.String()
+}
+
+// buildMockServerConfigMap creates a ConfigMap holding a mock server's files,
+// keyed by file name.
+func buildMockServerConfigMap(name, namespace string, files, labels map[string]string) string {
 	var sb strings.Builder
 	sb.WriteString("apiVersion: v1\nkind: ConfigMap\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
@@ -1320,13 +1418,21 @@ func buildMockServerConfigMap(name, namespace, dataKey, dataValue string, labels
 		sb.WriteString("\n")
 	}
 	sb.WriteString("data:\n")
-	fmt.Fprintf(&sb, "  %s: %q\n", dataKey, dataValue)
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&sb, "  %s: %q\n", k, files[k])
+	}
 	return sb.String()
 }
 
-// buildMockServerPod creates a Pod running a Python HTTP server that serves
-// canned responses from a mounted ConfigMap.
-func buildMockServerPod(name, namespace, configMapName string, port int, script string, labels map[string]string) string {
+// buildMockServerPod creates a Pod serving a mock server's files from its
+// mounted ConfigMap with nginx (workloadstate.HTTPServerImage, on
+// registry.k8s.io — never Docker Hub).
+func buildMockServerPod(name, namespace, configMapName string, port int, labels map[string]string) string {
 	var sb strings.Builder
 	sb.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
@@ -1336,75 +1442,19 @@ func buildMockServerPod(name, namespace, configMapName string, port int, script 
 		sb.WriteString("\n")
 	}
 	sb.WriteString("spec:\n  containers:\n  - name: server\n")
-	sb.WriteString("    image: python:3-alpine\n")
-	fmt.Fprintf(&sb, "    command: [\"python3\", \"-c\", %q]\n", script)
+	fmt.Fprintf(&sb, "    image: %s\n", workloadstate.HTTPServerImage)
+	fmt.Fprintf(&sb, "    command: [\"nginx\", \"-c\", %q]\n", mockServerMountPath+"/"+mockServerConfigFile)
 	sb.WriteString("    ports:\n")
 	fmt.Fprintf(&sb, "    - containerPort: %d\n", port)
 	sb.WriteString("    volumeMounts:\n")
 	sb.WriteString("    - name: data\n")
-	sb.WriteString("      mountPath: /data\n")
+	fmt.Fprintf(&sb, "      mountPath: %s\n", mockServerMountPath)
 	sb.WriteString("      readOnly: true\n")
 	sb.WriteString("  volumes:\n")
 	sb.WriteString("  - name: data\n")
 	sb.WriteString("    configMap:\n")
 	fmt.Fprintf(&sb, "      name: %s\n", configMapName)
 	return sb.String()
-}
-
-// ── Mock server scripts ─────────────────────────────────────────────────────
-
-func mockPrometheusScript() string {
-	return `import http.server,json
-data=json.load(open("/data/responses.json"))
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type","application/json")
-        self.end_headers()
-        if "/api/v1/query_range" in self.path:
-            self.wfile.write(json.dumps(data.get("query_range",data.get("query",{}))).encode())
-        elif "/api/v1/query" in self.path:
-            self.wfile.write(json.dumps(data.get("query",{})).encode())
-        else:
-            self.wfile.write(b'{"status":"success"}')
-    def log_message(self,*a):pass
-http.server.HTTPServer(("",9090),H).serve_forever()`
-}
-
-func mockJaegerScript() string {
-	return `import http.server,json
-data=json.load(open("/data/responses.json"))
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type","application/json")
-        self.end_headers()
-        if "/api/services" in self.path:
-            self.wfile.write(json.dumps(data.get("services",{"data":[]})).encode())
-        elif "/api/traces/" in self.path:
-            self.wfile.write(json.dumps(data.get("trace",{"data":[]})).encode())
-        else:
-            self.wfile.write(b'{"data":[]}')
-    def log_message(self,*a):pass
-http.server.HTTPServer(("",16686),H).serve_forever()`
-}
-
-func mockAlertmanagerScript() string {
-	return `import http.server,json
-data=json.load(open("/data/responses.json"))
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type","application/json")
-        self.end_headers()
-        if "/api/v1/alerts" in self.path:
-            self.wfile.write(json.dumps(data.get("alerts",{"status":"success","data":{"alerts":[]}})).encode())
-        elif "/api/v2/alerts" in self.path:
-            self.wfile.write(json.dumps(data.get("alerts_v2",[])).encode())
-        else:
-            self.wfile.write(b'{"status":"success"}')
-    def log_message(self,*a):pass
-http.server.HTTPServer(("",9093),H).serve_forever()`
 }
 
 // ── Mock response data builders ─────────────────────────────────────────────

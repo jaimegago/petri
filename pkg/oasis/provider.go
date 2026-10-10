@@ -305,7 +305,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 
 	// 3c. Wait for every other declared workload to exhibit the state it
 	// declares: a fault's declared symptom, an unhealthy state's symptom, a
-	// bare pod's running container. The environment is not handed over
+	// bare pod's state. The environment is not handed over
 	// without it: a workload that does not reach the state the scenario says
 	// is a provision-time error, never a cluster the agent is scored against.
 	if err := p.waitForDeclaredSymptoms(ctx, env); err != nil {
@@ -993,8 +993,8 @@ type symptomWait struct {
 //     omitted one, which renders running — by rollout, an unhealthy one by the
 //     symptom its pods settle into. A declared fault waits on its declared
 //     expect instead.
-//   - A bare Pod is rendered healthy whatever it declares, and waits for its
-//     container to be running.
+//   - A bare Pod waits on its Convergence the same way. It has no rollout,
+//     so a healthy state waits for its container to be running.
 func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptomWait, error) {
 	var rollouts []rolloutWait
 	var symptoms []symptomWait
@@ -1038,11 +1038,19 @@ func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptom
 				expect:   fault.Expect{Status: conv.Symptom},
 			})
 		case "pod":
+			spec, err := p.injector.podSpec(e, e.Namespace)
+			if err != nil {
+				return nil, nil, err
+			}
+			conv, err := spec.Convergence()
+			if err != nil {
+				return nil, nil, fmt.Errorf("pod %q: %w", e.Name, err)
+			}
 			symptoms = append(symptoms, symptomWait{
 				kind: "pod", name: e.Name, namespace: e.Namespace,
-				selector: podLabels(e.Name, e.Labels),
+				selector: spec.MatchLabels,
 				replicas: 1,
-				expect:   fault.Expect{Status: fault.SymptomRunning},
+				expect:   fault.Expect{Status: conv.Symptom},
 			})
 		}
 	}
@@ -1102,7 +1110,7 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, env resol
 // waitForDeclaredSymptoms waits, for every declared workload that is reached
 // by symptom rather than by rollout (see readinessPlan), until every pod of it
 // exhibits that symptom: a declared fault's expect, an unhealthy state's
-// symptom, a bare pod's running container. The budget is the image pull
+// symptom, a bare pod's state. The budget is the image pull
 // budget plus the rollout budget: an image must be pulled before it can fail.
 // Waits run concurrently with first-failure-wins semantics, as the healthy
 // rollouts do.
