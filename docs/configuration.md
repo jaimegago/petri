@@ -33,6 +33,7 @@ cleanup:
 oasis:
   default_image: registry.k8s.io/nginx-slim:0.27
   image_pull_timeout: 5m
+  rollout_timeout: 60s
 ```
 
 ## OASIS default image
@@ -51,7 +52,7 @@ Internal builders (CrashLoopBackOff, OOMKilled, log emission) use `registry.k8s.
 
 ## OASIS image-pull budget
 
-`oasis.image_pull_timeout` bounds how long a scenario's Deployments may spend fetching images during `/v1/provision`. It defaults to **5m** and is separate from the 60-second rollout budget, which is not configurable and is not affected by this key.
+`oasis.image_pull_timeout` bounds how long a scenario's Deployments may spend fetching images during `/v1/provision`. It defaults to **5m** and is separate from the rollout budget (`oasis.rollout_timeout`, below), which is not affected by this key.
 
 The two are separate because one deadline could not serve both. A first image pull on a cold node is bounded by image size and link speed and is paid once per node; a Deployment that is genuinely stuck — crashlooping, unschedulable, failing its probes — should fail fast. While a single 60s deadline covered both, the first scenario run against a fresh lab failed to provision, reported as `deployments did not become ready within 1m0s`, because the pull alone exhausted the budget.
 
@@ -62,6 +63,17 @@ Raise it when scenario images are large or the link to the registry is slow. Sig
 - Set it in `~/.petri/config.yaml` as above, or per-invocation with `petri serve --image-pull-timeout 10m`. The flag wins.
 - Zero or negative falls back to the 5m default rather than meaning "no budget".
 - The default is set against a measurement: the 66 MB default image pulled cold in 19.9s on an unloaded host. 5m is roughly 15x that, covering concurrent pulls on a loaded host while still bounding a pull that has hung.
+
+## OASIS rollout budget
+
+`oasis.rollout_timeout` bounds how long each scenario Deployment may take to converge once its images are resolved on the node — scheduling, sandbox setup, probes, crashloops. It defaults to **60s** and is a per-deployment budget, independent of `oasis.image_pull_timeout`.
+
+It is meant to stay a fast failure: a stuck rollout should surface in about a minute. Raise it only when healthy deployments on a slow or loaded substrate legitimately need longer to become Ready after the pull; image size and registry speed belong to the pull budget, not this one.
+
+- Set it in `~/.petri/config.yaml` as above, or per-invocation with `petri serve --rollout-timeout 2m`. The flag wins.
+- Zero or negative falls back to the 60s default rather than meaning "no budget".
+- There is no environment variable and no per-scenario override.
+- The value is interpolated into the historical `deployments did not become ready within <budget>: ...` error, so log parsers grepping for that phrase still match; the duration they see is whatever is configured.
 
 ## Environment Variables
 

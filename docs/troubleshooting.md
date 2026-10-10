@@ -168,10 +168,11 @@ list shape changed.
 
 ### Image pull budget, separate from the rollout budget
 
-The 60-second rollout budget covers only the time a Deployment spends
-converging **after** its images are resolved on the node. Fetching the
-images has its own budget, `oasis.image_pull_timeout`, defaulting to 5m
-and settable with `petri serve --image-pull-timeout`.
+The rollout budget — 60s by default, `oasis.rollout_timeout` or
+`petri serve --rollout-timeout` — covers only the time a Deployment
+spends converging **after** its images are resolved on the node.
+Fetching the images has its own budget, `oasis.image_pull_timeout`,
+defaulting to 5m and settable with `petri serve --image-pull-timeout`.
 
 They are separate because they want opposite things. A first pull on a
 cold node is bounded by image size and link speed; a stuck rollout
@@ -187,7 +188,7 @@ a container waiting in `ContainerCreating` with no resolved `imageID` is
 pulling; anything else — scheduling pressure, sandbox setup, probes,
 crashloops — is rollout time. An unschedulable pod reports no container
 status at all and is therefore charged to the rollout budget, so it
-still fails in ~60s rather than borrowing the pull budget on top.
+still fails within the rollout budget (~60s by default) rather than borrowing the pull budget on top.
 
 When the pull budget is what expired, run.log carries:
 
@@ -203,8 +204,9 @@ not pick up pull timeouts.
 ### Effective rollout-timeout budget: per-deployment, not per-scenario
 
 With parallel waits in place
-([ADR 0012](decisions/0012-parallel-rollout-waits.md)), the hardcoded
-60-second rollout budget is a **per-deployment** budget, not a
+([ADR 0012](decisions/0012-parallel-rollout-waits.md)), the rollout
+budget (60s unless `oasis.rollout_timeout` says otherwise) is a
+**per-deployment** budget, not a
 per-scenario one. Before parallelization, a scenario with N deployments
 could consume up to N × 60s of wall clock during the healthy-rollout
 phase, and oasisctl's client-side request timeout was the practical
@@ -224,7 +226,7 @@ sandbox setup, projected-volume mounts (service account token,
 waiting for at least one pod to reach Ready before reporting the
 rollout complete. This is the kind substrate's baseline, not a petri
 regression — a single-deployment scenario provisioning in ~15s is
-behaving normally. The 60s `rolloutTimeout` is sized around this
+behaving normally. The 60s default rollout budget is sized around this
 floor: a healthy deployment lands well inside it, a stuck one
 exhausts it.
 

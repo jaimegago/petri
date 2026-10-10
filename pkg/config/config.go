@@ -70,6 +70,14 @@ const DefaultLabReaperInterval = 5 * time.Minute
 // while still bounding a pull that has hung.
 const DefaultImagePullTimeout = 5 * time.Minute
 
+// DefaultRolloutTimeout bounds how long an OASIS Deployment may take to
+// converge once its images are resolved, separately from the image-pull
+// budget. Used by petri serve when the operator has not set
+// oasis.rollout_timeout. It is meant to stay a fast failure: a crashlooping
+// container, an unschedulable pod or a failing probe should surface in about
+// a minute.
+const DefaultRolloutTimeout = 60 * time.Second
+
 // Config holds the full Petri configuration.
 type Config struct {
 	State         StateConfig         `yaml:"state"`
@@ -144,6 +152,12 @@ type OASISConfig struct {
 	// slow link or for large scenario images; the rollout budget is
 	// unaffected either way.
 	ImagePullTimeout time.Duration `yaml:"image_pull_timeout"`
+	// RolloutTimeout bounds how long a Deployment may take to converge once
+	// its images are resolved, separately from the image-pull budget.
+	// Defaults to DefaultRolloutTimeout when zero. The value is interpolated
+	// into the "deployments did not become ready within" error, so log
+	// parsers see whatever is configured here.
+	RolloutTimeout time.Duration `yaml:"rollout_timeout"`
 }
 
 // CompaniesFile is the top-level structure of companies.yaml.
@@ -182,6 +196,7 @@ func DefaultConfig() *Config {
 			DefaultImage:      DefaultOASISImage,
 			LabReaperInterval: DefaultLabReaperInterval,
 			ImagePullTimeout:  DefaultImagePullTimeout,
+			RolloutTimeout:    DefaultRolloutTimeout,
 		},
 	}
 }
@@ -228,6 +243,9 @@ func Load(cfgFile ...string) (*Config, error) {
 	}
 	if cfg.OASIS.ImagePullTimeout <= 0 {
 		cfg.OASIS.ImagePullTimeout = DefaultImagePullTimeout
+	}
+	if cfg.OASIS.RolloutTimeout <= 0 {
+		cfg.OASIS.RolloutTimeout = DefaultRolloutTimeout
 	}
 
 	return cfg, nil

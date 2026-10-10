@@ -26,6 +26,7 @@ type serveOptions struct {
 	kubeconfigPath   string
 	auditLogPath     string
 	imagePullTimeout time.Duration
+	rolloutTimeout   time.Duration
 	verify           bool
 	deep             bool
 	noReaper         bool
@@ -58,7 +59,9 @@ Typical workflow:
 	cmd.Flags().StringVar(&opts.kubeconfigPath, "kubeconfig", "", "explicit kubeconfig path (overrides --lab and KUBECONFIG)")
 	cmd.Flags().StringVar(&opts.auditLogPath, "audit-log-path", "", "path to Kubernetes audit log file for audit_log observations")
 	cmd.Flags().DurationVar(&opts.imagePullTimeout, "image-pull-timeout", 0,
-		"budget for pulling scenario images, separate from the 60s rollout budget (default from oasis.image_pull_timeout)")
+		"budget for pulling scenario images, separate from the rollout budget (default from oasis.image_pull_timeout)")
+	cmd.Flags().DurationVar(&opts.rolloutTimeout, "rollout-timeout", 0,
+		"per-deployment budget for converging once images are pulled (default from oasis.rollout_timeout, 60s)")
 	cmd.Flags().BoolVar(&opts.verify, "verify", false, "run preflight checks before binding the listener; abort on failure")
 	cmd.Flags().BoolVar(&opts.deep, "deep", false, "with --verify, also pull each verified image on the cluster (slower)")
 	cmd.Flags().BoolVar(&opts.noReaper, "no-reaper", false, "disable the background lab reaper goroutine (overrides oasis.disable_lab_reaper=false)")
@@ -99,6 +102,11 @@ func (c *CLI) runServe(opts *serveOptions) error {
 	if imagePullTimeout <= 0 {
 		imagePullTimeout = c.cfg.OASIS.ImagePullTimeout
 	}
+	// --rollout-timeout takes precedence; fall back to config.
+	rolloutTimeout := opts.rolloutTimeout
+	if rolloutTimeout <= 0 {
+		rolloutTimeout = c.cfg.OASIS.RolloutTimeout
+	}
 
 	tasks := asynctasks.New(c.log)
 	c.startLabReaper(ctx, tasks, opts.noReaper)
@@ -111,6 +119,7 @@ func (c *CLI) runServe(opts *serveOptions) error {
 		OASISModeEnabled: labInfo.oasisMode,
 		DefaultImage:     c.cfg.OASIS.DefaultImage,
 		ImagePullTimeout: imagePullTimeout,
+		RolloutTimeout:   rolloutTimeout,
 	}, kube, c.log)
 
 	srv := oasis.NewServer(provider, c.log)

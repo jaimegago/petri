@@ -47,3 +47,12 @@ Open questions still to settle before implementing:
   historical phrasing. The pull-budget work took the other route for its own new
   condition: a distinct message (`image pull budget exhausted`) and a distinct
   error string, so nothing had to learn a variable value.
+
+## Resolution (2026-10-10)
+
+Settled by the maintainer and shipped: default stays 60s; `oasis.rollout_timeout`
+and `petri serve --rollout-timeout`, wired exactly as `image_pull_timeout` (flag
+wins, zero or negative falls back to the default). No env var, no per-scenario
+override. The historical `"deployments did not become ready within %s: %s"`
+phrasing is unchanged and interpolates the configured value. See
+`docs/configuration.md` § OASIS rollout budget.

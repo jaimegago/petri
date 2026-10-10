@@ -27,7 +27,9 @@ import (
 const rolloutWaitConcurrency = 8
 
 // defaultRolloutTimeout bounds how long a Deployment may take to converge
-// once its images are resolved on the node. It is unchanged at 60s and is
+// once its images are resolved on the node. Overridable via
+// ProviderConfig.RolloutTimeout (oasis.rollout_timeout, or
+// `petri serve --rollout-timeout`). The default is unchanged at 60s and is
 // meant to stay a fast failure: a crashlooping container, an unschedulable
 // pod or a failing probe should surface in about a minute, not in five.
 //
@@ -122,6 +124,10 @@ type ProviderConfig struct {
 	// fetching images, separately from the rollout budget. Zero or
 	// negative falls back to defaultImagePullTimeout.
 	ImagePullTimeout time.Duration
+	// RolloutTimeout bounds the time a Deployment may take to converge once
+	// its images are resolved, separately from the pull budget. Zero or
+	// negative falls back to defaultRolloutTimeout.
+	RolloutTimeout time.Duration
 }
 
 // defaultOASISImage mirrors config.DefaultOASISImage so the oasis package
@@ -936,6 +942,25 @@ func (p *petriProvider) observeStateDiff(ctx context.Context, env *Environment, 
 
 // ── Helper methods ────────────────────────────────────────────────────────────
 
+// pullBudget returns the configured image-pull budget, or
+// defaultImagePullTimeout when it is zero or negative.
+func (p *petriProvider) pullBudget() time.Duration {
+	if p.cfg.ImagePullTimeout <= 0 {
+		return defaultImagePullTimeout
+	}
+	return p.cfg.ImagePullTimeout
+}
+
+// rolloutBudget returns the configured per-deployment rollout budget, or
+// defaultRolloutTimeout when it is zero or negative. The value is what
+// ErrRolloutTimeout interpolates into its historical phrasing.
+func (p *petriProvider) rolloutBudget() time.Duration {
+	if p.cfg.RolloutTimeout <= 0 {
+		return defaultRolloutTimeout
+	}
+	return p.cfg.RolloutTimeout
+}
+
 // waitForHealthyDeployments waits for deployments whose expected status is
 // explicitly set to "running" to finish rolling out. Only deployments with
 // an explicit status: running in their spec are waited on. All other statuses
@@ -943,10 +968,8 @@ func (p *petriProvider) observeStateDiff(ctx context.Context, env *Environment, 
 // etc.) and deployments with no status field are skipped — they represent
 // intentionally unhealthy states that would always time out.
 func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, env resolvedEnv) error {
-	pullTimeout := p.cfg.ImagePullTimeout
-	if pullTimeout <= 0 {
-		pullTimeout = defaultImagePullTimeout
-	}
+	pullTimeout := p.pullBudget()
+	rolloutTimeout := p.rolloutBudget()
 
 	type pendingDeploy struct {
 		name      string
@@ -991,7 +1014,7 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, env resol
 		d := d
 		g.Go(func() error {
 			p.log.Info("waiting for deployment rollout", "deployment", d.name, "namespace", d.namespace)
-			err := p.waitForRolloutWithFastFail(gctx, d.namespace, d.name, defaultRolloutTimeout, pullTimeout)
+			err := p.waitForRolloutWithFastFail(gctx, d.namespace, d.name, rolloutTimeout, pullTimeout)
 			if err != nil {
 				p.log.Warn("deployment rollout failed",
 					"deployment", d.name, "namespace", d.namespace, "error", err)
@@ -1019,11 +1042,7 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, env resol
 // budget: the application image must be pulled before it can fail. Waits run
 // concurrently with first-failure-wins semantics, as the healthy rollouts do.
 func (p *petriProvider) waitForDeclaredSymptoms(ctx context.Context, env resolvedEnv) error {
-	pullTimeout := p.cfg.ImagePullTimeout
-	if pullTimeout <= 0 {
-		pullTimeout = defaultImagePullTimeout
-	}
-	timeout := pullTimeout + defaultRolloutTimeout
+	timeout := p.pullBudget() + p.rolloutBudget()
 
 	type declared struct {
 		name, namespace string

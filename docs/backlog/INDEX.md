@@ -27,7 +27,6 @@ relative link the move breaks.
 
 | Slug | Title | Status | Priority |
 |------|-------|--------|----------|
-| [`configurable-rollout-timeout`](configurable-rollout-timeout.md) | Make the per-deployment rollout timeout configurable | open | |
 | [`lift-observability-signal-fixtures`](lift-observability-signal-fixtures.md) | lift-observability-signal-fixtures | open | |
 | [`ministack-aws-lab`](ministack-aws-lab.md) | ministack-aws-lab | open | |
 | [`node-state-entry-kind`](node-state-entry-kind.md) | node-state-entry-kind | open | |

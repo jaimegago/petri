@@ -155,3 +155,76 @@ func TestImagePullTimeoutDefaults(t *testing.T) {
 		t.Errorf("DefaultConfig OASIS.ImagePullTimeout = %s, want %s", got, DefaultImagePullTimeout)
 	}
 }
+
+// TestRolloutTimeoutDefaults mirrors TestImagePullTimeoutDefaults for the
+// rollout budget: reachable as configuration, defaulting to 60s rather than
+// to zero.
+func TestRolloutTimeoutDefaults(t *testing.T) {
+	if DefaultRolloutTimeout != 60*time.Second {
+		t.Fatalf("DefaultRolloutTimeout = %s, want 60s", DefaultRolloutTimeout)
+	}
+	// The pull budget exists because the rollout budget is short; a rollout
+	// default at or above it would erase the reason for the split.
+	if DefaultRolloutTimeout >= DefaultImagePullTimeout {
+		t.Errorf("DefaultRolloutTimeout = %s, must stay below the %s pull budget", DefaultRolloutTimeout, DefaultImagePullTimeout)
+	}
+	if got := DefaultConfig().OASIS.RolloutTimeout; got != DefaultRolloutTimeout {
+		t.Errorf("DefaultConfig OASIS.RolloutTimeout = %s, want %s", got, DefaultRolloutTimeout)
+	}
+}
+
+// TestOASISTimeoutsLoad pins that both budgets load from config.yaml and that
+// zero or negative falls back to the default rather than meaning "no budget".
+func TestOASISTimeoutsLoad(t *testing.T) {
+	tests := []struct {
+		name        string
+		yaml        string
+		wantPull    time.Duration
+		wantRollout time.Duration
+	}{
+		{
+			name:        "absent keys use defaults",
+			yaml:        "state:\n  backend: sqlite\n",
+			wantPull:    DefaultImagePullTimeout,
+			wantRollout: DefaultRolloutTimeout,
+		},
+		{
+			name:        "explicit values are honored",
+			yaml:        "oasis:\n  image_pull_timeout: 10m\n  rollout_timeout: 2m\n",
+			wantPull:    10 * time.Minute,
+			wantRollout: 2 * time.Minute,
+		},
+		{
+			name:        "zero falls back to defaults",
+			yaml:        "oasis:\n  image_pull_timeout: 0s\n  rollout_timeout: 0s\n",
+			wantPull:    DefaultImagePullTimeout,
+			wantRollout: DefaultRolloutTimeout,
+		},
+		{
+			name:        "negative falls back to defaults",
+			yaml:        "oasis:\n  image_pull_timeout: -1m\n  rollout_timeout: -30s\n",
+			wantPull:    DefaultImagePullTimeout,
+			wantRollout: DefaultRolloutTimeout,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0o600); err != nil {
+				t.Fatalf("writing config: %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.OASIS.ImagePullTimeout != tt.wantPull {
+				t.Errorf("OASIS.ImagePullTimeout = %s, want %s", cfg.OASIS.ImagePullTimeout, tt.wantPull)
+			}
+			if cfg.OASIS.RolloutTimeout != tt.wantRollout {
+				t.Errorf("OASIS.RolloutTimeout = %s, want %s", cfg.OASIS.RolloutTimeout, tt.wantRollout)
+			}
+		})
+	}
+}
