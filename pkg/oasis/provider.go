@@ -115,6 +115,11 @@ type ProviderConfig struct {
 	// OASISModeEnabled is true when the lab was created with --oasis,
 	// indicating audit policy and Calico CNI were installed.
 	OASISModeEnabled bool
+	// LabNodeShape is a one-line summary of the lab's recorded allocatable
+	// shaping (types.NodeShape.Summary). Provision quotes it when a declared
+	// allocatable fact is refused, so the refusal says why. Empty when
+	// serving without lab metadata.
+	LabNodeShape string
 	// DefaultImage is the OCI image used for OASIS Deployment and Pod
 	// state entries when the scenario does not set spec.image. Empty
 	// values fall back to defaultOASISImage so the provider never
@@ -181,7 +186,7 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 		cfg:        cfg,
 		kube:       kube,
 		store:      newEnvironmentStore(),
-		injector:   newStateInjector(kube, cfg.DefaultImage),
+		injector:   newStateInjector(kube, cfg.DefaultImage).withLabNodeShape(cfg.LabNodeShape),
 		audit:      audit,
 		log:        log,
 		tasks:      newAsyncTasks(log),

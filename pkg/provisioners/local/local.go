@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jaimegago/petri/pkg/types"
 )
 
 // Config holds settings for the local provisioner.
@@ -37,6 +39,9 @@ type ClusterInfo struct {
 	KubeconfigPath string `json:"kubeconfig_path"`
 	NodeCount      int    `json:"node_count"`
 	AuditLogPath   string `json:"audit_log_path,omitempty"`
+	// NodeShape is the allocatable shaping outcome for OASIS labs; nil
+	// otherwise. An unshaped outcome is not an error — see shape.go.
+	NodeShape *types.NodeShape `json:"node_shape,omitempty"`
 }
 
 // Provisioner manages local Kubernetes clusters via kind.
@@ -63,6 +68,7 @@ type provisioner struct {
 	cfg    Config
 	kind   kindOps
 	docker dockerOps
+	shape  shapeOps
 }
 
 // New returns a Provisioner using the real kind CLI and Docker daemon.
@@ -71,12 +77,13 @@ func New(cfg Config) Provisioner {
 		cfg:    cfg,
 		kind:   &cliKind{},
 		docker: &cliDocker{},
+		shape:  cliShapeOps{},
 	}
 }
 
 // newWithDeps injects kind and docker dependencies; used in tests.
 func newWithDeps(cfg Config, k kindOps, d dockerOps) Provisioner {
-	return &provisioner{cfg: cfg, kind: k, docker: d}
+	return &provisioner{cfg: cfg, kind: k, docker: d, shape: cliShapeOps{}}
 }
 
 // Create provisions a kind cluster with the appropriate configuration for the
@@ -165,6 +172,7 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		return nil, fmt.Errorf("creating kind cluster %q: %w", opts.Name, err)
 	}
 
+	var nodeShape *types.NodeShape
 	// In OASIS mode the kind default CNI (kindnet) is disabled and Calico
 	// is installed as the sole CNI plugin to provide NetworkPolicy
 	// enforcement. Apply the Calico manifest and wait for readiness.
@@ -179,6 +187,19 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 				p.cleanupFailedCluster(ctx, opts.Name, kubeconfigPath)
 				return nil, fmt.Errorf("waiting for Calico CNI readiness: %w", err)
 			}
+			// Shape worker allocatable to the OASIS target. A host too
+			// small to reach it yields an unshaped record, not an error;
+			// only a failure of the mechanism itself fails the create.
+			target, err := oasisAllocatableTarget()
+			if err != nil {
+				p.cleanupFailedCluster(ctx, opts.Name, kubeconfigPath)
+				return nil, err
+			}
+			nodeShape, err = shapeWorkers(ctx, p.shape, kubeconfigPath, target, shapeTimeout, shapePollInterval)
+			if err != nil {
+				p.cleanupFailedCluster(ctx, opts.Name, kubeconfigPath)
+				return nil, fmt.Errorf("shaping node allocatable: %w", err)
+			}
 		}
 	}
 
@@ -187,6 +208,7 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 		KubeconfigPath: kubeconfigPath,
 		NodeCount:      nodeCount,
 		AuditLogPath:   auditLogPath,
+		NodeShape:      nodeShape,
 	}, nil
 }
 

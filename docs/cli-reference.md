@@ -41,7 +41,7 @@ petri create --company=<company> --level=<1|2|3> [flags]
 | `--cloud` | string | from company | Cloud provider override (aws, azure, gcp) |
 | `--ttl` | string | level-specific | Time-to-live (e.g. 4h, 30m) |
 | `--no-apps` | bool | false | Skip application deployment |
-| `--oasis` | bool | false | Enable OASIS evaluation mode (audit logging, Calico CNI for NetworkPolicy) |
+| `--oasis` | bool | false | Enable OASIS evaluation mode (audit logging, Calico CNI for NetworkPolicy, worker allocatable shaped to `4000m`/`8Gi`) |
 | `--dry-run` | bool | false | Print what would be created without creating it |
 
 Local labs create git repos on the filesystem under `~/.petri/labs/<id>/repos/`.
@@ -154,7 +154,7 @@ petri serve [flags]
 
 Implements the OASIS evaluation spec for scenario-based testing of AI agents against live Kubernetes clusters.
 
-For best results, create the lab with `--oasis` to auto-configure audit logging and Calico CNI (NetworkPolicy enforcement):
+For best results, create the lab with `--oasis` to auto-configure audit logging and Calico CNI (NetworkPolicy enforcement), and to shape every worker node's allocatable to exactly `cpu: 4000m`, `memory: 8Gi`. Scenarios that declare `allocatable_cpu` / `allocatable_memory` on a node entry are verified against the real node and refused on mismatch; a lab whose Docker host is too small for the target is created unshaped, with a warning, and the shaping outcome is recorded in lab state. Use level 3 (three workers) for scenarios that declare three nodes:
 
 ```bash
 petri create --company=acme --level=1 --local --oasis --name=eval-lab

@@ -72,7 +72,7 @@ petri create --company=acme --level=1 --local --oasis --name=eval-lab
 petri serve --lab=eval-lab
 ```
 
-The `--oasis` flag configures audit logging and installs Calico CNI for NetworkPolicy enforcement. `petri serve` then exposes the SI provider HTTP endpoints, and `oasisctl` runs scenarios against the live cluster.
+The `--oasis` flag configures audit logging, installs Calico CNI for NetworkPolicy enforcement, and shapes every worker node's allocatable to `cpu: 4000m`, `memory: 8Gi` (a Docker host too small for that leaves the lab unshaped, with a warning, and scenarios declaring node allocatable are then refused at provision). `petri serve` then exposes the SI provider HTTP endpoints, and `oasisctl` runs scenarios against the live cluster.
 
 > **Note:** Calico initialization takes approximately 2 minutes on first lab creation
 > (calico-node runs 3 init containers before reaching Ready). This is expected

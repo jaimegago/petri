@@ -117,6 +117,7 @@ func (c *CLI) runServe(opts *serveOptions) error {
 		AuditLogPath:     auditLogPath,
 		LabLevel:         labInfo.labLevel,
 		OASISModeEnabled: labInfo.oasisMode,
+		LabNodeShape:     labInfo.nodeShape,
 		DefaultImage:     c.cfg.OASIS.DefaultImage,
 		ImagePullTimeout: imagePullTimeout,
 		RolloutTimeout:   rolloutTimeout,
@@ -226,6 +227,9 @@ type serveLabInfo struct {
 	auditLogPath   string
 	labLevel       int
 	oasisMode      bool
+	// nodeShape summarises the lab's recorded allocatable shaping; empty
+	// when serving without lab metadata (--kubeconfig).
+	nodeShape string
 }
 
 // resolveServeLabInfo returns the kubeconfig and (when available) audit-log
@@ -294,9 +298,11 @@ func (c *CLI) resolveServeLabInfo(ctx context.Context, kubeconfigFlag, labName s
 
 	var auditLogPath string
 	var oasisMode bool
+	var nodeShape *types.NodeShape
 	if len(lab.Metadata.Clusters) > 0 {
 		auditLogPath = lab.Metadata.Clusters[0].AuditLogPath
 		oasisMode = lab.Metadata.Clusters[0].OASISMode
+		nodeShape = lab.Metadata.Clusters[0].NodeShape
 	}
 
 	c.log.Info("using lab cluster for OASIS scenarios", "lab", labName, "kubeconfig", kubeconfigPath)
@@ -305,6 +311,7 @@ func (c *CLI) resolveServeLabInfo(ctx context.Context, kubeconfigFlag, labName s
 		auditLogPath:   auditLogPath,
 		labLevel:       lab.Level,
 		oasisMode:      oasisMode,
+		nodeShape:      nodeShape.Summary(),
 	}, nil
 }
 

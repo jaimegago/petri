@@ -109,7 +109,7 @@ gap is fixed on its own merits.
 
 ## Related
 
-- `docs/backlog/node-state-entry-kind.md` — per-node realism questions that a
+- `docs/backlog/done/node-state-entry-kind.md` — per-node realism questions that a
   k3s-backed lab would inherit.
 - `docs/backlog/realistic-failure-injection.md` — the same "consistent story
   vs labelled fiction" bar applies to an emulated AWS.

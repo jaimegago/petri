@@ -23,11 +23,20 @@ package oasis
 //     verifies rather than manufactures, and a declared condition the real
 //     node contradicts fails the provision loudly.
 //
-// Scope is deliberately minimal: the facts C-DA-003 declares (cpu_usage,
-// memory_pressure) are implemented; anything else on a node entry is a loud
-// error rather than a silently dropped fact. Allocatable-resource shaping and
-// the manufacturing of true pressure conditions are recorded in petri's
-// backlog, not built here.
+//   - Allocatable facts (allocatable_cpu, allocatable_memory) are a lab
+//     property: an OASIS lab's workers are shaped once at creation
+//     (pkg/provisioners/local/shape.go) and a scenario only verifies them.
+//     They are compared, by exact quantity equality, against the bound node's
+//     real status.allocatable; a mismatch — including an unshaped lab — is a
+//     loud provision error naming declared vs actual and the lab's recorded
+//     shaping. Never served as fiction: nothing may contradict what
+//     `kubectl describe node` shows, and no provision reconfigures a node.
+//
+// The node fact vocabulary is closed: cpu_usage and current_utilization
+// (usage), memory_pressure (condition), allocatable_cpu and
+// allocatable_memory (allocatable). Anything else is a loud error rather than
+// a silently dropped fact. memory_pressure: true stays refused — petri
+// verifies conditions, it does not manufacture pressure.
 
 import (
 	"context"
@@ -37,6 +46,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // nodeRoleControlPlaneLabel is the label kubeadm (and kind) stamp on
@@ -44,6 +55,29 @@ import (
 // where a scheduled workload plausibly would; control-plane nodes are used
 // only when no worker exists (a level-1 lab is single-node).
 const nodeRoleControlPlaneLabel = "node-role.kubernetes.io/control-plane"
+
+// Node fact keys. The vocabulary is closed; see the file comment.
+const (
+	nodeFactCPUUsage           = "cpu_usage"
+	nodeFactCurrentUtilization = "current_utilization"
+	nodeFactMemoryPressure     = "memory_pressure"
+	nodeFactAllocatableCPU     = "allocatable_cpu"
+	nodeFactAllocatableMemory  = "allocatable_memory"
+)
+
+// nodeFacts lists the accepted node fact keys, in the order error messages
+// name them.
+var nodeFacts = []string{
+	nodeFactCPUUsage, nodeFactCurrentUtilization, nodeFactMemoryPressure,
+	nodeFactAllocatableCPU, nodeFactAllocatableMemory,
+}
+
+// withLabNodeShape records the lab's allocatable-shaping summary so a refused
+// allocatable fact can say why.
+func (si *stateInjector) withLabNodeShape(summary string) *stateInjector {
+	si.labNodeShape = summary
+	return si
+}
 
 // metricSample is one (timestamp, value) point of a served range series.
 // Values are strings because that is what the Prometheus HTTP API carries.
@@ -150,13 +184,18 @@ func collectNodeUsageSeries(entries []StateEntry, bindings map[string]string, de
 		case "node":
 			for key := range e.Spec {
 				switch key {
-				case "cpu_usage", "memory_pressure":
+				case nodeFactCPUUsage, nodeFactCurrentUtilization, nodeFactMemoryPressure,
+					nodeFactAllocatableCPU, nodeFactAllocatableMemory:
 				default:
-					return nil, fmt.Errorf("node %q: unsupported node fact %q; implemented facts are %q (served via metrics) and %q (verified against the real node)", e.Name, key, "cpu_usage", "memory_pressure")
+					return nil, fmt.Errorf("node %q: unsupported node fact %q; implemented facts are %q", e.Name, key, nodeFacts)
 				}
 			}
-			if v, ok := e.Spec["cpu_usage"]; ok {
-				pct, err := parsePercent("cpu_usage", v)
+			usageKey, v, err := nodeUsageFact(e)
+			if err != nil {
+				return nil, err
+			}
+			if usageKey != "" {
+				pct, err := parsePercent(usageKey, v)
 				if err != nil {
 					return nil, fmt.Errorf("node %q: %w", e.Name, err)
 				}
@@ -199,6 +238,24 @@ func collectNodeUsageSeries(entries []StateEntry, bindings map[string]string, de
 	return series, nil
 }
 
+// nodeUsageFact returns the node entry's CPU usage fact. cpu_usage and
+// current_utilization are the same fact under two scenario spellings — both
+// served as node CPU usage under the bound identity — so declaring both on
+// one entry is ambiguous and refused.
+func nodeUsageFact(e StateEntry) (string, any, error) {
+	cpu, hasCPU := e.Spec[nodeFactCPUUsage]
+	util, hasUtil := e.Spec[nodeFactCurrentUtilization]
+	switch {
+	case hasCPU && hasUtil:
+		return "", nil, fmt.Errorf("node %q declares both %q and %q; they are the same node CPU usage fact, declare one", e.Name, nodeFactCPUUsage, nodeFactCurrentUtilization)
+	case hasCPU:
+		return nodeFactCPUUsage, cpu, nil
+	case hasUtil:
+		return nodeFactCurrentUtilization, util, nil
+	}
+	return "", nil, nil
+}
+
 // applyNode handles a node state entry. The node itself is never created —
 // the binding pass already mapped the declared name onto a real lab node —
 // so what remains is the condition-fact half of the routing: verifying that
@@ -218,13 +275,96 @@ func (si *stateInjector) applyNode(ctx context.Context, e StateEntry, pass *appl
 			return err
 		}
 	}
+	_, hasCPU := e.Spec[nodeFactAllocatableCPU]
+	_, hasMem := e.Spec[nodeFactAllocatableMemory]
+	if hasCPU || hasMem {
+		if err := si.verifyNodeAllocatable(ctx, e, realName); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// verifyNodeAllocatable compares a node entry's declared allocatable facts
+// against the bound node's real status.allocatable, by exact quantity
+// equality ("4000m" equals "4"). Allocatable is a lab property shaped at
+// creation; provision never reconfigures a node, so a mismatch is a loud
+// refusal that names declared vs actual and the lab's recorded shaping.
+func (si *stateInjector) verifyNodeAllocatable(ctx context.Context, e StateEntry, realName string) error {
+	raw, err := si.kube.GetResource(ctx, "node", "", realName)
+	if err != nil {
+		return fmt.Errorf("node %q: reading bound lab node %q: %w", e.Name, realName, err)
+	}
+	var node struct {
+		Status struct {
+			Allocatable map[string]string `json:"allocatable"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(raw), &node); err != nil {
+		return fmt.Errorf("node %q: parsing bound lab node %q: %w", e.Name, realName, err)
+	}
+	var mismatches []string
+	for _, f := range []struct{ fact, resource string }{
+		{nodeFactAllocatableCPU, "cpu"},
+		{nodeFactAllocatableMemory, "memory"},
+	} {
+		v, ok := e.Spec[f.fact]
+		if !ok {
+			continue
+		}
+		declared, err := parseQuantityFact(f.fact, v)
+		if err != nil {
+			return fmt.Errorf("node %q: %w", e.Name, err)
+		}
+		actualStr, ok := node.Status.Allocatable[f.resource]
+		if !ok {
+			return fmt.Errorf("node %q: bound lab node %q reports no allocatable %s, so the declared %s cannot be verified", e.Name, realName, f.resource, f.fact)
+		}
+		actual, err := resource.ParseQuantity(actualStr)
+		if err != nil {
+			return fmt.Errorf("node %q: parsing bound lab node %q allocatable %s %q: %w", e.Name, realName, f.resource, actualStr, err)
+		}
+		if declared.Cmp(actual) != 0 {
+			mismatches = append(mismatches, fmt.Sprintf("%s declared %v, actual %s", f.fact, v, actualStr))
+		}
+	}
+	if len(mismatches) == 0 {
+		return nil
+	}
+	shape := si.labNodeShape
+	if shape == "" {
+		shape = "petri serve has no lab metadata (started with --kubeconfig), so no shaping record is available"
+	}
+	return fmt.Errorf("node %q: bound lab node %q does not have the declared allocatable (%s); refusing to provision a cluster that contradicts the declared state — allocatable is a lab property shaped at petri create --oasis, and %s",
+		e.Name, realName, strings.Join(mismatches, "; "), shape)
+}
+
+// parseQuantityFact reads a declared Kubernetes quantity fact ("4000m",
+// "8Gi", or a YAML number). A non-quantity such as "low" is a loud error:
+// a fact that cannot be compared cannot be verified.
+func parseQuantityFact(field string, v any) (resource.Quantity, error) {
+	var s string
+	switch q := v.(type) {
+	case string:
+		s = strings.TrimSpace(q)
+	case int:
+		s = strconv.Itoa(q)
+	case float64:
+		s = strconv.FormatFloat(q, 'f', -1, 64)
+	default:
+		return resource.Quantity{}, fmt.Errorf("%s: unsupported type %T for a quantity", field, v)
+	}
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("%s: cannot parse %q as a Kubernetes quantity", field, s)
+	}
+	return q, nil
 }
 
 // verifyNodeMemoryPressure checks a declared memory_pressure fact against the
 // bound node's real conditions. Only memory_pressure: false is verifiable —
-// manufacturing true pressure on a lab node is the unbuilt half of the node
-// operation (see docs/backlog/node-state-entry-kind.md). A contradiction
+// manufacturing true pressure on a lab node is out of scope (no scenario
+// declares it; see docs/backlog/done/node-state-entry-kind.md). A contradiction
 // fails the provision loudly: the agent must never be scored against a
 // cluster that disagrees with the scenario's declared world.
 func (si *stateInjector) verifyNodeMemoryPressure(ctx context.Context, declaredName, realName string, declared bool) error {

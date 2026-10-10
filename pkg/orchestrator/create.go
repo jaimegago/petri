@@ -133,6 +133,10 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 		o.log.Info("Rollback: deleting kind cluster", "cluster", cluster.Name)
 		return o.deps.LocalProv.Delete(ctx, cluster.Name)
 	})
+	if cluster.NodeShape != nil && !cluster.NodeShape.Shaped {
+		o.log.Warn("OASIS lab created UNSHAPED: worker allocatable does not match the OASIS target; scenarios declaring allocatable_cpu/allocatable_memory will be refused at provision",
+			"lab", opts.Lab.Name, "reason", cluster.NodeShape.Reason)
+	}
 
 	// ── Step 2: Persist kubeconfig as encrypted credential ──────────────────
 	prog.Step("Storing kubeconfig credential")
@@ -204,6 +208,7 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 			NodeCount:      cluster.NodeCount,
 			AuditLogPath:   cluster.AuditLogPath,
 			OASISMode:      opts.OASISMode,
+			NodeShape:      cluster.NodeShape,
 		},
 	}
 	opts.Lab.Metadata.WorkDir = filepath.Dir(cluster.KubeconfigPath)
@@ -409,6 +414,9 @@ func printLocalConnectionInfo(lab *types.Lab, cluster *localprov.ClusterInfo) {
 	fmt.Printf("\nLab %q is ready!\n", lab.Name)
 	fmt.Printf("  Cluster: %s\n", cluster.Name)
 	fmt.Printf("  Nodes:   %d\n", cluster.NodeCount)
+	if cluster.NodeShape != nil {
+		fmt.Printf("  Shape:   %s\n", cluster.NodeShape.Summary())
+	}
 	fmt.Printf("  Access:  export KUBECONFIG=%s\n", cluster.KubeconfigPath)
 	fmt.Printf("  Expires: %s\n\n", lab.ExpiresAt.Format("2006-01-02 15:04 UTC"))
 }

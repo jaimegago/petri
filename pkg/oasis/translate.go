@@ -27,6 +27,9 @@ type stateInjector struct {
 	// unhealthy or behavioural pod states (CrashLoopBackOff, OOMKilled,
 	// log emission). Like defaultImage, it must not pull from Docker Hub.
 	utilImage string
+	// labNodeShape summarises the lab's recorded allocatable shaping, quoted
+	// when a declared allocatable fact is refused. See nodestate.go.
+	labNodeShape string
 }
 
 func newStateInjector(kube KubeClient, defaultImage string) *stateInjector {

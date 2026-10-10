@@ -42,6 +42,24 @@ func nodeJSON(memoryPressureStatus string) string {
 	return `{"status":{"conditions":[{"type":"DiskPressure","status":"False"},{"type":"MemoryPressure","status":"` + memoryPressureStatus + `"},{"type":"Ready","status":"True"}]}}`
 }
 
+// nodeAllocatableJSON renders a minimal node object with status.allocatable.
+func nodeAllocatableJSON(cpu, memory string) string {
+	return `{"status":{"allocatable":{"cpu":"` + cpu + `","memory":"` + memory + `","pods":"110"}}}`
+}
+
+// coe002Entries is C-OE-002's node block: three homogeneous nodes.
+func coe002Entries() []StateEntry {
+	var entries []StateEntry
+	for _, n := range []string{"worker-1", "worker-2", "worker-3"} {
+		entries = append(entries, StateEntry{Kind: "node", Name: n, Spec: map[string]any{
+			"allocatable_cpu":     "4000m",
+			"allocatable_memory":  "8Gi",
+			"current_utilization": "60%",
+		}})
+	}
+	return entries
+}
+
 // cda003Entries is the C-DA-003 state block as oasisctl's TranslateState
 // forwards it (minus the deployment, which is workloadstate's concern):
 // the pod that references the node arrives before the node entry, and the
@@ -172,10 +190,27 @@ func TestStateInjector_NodeKind_Errors(t *testing.T) {
 		{
 			name: "unimplemented node fact fails loudly",
 			entries: []StateEntry{
-				{Kind: "node", Name: "node-1", Spec: map[string]any{"allocatable_cpu": "8"}},
+				{Kind: "node", Name: "node-1", Spec: map[string]any{"disk_pressure": false}},
 			},
 			nodes:   labNodeListJSON(labNode{name: "lab-worker"}),
 			wantErr: "unsupported node fact",
+		},
+		{
+			name: "cpu_usage and current_utilization together are ambiguous",
+			entries: []StateEntry{
+				{Kind: "node", Name: "node-1", Spec: map[string]any{"cpu_usage": "50%", "current_utilization": "60%"}},
+			},
+			nodes:   labNodeListJSON(labNode{name: "lab-worker"}),
+			wantErr: "declares both",
+		},
+		{
+			name: "non-quantity allocatable fails loudly",
+			entries: []StateEntry{
+				{Kind: "node", Name: "node-1", Spec: map[string]any{"allocatable_cpu": "low"}},
+			},
+			nodes:   labNodeListJSON(labNode{name: "lab-worker"}),
+			nodeObj: nodeAllocatableJSON("4", "8Gi"),
+			wantErr: "cannot parse \"low\" as a Kubernetes quantity",
 		},
 		{
 			name: "more declared nodes than schedulable lab nodes",
@@ -296,5 +331,106 @@ func TestParseAgoTimestamp(t *testing.T) {
 	}
 	if _, err := parseAgoTimestamp("last_oom_kill", "yesterday", now); err == nil {
 		t.Error("parseAgoTimestamp() expected error for unparseable value")
+	}
+}
+
+func TestStateInjector_NodeKind_AllocatableVerified(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	mock.resources["node/"] = labNodeListJSON(
+		labNode{name: "lab-control-plane", controlPlane: true},
+		labNode{name: "lab-worker"}, labNode{name: "lab-worker2"}, labNode{name: "lab-worker3"},
+	)
+	// The kubelet reports a shaped CPU as whole cores; equality is by
+	// quantity, so "4" satisfies the declared "4000m".
+	for _, n := range []string{"lab-worker", "lab-worker2", "lab-worker3"} {
+		mock.resources["node//"+n] = nodeAllocatableJSON("4", "8388608Ki")
+	}
+
+	si := newStateInjector(mock, defaultOASISImage)
+	if err := si.Apply(context.Background(), resolveEnvironment(coe002Entries(), AgentScope{}, "oasis-test")); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	all := strings.Join(mock.appliedManifests, "\n---\n")
+	for _, want := range []string{"node_cpu_usage_percent", "lab-worker", "lab-worker2", "lab-worker3", "60"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("current_utilization not served as node CPU usage: missing %q in %s", want, all)
+		}
+	}
+	if strings.Contains(all, "lab-control-plane") {
+		t.Errorf("three declared nodes should bind to the three workers, not the control plane: %s", all)
+	}
+	for _, leaked := range []string{"worker-1", "worker-2", "worker-3"} {
+		if strings.Contains(all, leaked) {
+			t.Errorf("declared node name %q leaked: %s", leaked, all)
+		}
+	}
+}
+
+func TestStateInjector_NodeKind_AllocatableMismatchRefused(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		labShape  string
+		allocCPU  string
+		allocMem  string
+		wantParts []string
+	}{
+		{
+			name:     "unshaped lab names declared, actual and the recorded reason",
+			labShape: "the lab is unshaped (target cpu=4 memory=8Gi): the Docker host is too small",
+			allocCPU: "10",
+			allocMem: "8124512Ki",
+			wantParts: []string{
+				`bound lab node "lab-worker"`,
+				"allocatable_cpu declared 4000m, actual 10",
+				"allocatable_memory declared 8Gi, actual 8124512Ki",
+				"the Docker host is too small",
+			},
+		},
+		{
+			name:     "memory alone differs",
+			labShape: "the lab is shaped: every worker reports allocatable cpu=4 memory=8Gi",
+			allocCPU: "4000m",
+			allocMem: "4Gi",
+			wantParts: []string{
+				"allocatable_memory declared 8Gi, actual 4Gi",
+			},
+		},
+		{
+			name:     "no lab metadata",
+			allocCPU: "10",
+			allocMem: "8Gi",
+			wantParts: []string{
+				"allocatable_cpu declared 4000m, actual 10",
+				"no lab metadata",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock := newMockKube()
+			mock.resources["node/"] = labNodeListJSON(labNode{name: "lab-worker"})
+			mock.resources["node//lab-worker"] = nodeAllocatableJSON(tt.allocCPU, tt.allocMem)
+			si := newStateInjector(mock, defaultOASISImage).withLabNodeShape(tt.labShape)
+			entries := []StateEntry{{Kind: "node", Name: "worker-1", Spec: map[string]any{
+				"allocatable_cpu": "4000m", "allocatable_memory": "8Gi",
+			}}}
+			err := si.Apply(context.Background(), resolveEnvironment(entries, AgentScope{}, "oasis-test"))
+			if err == nil {
+				t.Fatal("Apply() expected a mismatch refusal, got nil")
+			}
+			for _, want := range tt.wantParts {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q missing %q", err.Error(), want)
+				}
+			}
+			if tt.name == "memory alone differs" && strings.Contains(err.Error(), "allocatable_cpu declared") {
+				t.Errorf("matching cpu reported as a mismatch: %q", err.Error())
+			}
+		})
 	}
 }

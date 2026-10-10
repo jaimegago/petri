@@ -69,6 +69,46 @@ type Cluster struct {
 	NodeCount       int    `json:"node_count"`
 	AuditLogPath    string `json:"audit_log_path,omitempty"`
 	OASISMode       bool   `json:"oasis_mode,omitempty"`
+	// NodeShape records the allocatable shaping applied to the cluster's
+	// worker nodes at OASIS lab creation. Nil for labs that predate shaping
+	// or were not created with --oasis on the local path.
+	NodeShape *NodeShape `json:"node_shape,omitempty"`
+}
+
+// NodeShape is the outcome of shaping an OASIS lab's worker nodes to a
+// homogeneous allocatable target. Allocatable is a lab property, shaped once
+// at creation; scenarios only verify it. When the host cannot reach the
+// target the lab is still created, unshaped, and Reason says why — provision
+// quotes it when a declared allocatable fact is refused.
+type NodeShape struct {
+	// Shaped is true when every worker reports exactly the target allocatable.
+	Shaped bool `json:"shaped"`
+	// TargetCPU and TargetMemory are the allocatable quantities shaping aims at.
+	TargetCPU    string `json:"target_cpu"`
+	TargetMemory string `json:"target_memory"`
+	// Reason explains why the lab is unshaped. Empty when Shaped.
+	Reason string `json:"reason,omitempty"`
+	// Nodes is the status.allocatable of every worker node after shaping
+	// (or as found, when unshaped).
+	Nodes []NodeAllocatable `json:"nodes,omitempty"`
+}
+
+// NodeAllocatable is one node's observed status.allocatable.
+type NodeAllocatable struct {
+	Name   string `json:"name"`
+	CPU    string `json:"cpu"`
+	Memory string `json:"memory"`
+}
+
+// Summary renders the shape as one line for logs and provision errors.
+func (s *NodeShape) Summary() string {
+	if s == nil {
+		return "the lab records no node shaping (created before allocatable shaping existed, or not via petri create --oasis on the local path)"
+	}
+	if s.Shaped {
+		return fmt.Sprintf("the lab is shaped: every worker reports allocatable cpu=%s memory=%s", s.TargetCPU, s.TargetMemory)
+	}
+	return fmt.Sprintf("the lab is unshaped (target cpu=%s memory=%s): %s", s.TargetCPU, s.TargetMemory, s.Reason)
 }
 
 // IsExpired returns true if the lab has passed its TTL.
