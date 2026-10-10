@@ -250,6 +250,14 @@ lab_credentials(
 7. Used during provisioning, never logged
 8. Deleted on lab destroy
 
+**Generated credentials** take the same path. The Azure Pulumi program's
+Postgres administrator password is generated per lab (`crypto/rand`), stored
+encrypted as the `postgres_password` credential, and handed to the stack as the
+secret config value `dbPassword` on `pulumi config set --secret`'s stdin, never
+on a command line. Pulumi keeps it encrypted under the stack's secrets provider.
+The AWS RDS path holds no password: the RDS module's default
+`manage_master_user_password` has RDS generate it into Secrets Manager.
+
 **Export for Joe:**
 ```bash
 petri export-creds lab-name --output=joe-bundle.enc

@@ -853,6 +853,12 @@ func (o *Orchestrator) runPulumi(ctx context.Context, opts CreateOptions, workDi
 		return nil, fmt.Errorf("pulumi init: %w", err)
 	}
 
+	if needsDBPassword(opts.Spec) {
+		if err := o.provisionDBPassword(ctx, opts, workDir, stackName); err != nil {
+			return nil, err
+		}
+	}
+
 	result, err := o.deps.PulumiProv.Up(ctx, pulumiprov.UpOptions{
 		WorkDir:   workDir,
 		StackName: stackName,

@@ -364,12 +364,27 @@ func TestDestroyCloud_PulumiDestroyError_Force(t *testing.T) {
 
 // mockPulumiProv extended to support destroy error injection.
 type mockPulumiProv struct {
-	upFn      func(ctx context.Context, opts pulumiprov.UpOptions) (*pulumiprov.UpResult, error)
-	destroyFn func(ctx context.Context, opts pulumiprov.DestroyOptions) error
+	upFn        func(ctx context.Context, opts pulumiprov.UpOptions) (*pulumiprov.UpResult, error)
+	destroyFn   func(ctx context.Context, opts pulumiprov.DestroyOptions) error
+	setSecretFn func(ctx context.Context, opts pulumiprov.SecretConfigOptions) error
+	secrets     []pulumiprov.SecretConfigOptions // records each SetSecretConfig call
+	calls       []string                         // records the order of Init, SetSecretConfig and Up
 }
 
-func (m *mockPulumiProv) Init(_ context.Context, _ pulumiprov.InitOptions) error { return nil }
+func (m *mockPulumiProv) Init(_ context.Context, _ pulumiprov.InitOptions) error {
+	m.calls = append(m.calls, "init")
+	return nil
+}
+func (m *mockPulumiProv) SetSecretConfig(ctx context.Context, opts pulumiprov.SecretConfigOptions) error {
+	m.calls = append(m.calls, "config")
+	m.secrets = append(m.secrets, opts)
+	if m.setSecretFn != nil {
+		return m.setSecretFn(ctx, opts)
+	}
+	return nil
+}
 func (m *mockPulumiProv) Up(ctx context.Context, opts pulumiprov.UpOptions) (*pulumiprov.UpResult, error) {
+	m.calls = append(m.calls, "up")
 	if m.upFn != nil {
 		return m.upFn(ctx, opts)
 	}

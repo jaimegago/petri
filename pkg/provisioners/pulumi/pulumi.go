@@ -61,6 +61,22 @@ type UpOptions struct {
 	Env []string
 }
 
+// SecretConfigOptions configures a pulumi config set --secret run.
+type SecretConfigOptions struct {
+	// WorkDir is the directory containing the Pulumi project files.
+	WorkDir string
+	// StackName selects the stack whose config is set.
+	StackName string
+	// Key is the project-namespaced config key (e.g. "dbPassword").
+	Key string
+	// Value is the plaintext secret. It reaches pulumi on stdin, never on the
+	// command line, and pulumi stores it encrypted by the stack's secrets
+	// provider.
+	Value string
+	// Env contains additional environment variables.
+	Env []string
+}
+
 // UpResult contains outputs and tracked resources from a successful up.
 type UpResult struct {
 	Outputs   map[string]OutputValue
@@ -119,6 +135,9 @@ type Provisioner interface {
 	Init(ctx context.Context, opts InitOptions) error
 	// Preview shows planned changes without applying them (pulumi preview).
 	Preview(ctx context.Context, opts PreviewOptions) (*PreviewResult, error)
+	// SetSecretConfig stores a secret config value on the stack
+	// (pulumi config set --secret).
+	SetSecretConfig(ctx context.Context, opts SecretConfigOptions) error
 	// Up provisions or updates stack resources (pulumi up --yes).
 	Up(ctx context.Context, opts UpOptions) (*UpResult, error)
 	// Destroy tears down all stack resources (pulumi destroy --yes).
@@ -133,6 +152,8 @@ type Provisioner interface {
 type pulumiRunner interface {
 	exec(ctx context.Context, workDir string, env []string, args ...string) error
 	capture(ctx context.Context, workDir string, env []string, args ...string) (string, error)
+	// execInput runs a command with input on its stdin.
+	execInput(ctx context.Context, workDir string, env []string, input string, args ...string) error
 }
 
 type provisioner struct {
@@ -197,6 +218,24 @@ func (p *provisioner) Preview(ctx context.Context, opts PreviewOptions) (*Previe
 		HasChanges: extractHasChanges(out),
 		Summary:    extractPreviewSummary(out),
 	}, nil
+}
+
+// SetSecretConfig stores a secret config value on the stack. The value is
+// written to pulumi's stdin rather than passed as an argument, so it never
+// appears in the process table or in an error built from the arguments; with
+// stdin not a terminal, pulumi config set reads the value from it.
+func (p *provisioner) SetSecretConfig(ctx context.Context, opts SecretConfigOptions) error {
+	if opts.Key == "" {
+		return fmt.Errorf("pulumi config set: empty key")
+	}
+	if opts.Value == "" {
+		return fmt.Errorf("pulumi config set %q: empty value", opts.Key)
+	}
+	args := []string{"config", "set", "--secret", "--non-interactive", "--stack", opts.StackName, opts.Key}
+	if err := p.runner.execInput(ctx, opts.WorkDir, opts.Env, opts.Value, args...); err != nil {
+		return fmt.Errorf("pulumi config set %q on stack %q: %w", opts.Key, opts.StackName, err)
+	}
+	return nil
 }
 
 // Up provisions or updates all stack resources.

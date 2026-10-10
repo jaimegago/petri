@@ -43,6 +43,7 @@ type TerraformProvisioner interface {
 // PulumiProvisioner abstracts Pulumi stack operations.
 type PulumiProvisioner interface {
 	Init(ctx context.Context, opts pulumiprov.InitOptions) error
+	SetSecretConfig(ctx context.Context, opts pulumiprov.SecretConfigOptions) error
 	Up(ctx context.Context, opts pulumiprov.UpOptions) (*pulumiprov.UpResult, error)
 	Destroy(ctx context.Context, opts pulumiprov.DestroyOptions) error
 	StackRemove(ctx context.Context, opts pulumiprov.StackRemoveOptions) error

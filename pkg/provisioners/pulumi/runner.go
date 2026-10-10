@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,14 +16,25 @@ type cliRunner struct {
 }
 
 func (r *cliRunner) exec(ctx context.Context, workDir string, env []string, args ...string) error {
-	_, err := r.capture(ctx, workDir, env, args...)
+	_, err := r.run(ctx, workDir, env, nil, args...)
 	return err
 }
 
 func (r *cliRunner) capture(ctx context.Context, workDir string, env []string, args ...string) (string, error) {
+	return r.run(ctx, workDir, env, nil, args...)
+}
+
+func (r *cliRunner) execInput(ctx context.Context, workDir string, env []string, input string, args ...string) error {
+	_, err := r.run(ctx, workDir, env, strings.NewReader(input), args...)
+	return err
+}
+
+// run executes the pulumi binary; stdin, when non-nil, is the command's input.
+func (r *cliRunner) run(ctx context.Context, workDir string, env []string, stdin io.Reader, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, r.binary, args...)
 	cmd.Dir = workDir
+	cmd.Stdin = stdin
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.Env = append(os.Environ(),

@@ -14,6 +14,12 @@ type mockRunner struct {
 	execFn    func(ctx context.Context, workDir string, env []string, args ...string) error
 	captureFn func(ctx context.Context, workDir string, env []string, args ...string) (string, error)
 	calls     [][]string // records each invocation's args
+	inputs    []string   // records each execInput invocation's stdin
+}
+
+func (m *mockRunner) execInput(ctx context.Context, workDir string, env []string, input string, args ...string) error {
+	m.inputs = append(m.inputs, input)
+	return m.exec(ctx, workDir, env, args...)
 }
 
 func (m *mockRunner) exec(ctx context.Context, workDir string, env []string, args ...string) error {
