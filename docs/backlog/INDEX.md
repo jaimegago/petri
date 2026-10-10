@@ -28,7 +28,9 @@ relative link the move breaks.
 | Slug | Title | Status | Priority |
 |------|-------|--------|----------|
 | [`cloud-kubeconfig-gcp-azure`](cloud-kubeconfig-gcp-azure.md) | cloud-kubeconfig-gcp-azure | open | |
+| [`lab-host-port-collision`](lab-host-port-collision.md) | lab-host-port-collision | open | |
 | [`lift-observability-signal-fixtures`](lift-observability-signal-fixtures.md) | lift-observability-signal-fixtures | open | |
 | [`ministack-aws-lab`](ministack-aws-lab.md) | ministack-aws-lab | open | |
 | [`mock-metrics-realism`](mock-metrics-realism.md) | mock-metrics-realism | open | |
+| [`provision-ready-before-pods`](provision-ready-before-pods.md) | provision-ready-before-pods | open | |
 | [`realistic-failure-injection`](realistic-failure-injection.md) | realistic-failure-injection | open | |
