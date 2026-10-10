@@ -25,6 +25,12 @@ type injectOptions struct {
 	// timeout bounds the symptom wait of a catalog fault (pkg/fault). Chaos
 	// faults return when their perturbation is applied and ignore it.
 	timeout time.Duration
+	// timeoutSet records whether --timeout was given explicitly, so a mode
+	// that does not use it can refuse it rather than silently ignore it.
+	timeoutSet bool
+	// scenario is the path of a scripted scenario file (pkg/scenarios). It
+	// selects the scenario mode and is exclusive with a positional fault type.
+	scenario string
 }
 
 // defaultInjectTimeout bounds how long a catalog fault waits for its declared
@@ -42,8 +48,10 @@ const expectParam = "expect"
 // injects exactly one chaos fault into a running lab. It is the runtime
 // counterpart to the provision-time pkg/workloadstate capability — chaos
 // perturbs an already-running resource, workloadstate synthesises a workload
-// born into a named state. Continuous/random injection (chaos.ChaosRunner) and
-// scripted scenario files are deliberately out of scope here.
+// born into a named state. A scripted scenario file (--scenario) is a second
+// mode of the same command that replays an ordered fault sequence through the
+// pkg/scenarios ScenarioRunner. Continuous/random injection
+// (chaos.ChaosRunner) is deliberately out of scope here.
 func (c *CLI) newInjectCmd() *cobra.Command {
 	opts := &injectOptions{}
 
@@ -53,9 +61,10 @@ func (c *CLI) newInjectCmd() *cobra.Command {
 	causes := strings.Join(fault.Classes(), ", ")
 
 	cmd := &cobra.Command{
-		Use:   "inject <fault-type>",
-		Short: "Inject a single chaos fault into a running lab",
-		Long: fmt.Sprintf(`Inject exactly one chaos fault into a named, running lab.
+		Use:   "inject <fault-type> | --scenario <file.yaml>",
+		Short: "Inject a chaos fault, a cause, or a scripted fault sequence into a running lab",
+		Long: fmt.Sprintf(`Inject exactly one chaos fault into a named, running lab, or replay a
+scripted fault sequence from a scenario file.
 
 This is the runtime counterpart to Petri's provision-time born-into-state
 capability (pkg/workloadstate): chaos perturbs an already-running resource,
@@ -81,15 +90,24 @@ key) and optionally --param expect=<status> to override the symptom waited
 for. --target must name a Deployment. Only the second trigger of the same
 catalog petri serve materialises at provision time.
 
+Scenario mode (--scenario <file.yaml>) replays the ordered steps of a
+pkg/scenarios file — each step a chaos fault type, target, parameters, delay
+and optional steady-state check — against the lab. It is exclusive with a
+positional fault type, and refuses --target, --param and --timeout because
+every step carries its own. Every step runs even if an earlier one fails; the
+command exits non-zero if any step failed.
+
 Examples:
   petri inject restart_deployment --lab eval-lab --target apps/Deployment/boutique-frontend
   petri inject cpu_pressure --lab eval-lab --target apps/Pod/api --param duration=30s --param workers=2
   petri inject kill_pod --kubeconfig ~/.kube/config --target apps/Pod/frontend --dry-run
-  petri inject config.missing-key --lab eval-lab --target default/Deployment/notification-service --param configMap=smtp-config --param key=SMTP_PORT`, accepted, causes),
-		Args: cobra.ExactArgs(1),
+  petri inject config.missing-key --lab eval-lab --target default/Deployment/notification-service --param configMap=smtp-config --param key=SMTP_PORT
+  petri inject --scenario scenarios/db-cascade.yaml --lab eval-lab --dry-run`, accepted, causes),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
-			return c.runInject(cmd.Context(), args[0], opts, chaos.DefaultFaults(), chaos.NewKubeClient, os.Stdout)
+			opts.timeoutSet = cmd.Flags().Changed("timeout")
+			return c.runInjectMode(cmd.Context(), args, opts, chaos.DefaultFaults(), chaos.NewKubeClient, os.Stdout)
 		},
 	}
 
@@ -99,7 +117,55 @@ Examples:
 	cmd.Flags().StringArrayVar(&opts.params, "param", nil, "fault parameter as key=value (repeatable)")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "resolve and validate everything, print the plan, but do not mutate the cluster")
 	cmd.Flags().DurationVar(&opts.timeout, "timeout", defaultInjectTimeout, "how long a cause class waits for its symptom after applying the misconfiguration")
+	cmd.Flags().StringVar(&opts.scenario, "scenario", "", "replay the scripted fault sequence in this scenario YAML file (exclusive with a positional fault type)")
 	return cmd
+}
+
+// runInjectMode selects exactly one inject mode from the positional argument
+// and the mode flags, refusing ambiguous combinations before anything is
+// resolved: a positional fault type (chaos fault or cause class) or
+// --scenario, never both and never neither.
+func (c *CLI) runInjectMode(
+	ctx context.Context,
+	args []string,
+	opts *injectOptions,
+	faults map[chaos.FaultType]chaos.Fault,
+	newKube func(kubeconfigPath string) chaos.KubeClient,
+	out io.Writer,
+) error {
+	if opts.scenario != "" {
+		if len(args) > 0 {
+			return fmt.Errorf("--scenario and a positional fault type (%q) are mutually exclusive; the scenario file names its own fault types", args[0])
+		}
+		if err := refuseFlagsForMode("--scenario", "every step carries its own", opts); err != nil {
+			return err
+		}
+		return c.runInjectScenario(ctx, opts, faults, newKube, out)
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("a fault type or --scenario <file.yaml> is required")
+	}
+	return c.runInject(ctx, args[0], opts, faults, newKube, out)
+}
+
+// refuseFlagsForMode rejects the single-fault flags a non-positional mode
+// does not use, so a stray --target or --param fails loudly instead of being
+// silently dropped. why completes "<mode> does not take <flags>: <why>".
+func refuseFlagsForMode(mode, why string, opts *injectOptions) error {
+	var set []string
+	if opts.target != "" {
+		set = append(set, "--target")
+	}
+	if len(opts.params) > 0 {
+		set = append(set, "--param")
+	}
+	if opts.timeoutSet {
+		set = append(set, "--timeout")
+	}
+	if len(set) > 0 {
+		return fmt.Errorf("%s does not take %s: %s", mode, strings.Join(set, ", "), why)
+	}
+	return nil
 }
 
 // runInject is the testable core of the inject command. The fault registry and
@@ -275,16 +341,7 @@ func printInjectPlan(out io.Writer, ft chaos.FaultType, target chaos.TargetResou
 	fmt.Fprintf(&sb, "  kind:      %s\n", target.Kind)
 	fmt.Fprintf(&sb, "  name:      %s\n", target.Name)
 	if len(params) > 0 {
-		keys := make([]string, 0, len(params))
-		for k := range params {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := make([]string, 0, len(keys))
-		for _, k := range keys {
-			parts = append(parts, k+"="+params[k])
-		}
-		fmt.Fprintf(&sb, "  params:    %s\n", strings.Join(parts, " "))
+		fmt.Fprintf(&sb, "  params:    %s\n", formatParams(params))
 	}
 	_, _ = io.WriteString(out, sb.String())
 }

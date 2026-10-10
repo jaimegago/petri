@@ -33,4 +33,3 @@ relative link the move breaks.
 | [`node-state-entry-kind`](node-state-entry-kind.md) | node-state-entry-kind | open | |
 | [`petri-cli-surface-for-workload-state`](petri-cli-surface-for-workload-state.md) | petri-cli-surface-for-workload-state | open | |
 | [`realistic-failure-injection`](realistic-failure-injection.md) | realistic-failure-injection | open | |
-| [`scenario-file-injection-cli-mode`](scenario-file-injection-cli-mode.md) | scenario-file-injection-cli-mode | open | |

@@ -163,11 +163,13 @@ petri serve --lab=eval-lab
 
 ### `petri inject`
 
-Inject a single chaos fault, or apply a single cause from the fault catalog,
-into a named, running lab.
+Inject a single chaos fault, apply a single cause from the fault catalog, or
+replay a scripted fault sequence from a scenario file, into a named, running
+lab.
 
 ```bash
 petri inject <fault-type|cause-class> [flags]
+petri inject --scenario <file.yaml> [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -178,6 +180,7 @@ petri inject <fault-type|cause-class> [flags]
 | `--param` | string | | Fault parameter as `key=value` (repeatable) |
 | `--dry-run` | bool | false | Resolve and validate everything, print the plan, but do not mutate the cluster |
 | `--timeout` | duration | 2m | How long a cause class waits for its symptom after applying the misconfiguration (chaos faults ignore it) |
+| `--scenario` | string | | Replay the scripted fault sequence in this scenario YAML file (exclusive with a positional fault type) |
 
 `petri inject` is the **runtime** counterpart to Petri's **provision-time**
 born-into-state capability (`pkg/workloadstate`, documented in
@@ -244,6 +247,40 @@ name a Deployment.
 # Remove SMTP_PORT from smtp-config and wait for notification-service to crash-loop
 petri inject config.missing-key --lab eval-lab --target default/Deployment/notification-service \
   --param configMap=smtp-config --param key=SMTP_PORT
+```
+
+**Scenario mode.** `--scenario <file.yaml>` loads a `pkg/scenarios` file and
+replays its steps in order through the `ScenarioRunner`: each step names a chaos
+fault type, a `namespace`/`kind`/`name` target, optional `parameters`, a `delay`
+before it fires, and an optional `steady_state` Deployment rollout to wait for
+first. Steps reference chaos fault types only — cause classes are not scenario
+steps. The file is validated (fault types against `chaos.DefaultFaults()`,
+target shape) before the lab is resolved; `--dry-run` prints the step plan
+without touching the cluster.
+
+The mode is exclusive with a positional fault type, and refuses `--target`,
+`--param` and an explicit `--timeout`, because every step carries its own. A
+failed step does not stop the sequence: every step runs, each outcome is
+printed, and the command exits non-zero if any step failed.
+
+```yaml
+name: db-cascade
+steps:
+  - name: kill-db
+    fault_type: kill_pod
+    target: {namespace: data, kind: Pod, name: postgres}
+  - name: restart-api
+    fault_type: restart_deployment
+    target: {namespace: apps, kind: Deployment, name: api}
+    delay: 30s
+    steady_state: {namespace: apps, deployment: api, timeout: 2m}
+    expected_diagnosis: api restarted after losing its database
+```
+
+```bash
+# Preview, then replay, a scripted sequence against an active lab
+petri inject --scenario db-cascade.yaml --lab eval-lab --dry-run
+petri inject --scenario db-cascade.yaml --lab eval-lab
 ```
 
 ### `petri completion`
