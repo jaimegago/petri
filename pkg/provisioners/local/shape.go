@@ -36,7 +36,7 @@ import (
 // refused at provision rather than served as fiction.
 const (
 	OASISNodeAllocatableCPU    = "4000m"
-	OASISNodeAllocatableMemory = "8Gi"
+	OASISNodeAllocatableMemory = "4Gi"
 )
 
 const (

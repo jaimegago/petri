@@ -120,39 +120,44 @@ func TestPlanReservation(t *testing.T) {
 		{
 			name:   "no eviction threshold",
 			capCPU: "8", capMem: "16Gi",
-			wantCPU: "4", wantMem: "8Gi",
+			wantCPU: "4", wantMem: "12Gi",
 		},
 		{
 			name:   "absolute eviction threshold is subtracted",
 			capCPU: "10", capMem: "16Gi",
 			kc:      kubeletReservations{evictionHard: map[string]string{"memory.available": "100Mi"}},
-			wantCPU: "6", wantMem: "8092Mi",
+			wantCPU: "6", wantMem: "12188Mi",
 		},
 		{
 			name:   "percentage eviction threshold is a share of capacity",
 			capCPU: "8", capMem: "16Gi",
 			kc:      kubeletReservations{evictionHard: map[string]string{"memory.available": "25%"}},
-			wantCPU: "4", wantMem: "4Gi",
+			wantCPU: "4", wantMem: "8Gi",
 		},
 		{
 			name:   "existing kubeReserved is accounted for",
 			capCPU: "8", capMem: "16Gi",
 			kc:      kubeletReservations{kubeReserved: map[string]string{"cpu": "500m", "memory": "1Gi"}},
-			wantCPU: "3500m", wantMem: "7Gi",
+			wantCPU: "3500m", wantMem: "11Gi",
 		},
 		{
 			name:   "exact fit reserves nothing",
-			capCPU: "4", capMem: "8Gi",
+			capCPU: "4", capMem: "4Gi",
 			wantCPU: "0", wantMem: "0",
 		},
 		{
-			name:   "host memory below target is unreachable",
+			name:   "a ~7.75GiB Docker VM reaches the target",
 			capCPU: "10", capMem: "8124512Ki",
+			wantCPU: "6", wantMem: "3930208Ki",
+		},
+		{
+			name:   "host memory below target is unreachable",
+			capCPU: "10", capMem: "3Gi",
 			wantUnreachable: true,
 		},
 		{
 			name:   "eviction threshold pushes an exact host below target",
-			capCPU: "4", capMem: "8Gi",
+			capCPU: "4", capMem: "4Gi",
 			kc:              kubeletReservations{evictionHard: map[string]string{"memory.available": "100Mi"}},
 			wantUnreachable: true,
 		},
@@ -210,7 +215,7 @@ func TestShapeWorkers(t *testing.T) {
 
 	shaped := func(name string) fakeNode {
 		n := kindHostNode(name, false)
-		n.allocCPU, n.allocMemory = "4", "8Gi"
+		n.allocCPU, n.allocMemory = "4", "4Gi"
 		return n
 	}
 
@@ -232,23 +237,23 @@ func TestShapeWorkers(t *testing.T) {
 		if _, touched := ops.reserved["lab-control-plane"]; touched {
 			t.Error("control plane was given a reservation")
 		}
-		if got := ops.reserved["lab-worker"]; got != [2]string{"4", "8Gi"} {
-			t.Errorf("lab-worker reservation = %v, want [4 8Gi]", got)
+		if got := ops.reserved["lab-worker"]; got != [2]string{"4", "12Gi"} {
+			t.Errorf("lab-worker reservation = %v, want [4 12Gi]", got)
 		}
 	})
 
 	t.Run("host too small yields an unshaped record and touches nothing", func(t *testing.T) {
 		t.Parallel()
-		small := fakeNode{name: "lab-worker", ready: true, capCPU: "10", capMemory: "8124512Ki", allocCPU: "10", allocMemory: "8124512Ki"}
+		small := fakeNode{name: "lab-worker", ready: true, capCPU: "10", capMemory: "3Gi", allocCPU: "10", allocMemory: "3Gi"}
 		ops := &fakeShapeOps{before: nodeListJSON(t, small), configz: kindConfigz, workers: 1}
 		shape, err := shapeWorkers(context.Background(), ops, "kc", mustTarget(t), time.Second, time.Millisecond)
 		if err != nil {
 			t.Fatalf("shapeWorkers: %v", err)
 		}
-		if shape.Shaped || !strings.Contains(shape.Reason, "8124512Ki") || len(ops.reserved) != 0 {
+		if shape.Shaped || !strings.Contains(shape.Reason, "3Gi") || len(ops.reserved) != 0 {
 			t.Fatalf("shape = %+v reserved = %v, want unshaped naming capacity and no reservations", shape, ops.reserved)
 		}
-		if len(shape.Nodes) != 1 || shape.Nodes[0].Memory != "8124512Ki" {
+		if len(shape.Nodes) != 1 || shape.Nodes[0].Memory != "3Gi" {
 			t.Errorf("unshaped record should carry the as-found allocatable: %+v", shape.Nodes)
 		}
 	})

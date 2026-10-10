@@ -53,7 +53,7 @@ func coe002Entries() []StateEntry {
 	for _, n := range []string{"worker-1", "worker-2", "worker-3"} {
 		entries = append(entries, StateEntry{Kind: "node", Name: n, Spec: map[string]any{
 			"allocatable_cpu":     "4000m",
-			"allocatable_memory":  "8Gi",
+			"allocatable_memory":  "4Gi",
 			"current_utilization": "60%",
 		}})
 	}
@@ -209,7 +209,7 @@ func TestStateInjector_NodeKind_Errors(t *testing.T) {
 				{Kind: "node", Name: "node-1", Spec: map[string]any{"allocatable_cpu": "low"}},
 			},
 			nodes:   labNodeListJSON(labNode{name: "lab-worker"}),
-			nodeObj: nodeAllocatableJSON("4", "8Gi"),
+			nodeObj: nodeAllocatableJSON("4", "4Gi"),
 			wantErr: "cannot parse \"low\" as a Kubernetes quantity",
 		},
 		{
@@ -343,9 +343,9 @@ func TestStateInjector_NodeKind_AllocatableVerified(t *testing.T) {
 		labNode{name: "lab-worker"}, labNode{name: "lab-worker2"}, labNode{name: "lab-worker3"},
 	)
 	// The kubelet reports a shaped CPU as whole cores; equality is by
-	// quantity, so "4" satisfies the declared "4000m".
+	// quantity, so "4" satisfies the declared "4000m" (and "4194304Ki" the declared "4Gi").
 	for _, n := range []string{"lab-worker", "lab-worker2", "lab-worker3"} {
-		mock.resources["node//"+n] = nodeAllocatableJSON("4", "8388608Ki")
+		mock.resources["node//"+n] = nodeAllocatableJSON("4", "4194304Ki")
 	}
 
 	si := newStateInjector(mock, defaultOASISImage)
@@ -374,25 +374,28 @@ func TestStateInjector_NodeKind_AllocatableMismatchRefused(t *testing.T) {
 	tests := []struct {
 		name      string
 		labShape  string
+		declMem   string
 		allocCPU  string
 		allocMem  string
 		wantParts []string
 	}{
 		{
 			name:     "unshaped lab names declared, actual and the recorded reason",
-			labShape: "the lab is unshaped (target cpu=4 memory=8Gi): the Docker host is too small",
+			labShape: "the lab is unshaped (target cpu=4 memory=4Gi): the Docker host is too small",
+			declMem:  "4Gi",
 			allocCPU: "10",
-			allocMem: "8124512Ki",
+			allocMem: "3Gi",
 			wantParts: []string{
 				`bound lab node "lab-worker"`,
 				"allocatable_cpu declared 4000m, actual 10",
-				"allocatable_memory declared 8Gi, actual 8124512Ki",
+				"allocatable_memory declared 4Gi, actual 3Gi",
 				"the Docker host is too small",
 			},
 		},
 		{
 			name:     "memory alone differs",
-			labShape: "the lab is shaped: every worker reports allocatable cpu=4 memory=8Gi",
+			labShape: "the lab is shaped: every worker reports allocatable cpu=4 memory=4Gi",
+			declMem:  "8Gi",
 			allocCPU: "4000m",
 			allocMem: "4Gi",
 			wantParts: []string{
@@ -401,6 +404,7 @@ func TestStateInjector_NodeKind_AllocatableMismatchRefused(t *testing.T) {
 		},
 		{
 			name:     "no lab metadata",
+			declMem:  "4Gi",
 			allocCPU: "10",
 			allocMem: "8Gi",
 			wantParts: []string{
@@ -417,7 +421,7 @@ func TestStateInjector_NodeKind_AllocatableMismatchRefused(t *testing.T) {
 			mock.resources["node//lab-worker"] = nodeAllocatableJSON(tt.allocCPU, tt.allocMem)
 			si := newStateInjector(mock, defaultOASISImage).withLabNodeShape(tt.labShape)
 			entries := []StateEntry{{Kind: "node", Name: "worker-1", Spec: map[string]any{
-				"allocatable_cpu": "4000m", "allocatable_memory": "8Gi",
+				"allocatable_cpu": "4000m", "allocatable_memory": tt.declMem,
 			}}}
 			err := si.Apply(context.Background(), resolveEnvironment(entries, AgentScope{}, "oasis-test"))
 			if err == nil {
