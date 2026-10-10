@@ -163,14 +163,18 @@ petri serve --lab=eval-lab
 
 ### `petri inject`
 
-Inject a single chaos fault, apply a single cause from the fault catalog, or
-replay a scripted fault sequence from a scenario file, into a named, running
-lab.
+Inject a single chaos fault, apply a single cause from the fault catalog,
+replay a scripted fault sequence from a scenario file, or provision a workload
+born into a named state, into a named, running lab.
 
 ```bash
 petri inject <fault-type|cause-class> [flags]
 petri inject --scenario <file.yaml> [flags]
+petri inject --state <state> --target <namespace/Deployment/name> [flags]
 ```
+
+Exactly one mode is selected — a positional fault type, `--scenario`, or
+`--state` — and a flag the selected mode would ignore is refused, not dropped.
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
@@ -180,7 +184,9 @@ petri inject --scenario <file.yaml> [flags]
 | `--param` | string | | Fault parameter as `key=value` (repeatable) |
 | `--dry-run` | bool | false | Resolve and validate everything, print the plan, but do not mutate the cluster |
 | `--timeout` | duration | 2m | How long a cause class waits for its symptom after applying the misconfiguration (chaos faults ignore it) |
-| `--scenario` | string | | Replay the scripted fault sequence in this scenario YAML file (exclusive with a positional fault type) |
+| `--scenario` | string | | Replay the scripted fault sequence in this scenario YAML file (exclusive with a positional fault type and `--state`) |
+| `--state` | string | | Provision a workload born into this state at `--target` (exclusive with a positional fault type and `--scenario`) |
+| `--image` | string | OASIS default image | Container image for `--state` |
 
 `petri inject` is the **runtime** counterpart to Petri's **provision-time**
 born-into-state capability (`pkg/workloadstate`, documented in
@@ -258,8 +264,8 @@ steps. The file is validated (fault types against `chaos.DefaultFaults()`,
 target shape) before the lab is resolved; `--dry-run` prints the step plan
 without touching the cluster.
 
-The mode is exclusive with a positional fault type, and refuses `--target`,
-`--param` and an explicit `--timeout`, because every step carries its own. A
+The mode is exclusive with the other modes, and refuses `--target`, `--param`,
+`--image` and an explicit `--timeout`, because every step carries its own. A
 failed step does not stop the sequence: every step runs, each outcome is
 printed, and the command exits non-zero if any step failed.
 
@@ -281,6 +287,28 @@ steps:
 # Preview, then replay, a scripted sequence against an active lab
 petri inject --scenario db-cascade.yaml --lab eval-lab --dry-run
 petri inject --scenario db-cascade.yaml --lab eval-lab
+```
+
+**Born-into-state mode.** `--state <state>` provisions a Deployment that starts
+in the named state through `workloadstate.Provision` — the provision-time
+capability documented in [workload-state.md](workload-state.md), driven without
+an OASIS scenario. `--target` names the Deployment to create
+(`namespace/Deployment/name`, in an existing namespace). `--image` sets the
+container image for the states that run one (`running`, `pending`,
+`degraded`); it defaults to the configured OASIS default image
+(`oasis.default_image`), and states that synthesise their own container ignore
+it. The accepted states are `workloadstate.AcceptedStates()`; an unrecognised
+state is refused with that list before the lab is resolved, and nothing is
+applied. The mode refuses `--param` and an explicit `--timeout`, and does not
+wait for the state to be reached.
+
+This is the symptom half only. A cause under diagnosis is materialised through
+the application by a cause class (above), never by `--state` — see
+[ADR 0017](decisions/0017-causes-through-the-application.md).
+
+```bash
+# Stand up a Deployment that is born OOM-killing
+petri inject --state oomkilled --lab eval-lab --target apps/Deployment/batch-worker
 ```
 
 ### `petri completion`

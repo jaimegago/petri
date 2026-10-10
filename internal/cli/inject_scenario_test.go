@@ -66,7 +66,7 @@ func TestRunInjectMode_Exclusivity(t *testing.T) {
 		opts    injectOptions
 		wantErr string
 	}{
-		{"neither positional nor scenario", nil, injectOptions{kubeconfigPath: "/tmp/kc"}, "a fault type or --scenario"},
+		{"no mode", nil, injectOptions{kubeconfigPath: "/tmp/kc"}, "one of a fault type, --scenario"},
 		{"positional and scenario", []string{"kill_pod"}, injectOptions{kubeconfigPath: "/tmp/kc", scenario: path}, "mutually exclusive"},
 		{"scenario with target", nil, injectOptions{kubeconfigPath: "/tmp/kc", scenario: path, target: "a/Pod/b"}, "--scenario does not take --target"},
 		{"scenario with param", nil, injectOptions{kubeconfigPath: "/tmp/kc", scenario: path, params: []string{"k=v"}}, "--param"},

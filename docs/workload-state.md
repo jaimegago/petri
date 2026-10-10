@@ -23,6 +23,9 @@ context, that client, and a spec.
 The capability is described here in the abstract. OASIS (`pkg/oasis`) is one
 consumer that drives it from state-entry specs, but `pkg/workloadstate` does not
 import or know about OASIS; any caller can populate a `Spec` and provision.
+`petri inject --state <state>` is the other consumer: it provisions a workload
+born into a state directly against a lab, without a scenario (see
+[cli-reference.md](cli-reference.md#petri-inject)).
 
 ## Recognized states
 

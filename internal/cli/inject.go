@@ -29,8 +29,14 @@ type injectOptions struct {
 	// that does not use it can refuse it rather than silently ignore it.
 	timeoutSet bool
 	// scenario is the path of a scripted scenario file (pkg/scenarios). It
-	// selects the scenario mode and is exclusive with a positional fault type.
+	// selects the scenario mode and is exclusive with every other mode.
 	scenario string
+	// state is a pkg/workloadstate state. It selects the born-into-state
+	// mode and is exclusive with every other mode.
+	state string
+	// image is the container image for the born-into-state mode. Empty
+	// resolves to the configured OASIS default image.
+	image string
 }
 
 // defaultInjectTimeout bounds how long a catalog fault waits for its declared
@@ -48,10 +54,11 @@ const expectParam = "expect"
 // injects exactly one chaos fault into a running lab. It is the runtime
 // counterpart to the provision-time pkg/workloadstate capability — chaos
 // perturbs an already-running resource, workloadstate synthesises a workload
-// born into a named state. A scripted scenario file (--scenario) is a second
-// mode of the same command that replays an ordered fault sequence through the
-// pkg/scenarios ScenarioRunner. Continuous/random injection
-// (chaos.ChaosRunner) is deliberately out of scope here.
+// born into a named state. Two further modes share the command: a scripted
+// scenario file (--scenario) replays an ordered fault sequence through the
+// pkg/scenarios ScenarioRunner, and --state provisions a workload born into a
+// pkg/workloadstate state. Continuous/random injection (chaos.ChaosRunner) is
+// deliberately out of scope here.
 func (c *CLI) newInjectCmd() *cobra.Command {
 	opts := &injectOptions{}
 
@@ -59,12 +66,14 @@ func (c *CLI) newInjectCmd() *cobra.Command {
 	// the help text can never drift from either.
 	accepted := strings.Join(acceptedFaultTypes(chaos.DefaultFaults()), ", ")
 	causes := strings.Join(fault.Classes(), ", ")
+	states := strings.Join(acceptedWorkloadStates(), ", ")
 
 	cmd := &cobra.Command{
-		Use:   "inject <fault-type> | --scenario <file.yaml>",
-		Short: "Inject a chaos fault, a cause, or a scripted fault sequence into a running lab",
-		Long: fmt.Sprintf(`Inject exactly one chaos fault into a named, running lab, or replay a
-scripted fault sequence from a scenario file.
+		Use:   "inject <fault-type> | --scenario <file.yaml> | --state <state>",
+		Short: "Inject a chaos fault, a cause, a scripted fault sequence, or a born-into-state workload into a running lab",
+		Long: fmt.Sprintf(`Inject exactly one chaos fault into a named, running lab, replay a
+scripted fault sequence from a scenario file, or provision a workload born
+into a named state.
 
 This is the runtime counterpart to Petri's provision-time born-into-state
 capability (pkg/workloadstate): chaos perturbs an already-running resource,
@@ -92,17 +101,28 @@ catalog petri serve materialises at provision time.
 
 Scenario mode (--scenario <file.yaml>) replays the ordered steps of a
 pkg/scenarios file — each step a chaos fault type, target, parameters, delay
-and optional steady-state check — against the lab. It is exclusive with a
-positional fault type, and refuses --target, --param and --timeout because
+and optional steady-state check — against the lab. It is exclusive with the
+other modes, and refuses --target, --param, --timeout and --image because
 every step carries its own. Every step runs even if an earlier one fails; the
 command exits non-zero if any step failed.
+
+Born-into-state mode (--state <state>) provisions a Deployment that starts in
+the named pkg/workloadstate state, with no healthy intermediate. --target names
+the Deployment to create (namespace/Deployment/name) in an existing namespace;
+--image sets the container image for the states that run one (default: the
+configured OASIS default image). This is the symptom half only: a cause under
+diagnosis goes through a cause class above, not through --state.
+
+Accepted states:
+  %s
 
 Examples:
   petri inject restart_deployment --lab eval-lab --target apps/Deployment/boutique-frontend
   petri inject cpu_pressure --lab eval-lab --target apps/Pod/api --param duration=30s --param workers=2
   petri inject kill_pod --kubeconfig ~/.kube/config --target apps/Pod/frontend --dry-run
   petri inject config.missing-key --lab eval-lab --target default/Deployment/notification-service --param configMap=smtp-config --param key=SMTP_PORT
-  petri inject --scenario scenarios/db-cascade.yaml --lab eval-lab --dry-run`, accepted, causes),
+  petri inject --scenario scenarios/db-cascade.yaml --lab eval-lab --dry-run
+  petri inject --state oomkilled --lab eval-lab --target apps/Deployment/batch-worker`, accepted, causes, states),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
@@ -117,14 +137,17 @@ Examples:
 	cmd.Flags().StringArrayVar(&opts.params, "param", nil, "fault parameter as key=value (repeatable)")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "resolve and validate everything, print the plan, but do not mutate the cluster")
 	cmd.Flags().DurationVar(&opts.timeout, "timeout", defaultInjectTimeout, "how long a cause class waits for its symptom after applying the misconfiguration")
-	cmd.Flags().StringVar(&opts.scenario, "scenario", "", "replay the scripted fault sequence in this scenario YAML file (exclusive with a positional fault type)")
+	cmd.Flags().StringVar(&opts.scenario, "scenario", "", "replay the scripted fault sequence in this scenario YAML file (exclusive with a positional fault type and --state)")
+	cmd.Flags().StringVar(&opts.state, "state", "", "provision a workload born into this state at --target (exclusive with a positional fault type and --scenario)")
+	cmd.Flags().StringVar(&opts.image, "image", "", "container image for --state (default: the configured OASIS default image)")
 	return cmd
 }
 
 // runInjectMode selects exactly one inject mode from the positional argument
 // and the mode flags, refusing ambiguous combinations before anything is
-// resolved: a positional fault type (chaos fault or cause class) or
-// --scenario, never both and never neither.
+// resolved: a positional fault type (chaos fault or cause class), --scenario,
+// or --state — exactly one of them — and no flag the selected mode would
+// ignore.
 func (c *CLI) runInjectMode(
 	ctx context.Context,
 	args []string,
@@ -133,34 +156,62 @@ func (c *CLI) runInjectMode(
 	newKube func(kubeconfigPath string) chaos.KubeClient,
 	out io.Writer,
 ) error {
+	var modes []string
+	if len(args) > 0 {
+		modes = append(modes, fmt.Sprintf("positional fault type %q", args[0]))
+	}
 	if opts.scenario != "" {
-		if len(args) > 0 {
-			return fmt.Errorf("--scenario and a positional fault type (%q) are mutually exclusive; the scenario file names its own fault types", args[0])
-		}
-		if err := refuseFlagsForMode("--scenario", "every step carries its own", opts); err != nil {
+		modes = append(modes, "--scenario")
+	}
+	if opts.state != "" {
+		modes = append(modes, "--state")
+	}
+	switch {
+	case len(modes) == 0:
+		return fmt.Errorf("one of a fault type, --scenario <file.yaml>, or --state <state> is required")
+	case len(modes) > 1:
+		return fmt.Errorf("%s are mutually exclusive; give exactly one", strings.Join(modes, " and "))
+	}
+
+	target := modeFlag{"--target", opts.target != ""}
+	params := modeFlag{"--param", len(opts.params) > 0}
+	timeout := modeFlag{"--timeout", opts.timeoutSet}
+	image := modeFlag{"--image", opts.image != ""}
+
+	switch {
+	case opts.scenario != "":
+		if err := refuseFlagsForMode("--scenario", "every step carries its own", target, params, timeout, image); err != nil {
 			return err
 		}
 		return c.runInjectScenario(ctx, opts, faults, newKube, out)
+	case opts.state != "":
+		if err := refuseFlagsForMode("--state", "a born-into-state workload takes only --target and --image", params, timeout); err != nil {
+			return err
+		}
+		return c.runInjectState(ctx, opts, newKube, out)
+	default:
+		if err := refuseFlagsForMode("a fault type", "--image applies only to --state", image); err != nil {
+			return err
+		}
+		return c.runInject(ctx, args[0], opts, faults, newKube, out)
 	}
-	if len(args) == 0 {
-		return fmt.Errorf("a fault type or --scenario <file.yaml> is required")
-	}
-	return c.runInject(ctx, args[0], opts, faults, newKube, out)
 }
 
-// refuseFlagsForMode rejects the single-fault flags a non-positional mode
-// does not use, so a stray --target or --param fails loudly instead of being
-// silently dropped. why completes "<mode> does not take <flags>: <why>".
-func refuseFlagsForMode(mode, why string, opts *injectOptions) error {
+// modeFlag names a flag and whether it was given.
+type modeFlag struct {
+	name string
+	set  bool
+}
+
+// refuseFlagsForMode rejects the given flags that were set, so a flag the
+// selected mode does not use fails loudly instead of being silently dropped.
+// why completes "<mode> does not take <flags>: <why>".
+func refuseFlagsForMode(mode, why string, flags ...modeFlag) error {
 	var set []string
-	if opts.target != "" {
-		set = append(set, "--target")
-	}
-	if len(opts.params) > 0 {
-		set = append(set, "--param")
-	}
-	if opts.timeoutSet {
-		set = append(set, "--timeout")
+	for _, f := range flags {
+		if f.set {
+			set = append(set, f.name)
+		}
 	}
 	if len(set) > 0 {
 		return fmt.Errorf("%s does not take %s: %s", mode, strings.Join(set, ", "), why)

@@ -30,5 +30,4 @@ relative link the move breaks.
 | [`lift-observability-signal-fixtures`](lift-observability-signal-fixtures.md) | lift-observability-signal-fixtures | open | |
 | [`ministack-aws-lab`](ministack-aws-lab.md) | ministack-aws-lab | open | |
 | [`node-state-entry-kind`](node-state-entry-kind.md) | node-state-entry-kind | open | |
-| [`petri-cli-surface-for-workload-state`](petri-cli-surface-for-workload-state.md) | petri-cli-surface-for-workload-state | open | |
 | [`realistic-failure-injection`](realistic-failure-injection.md) | realistic-failure-injection | open | |
