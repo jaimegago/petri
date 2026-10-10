@@ -421,3 +421,56 @@ func TestCreate_Local_RecordsMetrics(t *testing.T) {
 		t.Error("labs_created_total metric not found after Create")
 	}
 }
+
+// The ingress host ports a local cluster was created with reach lab state and
+// are already visible to the observability templates, which build their
+// external URLs from them.
+func TestCreate_Local_RecordsIngressHostPorts(t *testing.T) {
+	kubeconfigPath := t.TempDir() + "/kubeconfig"
+	if err := os.WriteFile(kubeconfigPath, []byte("apiVersion: v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ports := &types.IngressHostPorts{HTTP: 52080, HTTPS: 52443}
+	localProv := &mockLocalProv{
+		createFn: func(_ context.Context, opts localprov.CreateOptions) (*localprov.ClusterInfo, error) {
+			return &localprov.ClusterInfo{Name: opts.Name, KubeconfigPath: kubeconfigPath, NodeCount: 1, IngressHostPorts: ports}, nil
+		},
+	}
+	var templatePort int
+	obs := &mockObsGen{generateFn: func(_ context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error) {
+		templatePort = tmplCtx.Lab.IngressHTTPPort
+		return nil, nil
+	}}
+	mgr := state.NewMockManager()
+	lab := newTestLab(types.CloudProviderLocal)
+	if err := mgr.CreateLab(context.Background(), lab); err != nil {
+		t.Fatal(err)
+	}
+	kctl := &mockKubectl{}
+	orch := New(Config{WorkDir: t.TempDir()}, Deps{
+		State:            mgr,
+		Cipher:           &mockCipher{},
+		Log:              logger.Nop(),
+		LocalProv:        localProv,
+		KubectlFactory:   func(string) KubectlClient { return kctl },
+		AppsGen:          &mockAppsGen{},
+		ObservabilityGen: obs,
+	})
+
+	if err := orch.Create(context.Background(), CreateOptions{
+		Lab: lab, Company: newTestCompany(), Spec: newTestCompany().Levels[1],
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if templatePort != ports.HTTP {
+		t.Errorf("observability templates saw ingress port %d, want %d", templatePort, ports.HTTP)
+	}
+	updated, err := mgr.GetLab(context.Background(), lab.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := updated.LocalIngressHostPorts()
+	if !ok || got != *ports {
+		t.Errorf("recorded ingress host ports = %+v (%v), want %+v", got, ok, *ports)
+	}
+}

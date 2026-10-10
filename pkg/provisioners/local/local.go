@@ -42,6 +42,9 @@ type ClusterInfo struct {
 	// NodeShape is the allocatable shaping outcome for OASIS labs; nil
 	// otherwise. An unshaped outcome is not an error — see shape.go.
 	NodeShape *types.NodeShape `json:"node_shape,omitempty"`
+	// IngressHostPorts are the host ports allocated to this lab for its
+	// ingress NodePorts.
+	IngressHostPorts *types.IngressHostPorts `json:"ingress_host_ports,omitempty"`
 }
 
 // Provisioner manages local Kubernetes clusters via kind.
@@ -69,6 +72,7 @@ type provisioner struct {
 	kind   kindOps
 	docker dockerOps
 	shape  shapeOps
+	ports  portAllocator
 }
 
 // New returns a Provisioner using the real kind CLI and Docker daemon.
@@ -78,12 +82,13 @@ func New(cfg Config) Provisioner {
 		kind:   &cliKind{},
 		docker: &cliDocker{},
 		shape:  cliShapeOps{},
+		ports:  osPortAllocator{},
 	}
 }
 
 // newWithDeps injects kind and docker dependencies; used in tests.
 func newWithDeps(cfg Config, k kindOps, d dockerOps) Provisioner {
-	return &provisioner{cfg: cfg, kind: k, docker: d, shape: cliShapeOps{}}
+	return &provisioner{cfg: cfg, kind: k, docker: d, shape: cliShapeOps{}, ports: osPortAllocator{}}
 }
 
 // Create provisions a kind cluster with the appropriate configuration for the
@@ -153,12 +158,19 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 	}
 	defer os.Remove(configFile.Name()) //nolint:errcheck
 
-	kindCfg := kindClusterConfig(nodeCount)
+	// Each lab publishes its ingress on its own host ports so labs can run
+	// side by side; the pair is recorded in lab state for petri info.
+	hostPorts, err := p.ports.ingressHostPorts()
+	if err != nil {
+		return nil, err
+	}
+
+	kindCfg := kindClusterConfig(nodeCount, hostPorts)
 	if opts.OASISMode {
 		// Pass the per-lab audit DIRECTORY (not the file path) to the kind config
 		// so that the bind-mount targets the per-lab subdirectory and the
 		// apiserver's audit.log lands inside it.
-		kindCfg = kindClusterConfigWithAudit(nodeCount, auditPolicyPath, auditDir)
+		kindCfg = kindClusterConfigWithAudit(nodeCount, hostPorts, auditPolicyPath, auditDir)
 	}
 	if _, err := configFile.WriteString(kindCfg); err != nil {
 		return nil, fmt.Errorf("writing kind config: %w", err)
@@ -204,11 +216,12 @@ func (p *provisioner) Create(ctx context.Context, opts CreateOptions) (*ClusterI
 	}
 
 	return &ClusterInfo{
-		Name:           opts.Name,
-		KubeconfigPath: kubeconfigPath,
-		NodeCount:      nodeCount,
-		AuditLogPath:   auditLogPath,
-		NodeShape:      nodeShape,
+		Name:             opts.Name,
+		KubeconfigPath:   kubeconfigPath,
+		NodeCount:        nodeCount,
+		AuditLogPath:     auditLogPath,
+		NodeShape:        nodeShape,
+		IngressHostPorts: &hostPorts,
 	}, nil
 }
 

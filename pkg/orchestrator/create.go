@@ -140,6 +140,10 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 		o.log.Warn("OASIS lab created UNSHAPED: worker allocatable does not match the OASIS target; scenarios declaring allocatable_cpu/allocatable_memory will be refused at provision",
 			"lab", opts.Lab.Name, "reason", cluster.NodeShape.Reason)
 	}
+	// Record the cluster now, not only at ACTIVE: the observability
+	// templates render the lab's allocated ingress host port into
+	// Prometheus's and Grafana's external URLs.
+	opts.Lab.Metadata.Clusters = []types.Cluster{localClusterRecord(cluster, opts.OASISMode)}
 
 	// ── Step 2: Persist kubeconfig as encrypted credential ──────────────────
 	prog.Step("Storing kubeconfig credential")
@@ -204,16 +208,7 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 	}
 
 	// ── Update lab metadata and mark ACTIVE ─────────────────────────────────
-	opts.Lab.Metadata.Clusters = []types.Cluster{
-		{
-			Name:           cluster.Name,
-			KubeconfigPath: cluster.KubeconfigPath,
-			NodeCount:      cluster.NodeCount,
-			AuditLogPath:   cluster.AuditLogPath,
-			OASISMode:      opts.OASISMode,
-			NodeShape:      cluster.NodeShape,
-		},
-	}
+	opts.Lab.Metadata.Clusters = []types.Cluster{localClusterRecord(cluster, opts.OASISMode)}
 	opts.Lab.Metadata.WorkDir = filepath.Dir(cluster.KubeconfigPath)
 	opts.Lab.Status = types.LabStatusActive
 
@@ -224,6 +219,19 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 	prog.Done(fmt.Sprintf("Lab %q is ACTIVE", opts.Lab.Name))
 	printLocalConnectionInfo(opts.Lab, cluster)
 	return nil
+}
+
+// localClusterRecord is the lab-state record of a created kind cluster.
+func localClusterRecord(cluster *localprov.ClusterInfo, oasisMode bool) types.Cluster {
+	return types.Cluster{
+		Name:             cluster.Name,
+		KubeconfigPath:   cluster.KubeconfigPath,
+		NodeCount:        cluster.NodeCount,
+		AuditLogPath:     cluster.AuditLogPath,
+		OASISMode:        oasisMode,
+		NodeShape:        cluster.NodeShape,
+		IngressHostPorts: cluster.IngressHostPorts,
+	}
 }
 
 // resolveLocalGitProvisioner returns a filesystem git provisioner for local labs.
@@ -421,6 +429,9 @@ func printLocalConnectionInfo(lab *types.Lab, cluster *localprov.ClusterInfo) {
 		fmt.Printf("  Shape:   %s\n", cluster.NodeShape.Summary())
 	}
 	fmt.Printf("  Access:  export KUBECONFIG=%s\n", cluster.KubeconfigPath)
+	if p := cluster.IngressHostPorts; p != nil {
+		fmt.Printf("  Ingress: http://localhost:%d  https://localhost:%d\n", p.HTTP, p.HTTPS)
+	}
 	fmt.Printf("  Expires: %s\n\n", lab.ExpiresAt.Format("2006-01-02 15:04 UTC"))
 }
 

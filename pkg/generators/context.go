@@ -24,6 +24,10 @@ type LabInfo struct {
 	Name      string
 	LabType   string
 	CreatedAt string
+	// IngressHTTPPort is the host port a local lab's ingress is published
+	// on (types.Lab.LocalIngressHostPorts); zero for a cloud lab. Local
+	// templates build browser-facing URLs from it.
+	IngressHTTPPort int
 }
 
 // CompanyInfo holds company-level data for templates.
@@ -91,12 +95,14 @@ func NewTemplateContext(lab *types.Lab, company *types.Company, level types.Leve
 			NodeType:      db.NodeType,
 		}
 	}
+	ingress, _ := lab.LocalIngressHostPorts()
 	return TemplateContext{
 		Lab: LabInfo{
-			ID:        lab.ID.String(),
-			Name:      lab.Name,
-			LabType:   string(lab.CloudProvider),
-			CreatedAt: lab.CreatedAt.Format(time.RFC3339),
+			ID:              lab.ID.String(),
+			Name:            lab.Name,
+			LabType:         string(lab.CloudProvider),
+			CreatedAt:       lab.CreatedAt.Format(time.RFC3339),
+			IngressHTTPPort: ingress.HTTP,
 		},
 		Company: CompanyInfo{
 			Name:          company.Name,

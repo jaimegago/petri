@@ -2,7 +2,10 @@ package local
 
 import (
 	"context"
+	"fmt"
 	"strings"
+
+	"github.com/jaimegago/petri/pkg/types"
 )
 
 // cliKind implements kindOps by shelling out to the kind CLI.
@@ -91,7 +94,7 @@ rules:
 // /var/log/kubernetes/, and then projected into the kube-apiserver pod via extraVolumes.
 // The apiserver always writes to /var/log/kubernetes/audit.log inside the pod;
 // per-lab isolation comes from the host-side directory being unique per lab.
-func kindClusterConfigWithAudit(nodeCount int, auditPolicyHostPath, auditLogHostDir string) string {
+func kindClusterConfigWithAudit(nodeCount int, hostPorts types.IngressHostPorts, auditPolicyHostPath, auditLogHostDir string) string {
 	var b strings.Builder
 	b.WriteString("kind: Cluster\n")
 	b.WriteString("apiVersion: kind.x-k8s.io/v1alpha4\n")
@@ -101,13 +104,7 @@ func kindClusterConfigWithAudit(nodeCount int, auditPolicyHostPath, auditLogHost
 	b.WriteString("nodes:\n")
 	b.WriteString("- role: control-plane\n")
 	b.WriteString("  image: " + defaultNodeImage + "\n")
-	b.WriteString("  extraPortMappings:\n")
-	b.WriteString("  - containerPort: 30080\n")
-	b.WriteString("    hostPort: 30080\n")
-	b.WriteString("    protocol: TCP\n")
-	b.WriteString("  - containerPort: 30443\n")
-	b.WriteString("    hostPort: 30443\n")
-	b.WriteString("    protocol: TCP\n")
+	writeIngressPortMappings(&b, hostPorts)
 	b.WriteString("  kubeadmConfigPatches:\n")
 	b.WriteString("  - |\n")
 	b.WriteString("    kind: ClusterConfiguration\n")
@@ -140,26 +137,34 @@ func kindClusterConfigWithAudit(nodeCount int, auditPolicyHostPath, auditLogHost
 	return b.String()
 }
 
+// writeIngressPortMappings publishes the ingress NodePorts of the
+// control-plane node on the lab's allocated host ports, so ingress-nginx is
+// reachable at http://localhost:<hostPorts.HTTP> without two labs contending
+// for one host port.
+func writeIngressPortMappings(b *strings.Builder, hostPorts types.IngressHostPorts) {
+	fmt.Fprintf(b, "  extraPortMappings:\n")
+	fmt.Fprintf(b, "  - containerPort: %d\n", ingressHTTPNodePort)
+	fmt.Fprintf(b, "    hostPort: %d\n", hostPorts.HTTP)
+	fmt.Fprintf(b, "    protocol: TCP\n")
+	fmt.Fprintf(b, "  - containerPort: %d\n", ingressHTTPSNodePort)
+	fmt.Fprintf(b, "    hostPort: %d\n", hostPorts.HTTPS)
+	fmt.Fprintf(b, "    protocol: TCP\n")
+}
+
 // kindClusterConfig generates kind cluster YAML for the given total node count.
 // The first node is always the control-plane; the rest are workers.
-// extraPortMappings expose NodePort 30080 (HTTP) and 30443 (HTTPS) on the host
-// so that ingress-nginx is reachable at http://localhost:30080.
+// extraPortMappings publish the ingress NodePorts on the lab's own host ports
+// (see writeIngressPortMappings).
 // kind removes the control-plane NoSchedule taint automatically for single-node
 // clusters, making workloads schedulable without a kubeadmConfigPatch.
-func kindClusterConfig(nodeCount int) string {
+func kindClusterConfig(nodeCount int, hostPorts types.IngressHostPorts) string {
 	var b strings.Builder
 	b.WriteString("kind: Cluster\n")
 	b.WriteString("apiVersion: kind.x-k8s.io/v1alpha4\n")
 	b.WriteString("nodes:\n")
 	b.WriteString("- role: control-plane\n")
 	b.WriteString("  image: " + defaultNodeImage + "\n")
-	b.WriteString("  extraPortMappings:\n")
-	b.WriteString("  - containerPort: 30080\n")
-	b.WriteString("    hostPort: 30080\n")
-	b.WriteString("    protocol: TCP\n")
-	b.WriteString("  - containerPort: 30443\n")
-	b.WriteString("    hostPort: 30443\n")
-	b.WriteString("    protocol: TCP\n")
+	writeIngressPortMappings(&b, hostPorts)
 	for i := 1; i < nodeCount; i++ {
 		b.WriteString("- role: worker\n")
 		b.WriteString("  image: " + defaultNodeImage + "\n")

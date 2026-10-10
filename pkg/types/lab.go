@@ -77,6 +77,42 @@ type Cluster struct {
 	// worker nodes at OASIS lab creation. Nil for labs that predate shaping
 	// or were not created with --oasis on the local path.
 	NodeShape *NodeShape `json:"node_shape,omitempty"`
+	// IngressHostPorts records the host ports a local kind cluster's ingress
+	// NodePorts are published on. Allocated per lab so labs can coexist on
+	// one host. Nil for cloud clusters and for local labs that predate
+	// per-lab allocation (those used the Legacy*HostPort constants).
+	IngressHostPorts *IngressHostPorts `json:"ingress_host_ports,omitempty"`
+}
+
+// IngressHostPorts is the pair of host ports on which a local lab's ingress
+// (HTTP and HTTPS NodePorts on the kind control-plane node) is reachable at
+// localhost.
+type IngressHostPorts struct {
+	HTTP  int `json:"http"`
+	HTTPS int `json:"https"`
+}
+
+// The fixed host ports every local lab published its ingress on before
+// per-lab allocation. They remain the answer for a local lab whose state
+// records no IngressHostPorts, because that is what its kind cluster was
+// created with.
+const (
+	LegacyIngressHTTPHostPort  = 30080
+	LegacyIngressHTTPSHostPort = 30443
+)
+
+// LocalIngressHostPorts returns the host ports a local lab's ingress is
+// published on, and false for a lab that is not local or records no
+// cluster. A local lab created before per-lab allocation reports the
+// legacy fixed ports.
+func (l *Lab) LocalIngressHostPorts() (IngressHostPorts, bool) {
+	if l.CloudProvider != CloudProviderLocal || len(l.Metadata.Clusters) == 0 {
+		return IngressHostPorts{}, false
+	}
+	if p := l.Metadata.Clusters[0].IngressHostPorts; p != nil {
+		return *p, true
+	}
+	return IngressHostPorts{HTTP: LegacyIngressHTTPHostPort, HTTPS: LegacyIngressHTTPSHostPort}, true
 }
 
 // NodeShape is the outcome of shaping an OASIS lab's worker nodes to a

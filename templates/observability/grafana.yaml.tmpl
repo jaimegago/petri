@@ -62,7 +62,7 @@ spec:
           value: "false"
 {{- if eq (print .Lab.LabType) "local" }}
         - name: GF_SERVER_ROOT_URL
-          value: "http://localhost:30080/grafana/"
+          value: "http://localhost:{{ .Lab.IngressHTTPPort }}/grafana/"
         - name: GF_SERVER_SERVE_FROM_SUB_PATH
           value: "true"
 {{- else }}

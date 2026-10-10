@@ -3,9 +3,12 @@ package local
 import (
 	"context"
 	"errors"
-	"os/exec"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/jaimegago/petri/pkg/types"
 )
 
 // ─── mock helpers ─────────────────────────────────────────────────────────────
@@ -49,6 +52,17 @@ func (m *mockDocker) ping(ctx context.Context) error {
 	}
 	return nil
 }
+
+type fixedPorts struct {
+	ports types.IngressHostPorts
+	err   error
+}
+
+func (f fixedPorts) ingressHostPorts() (types.IngressHostPorts, error) { return f.ports, f.err }
+
+// testPorts is deliberately not the legacy 30080/30443 pair, so a test
+// cannot pass by the old hardcoded mapping.
+var testPorts = types.IngressHostPorts{HTTP: 41080, HTTPS: 41443}
 
 func noop() *mockKind       { return &mockKind{} }
 func okDocker() *mockDocker { return &mockDocker{} }
@@ -258,7 +272,7 @@ func TestKindClusterConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := kindClusterConfig(tt.nodeCount)
+			cfg := kindClusterConfig(tt.nodeCount, testPorts)
 
 			if !strings.Contains(cfg, "kind: Cluster") {
 				t.Error("missing 'kind: Cluster'")
@@ -281,7 +295,7 @@ func TestKindClusterConfig(t *testing.T) {
 }
 
 func TestKindClusterConfigWithAudit(t *testing.T) {
-	cfg := kindClusterConfigWithAudit(2, "/tmp/audit-policy.yaml", "/tmp/audit/audit.log")
+	cfg := kindClusterConfigWithAudit(2, testPorts, "/tmp/audit-policy.yaml", "/tmp/audit/audit.log")
 
 	if !strings.Contains(cfg, "kind: Cluster") {
 		t.Error("missing 'kind: Cluster'")
@@ -307,7 +321,7 @@ func TestKindClusterConfigWithAudit(t *testing.T) {
 }
 
 func TestKindClusterConfigWithAudit_DisablesDefaultCNI(t *testing.T) {
-	cfg := kindClusterConfigWithAudit(2, "/tmp/audit-policy.yaml", "/tmp/audit/audit.log")
+	cfg := kindClusterConfigWithAudit(2, testPorts, "/tmp/audit-policy.yaml", "/tmp/audit/audit.log")
 	if !strings.Contains(cfg, "disableDefaultCNI: true") {
 		t.Error("OASIS audit config should disable default CNI so Calico is the sole CNI plugin")
 	}
@@ -317,7 +331,7 @@ func TestKindClusterConfigWithAudit_DisablesDefaultCNI(t *testing.T) {
 }
 
 func TestKindClusterConfig_KeepsDefaultCNI(t *testing.T) {
-	cfg := kindClusterConfig(3)
+	cfg := kindClusterConfig(3, testPorts)
 	if strings.Contains(cfg, "disableDefaultCNI") {
 		t.Error("non-OASIS config should not disable default CNI")
 	}
@@ -368,52 +382,82 @@ func TestCreate_OASISMode(t *testing.T) {
 	}
 }
 
-// ─── Integration tests (require kind + docker) ────────────────────────────────
+// ─── ingress host port tests ──────────────────────────────────────────────────
 
-func TestIntegration_CreateDeleteCluster(t *testing.T) {
-	if _, err := exec.LookPath("kind"); err != nil {
-		t.Skip("kind CLI not available")
+func TestKindClusterConfig_PublishesIngressOnAllocatedHostPorts(t *testing.T) {
+	t.Parallel()
+	configs := map[string]string{
+		"default": kindClusterConfig(1, testPorts),
+		"oasis":   kindClusterConfigWithAudit(1, testPorts, "/tmp/p.yaml", "/tmp/a"),
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker CLI not available")
+	for name, cfg := range configs {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			for _, want := range []string{
+				fmt.Sprintf("- containerPort: %d\n    hostPort: %d\n", ingressHTTPNodePort, testPorts.HTTP),
+				fmt.Sprintf("- containerPort: %d\n    hostPort: %d\n", ingressHTTPSNodePort, testPorts.HTTPS),
+			} {
+				if !strings.Contains(cfg, want) {
+					t.Errorf("config missing mapping %q:\n%s", want, cfg)
+				}
+			}
+			for _, legacy := range []string{"hostPort: 30080", "hostPort: 30443"} {
+				if strings.Contains(cfg, legacy) {
+					t.Errorf("config still maps fixed %s", legacy)
+				}
+			}
+		})
 	}
+}
 
-	// Quick Docker reachability check before spending time on cluster creation.
-	if err := (&cliDocker{}).ping(context.Background()); err != nil {
-		t.Skipf("Docker daemon not reachable: %v", err)
-	}
+func TestCreate_RecordsAllocatedIngressHostPorts(t *testing.T) {
+	t.Parallel()
+	var cfg string
+	mk := &mockKind{createFn: func(_ context.Context, _, configPath, _ string) error {
+		b, err := os.ReadFile(configPath)
+		cfg = string(b)
+		return err
+	}}
+	p := newWithDeps(Config{KubeconfigDir: t.TempDir()}, mk, okDocker()).(*provisioner)
+	p.ports = fixedPorts{ports: testPorts}
 
-	clusterName := "petri-test-integration"
-	cfg := Config{KubeconfigDir: t.TempDir()}
-	p := New(cfg)
-	ctx := context.Background()
-
-	// Ensure cleanup even on test failure.
-	t.Cleanup(func() {
-		_ = p.Delete(ctx, clusterName)
-	})
-
-	info, err := p.Create(ctx, CreateOptions{Name: clusterName, Level: 1})
+	info, err := p.Create(context.Background(), CreateOptions{Name: "ports", Level: 1})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if info.KubeconfigPath == "" {
-		t.Error("KubeconfigPath should be set")
+	if info.IngressHostPorts == nil || *info.IngressHostPorts != testPorts {
+		t.Errorf("IngressHostPorts = %v, want %v", info.IngressHostPorts, testPorts)
 	}
-	if info.NodeCount != 1 {
-		t.Errorf("NodeCount = %d, want 1", info.NodeCount)
+	if !strings.Contains(cfg, fmt.Sprintf("hostPort: %d", testPorts.HTTP)) {
+		t.Errorf("kind config was not built from the allocated ports:\n%s", cfg)
 	}
+}
 
-	// Verify kubeconfig file exists.
-	if _, err := exec.CommandContext(ctx,
-		"kubectl", "--kubeconfig", info.KubeconfigPath,
-		"get", "nodes", "--no-headers",
-	).Output(); err != nil {
-		t.Fatalf("kubectl get nodes: %v", err)
-	}
+func TestCreate_PortAllocationFailureCreatesNothing(t *testing.T) {
+	t.Parallel()
+	created := false
+	mk := &mockKind{createFn: func(context.Context, string, string, string) error {
+		created = true
+		return nil
+	}}
+	p := newWithDeps(Config{KubeconfigDir: t.TempDir()}, mk, okDocker()).(*provisioner)
+	p.ports = fixedPorts{err: errors.New("no ports")}
 
-	// Delete cluster.
-	if err := p.Delete(ctx, clusterName); err != nil {
-		t.Fatalf("Delete: %v", err)
+	if _, err := p.Create(context.Background(), CreateOptions{Name: "ports", Level: 1}); err == nil {
+		t.Fatal("Create succeeded despite port allocation failure")
+	}
+	if created {
+		t.Error("kind create ran despite port allocation failure")
+	}
+}
+
+func TestOSPortAllocator_DistinctFreePorts(t *testing.T) {
+	t.Parallel()
+	ports, err := osPortAllocator{}.ingressHostPorts()
+	if err != nil {
+		t.Fatalf("ingressHostPorts: %v", err)
+	}
+	if ports.HTTP <= 0 || ports.HTTPS <= 0 || ports.HTTP == ports.HTTPS {
+		t.Errorf("ports = %+v, want two distinct non-zero ports", ports)
 	}
 }

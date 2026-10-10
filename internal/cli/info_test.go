@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -242,4 +243,49 @@ func TestAppInfoNamespace(t *testing.T) {
 			t.Errorf("got %q, want %q", got, "default")
 		}
 	})
+}
+
+// petri info surfaces the lab's own ingress host ports, and a local lab
+// recorded before per-lab allocation keeps reporting the fixed pair it was
+// created with.
+func TestRunInfo_IngressHostPorts(t *testing.T) {
+	tests := []struct {
+		name  string
+		ports *types.IngressHostPorts
+		want  []string
+	}{
+		{"allocated", &types.IngressHostPorts{HTTP: 52080, HTTPS: 52443}, []string{
+			"Ingress host ports: http 52080, https 52443",
+			"NodePort http://localhost:52080  https://localhost:52443",
+			"http://localhost:52080/prometheus",
+		}},
+		{"legacy", nil, []string{"Ingress host ports: http 30080, https 30443"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := state.NewMockManager()
+			lab := &types.Lab{
+				ID: uuid.New(), Name: "ports-lab", Company: "acme", Level: 1,
+				CloudProvider: types.CloudProviderLocal, Status: types.LabStatusActive,
+				CreatedAt: time.Now(), ExpiresAt: time.Now().Add(4 * time.Hour), TTLHours: 4,
+				Metadata: types.LabMetadata{Clusters: []types.Cluster{
+					{Name: "ports-lab", NodeCount: 1, KubeconfigPath: "/tmp/kube.yaml", IngressHostPorts: tt.ports},
+				}},
+			}
+			if err := mgr.CreateLab(nil, lab); err != nil { //nolint:staticcheck
+				t.Fatalf("fixture: %v", err)
+			}
+			c := newTestCLI(mgr, companiesYAML(t))
+			var runErr error
+			out := string(runWithCapturedStdout(t, func() { runErr = c.runInfo("ports-lab") }))
+			if runErr != nil {
+				t.Fatalf("runInfo: %v", runErr)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("output missing %q:\n%s", w, out)
+				}
+			}
+		})
+	}
 }

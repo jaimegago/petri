@@ -47,6 +47,8 @@ petri create --company=<company> --level=<1|2|3> [flags]
 
 Local labs create git repos on the filesystem under `~/.petri/labs/<id>/repos/`.
 
+Each local lab publishes its ingress (NodePorts 30080/30443 on the kind control-plane node) on its own pair of free host ports, chosen at creation and recorded in lab state, so several local labs can run on one host. `petri create` prints them and `petri info` shows them; Prometheus and Grafana are served under `http://localhost:<http-port>/prometheus` and `/grafana`. Labs created before per-lab allocation keep the fixed `30080`/`30443`.
+
 ### `petri list`
 
 List labs.
@@ -71,7 +73,7 @@ Show full details for a lab.
 petri info <lab-name>
 ```
 
-Displays lab identity, clusters, git repos, applications, platform components, observability tools, resources, and access instructions.
+Displays lab identity, clusters, git repos, applications, platform components, observability tools, resources, and access instructions — for a local lab, including its ingress host ports.
 
 ### `petri destroy`
 

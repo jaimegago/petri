@@ -96,6 +96,9 @@ func (c *CLI) runInfo(name string) error {
 				fmt.Printf("  export KUBECONFIG=%s\n", kubeconfigPath)
 				fmt.Printf("  kubectl get pods -A\n")
 			}
+			if ports, ok := lab.LocalIngressHostPorts(); ok {
+				fmt.Printf("  Ingress host ports: http %d, https %d\n", ports.HTTP, ports.HTTPS)
+			}
 		}
 	}
 
@@ -113,6 +116,9 @@ func (c *CLI) runInfo(name string) error {
 		}
 	}
 
+	// A local lab's ingress is published on host ports allocated per lab.
+	ingress, localIngress := lab.LocalIngressHostPorts()
+
 	// ── Applications ─────────────────────────────────────────────────────────
 	if spec != nil && len(spec.Apps) > 0 {
 		appNS := appInfoNamespace(spec)
@@ -126,8 +132,8 @@ func (c *CLI) runInfo(name string) error {
 			port := appInfoPort(lab.Company, app)
 			fmt.Printf("  %-30s port %d\n", app, port)
 			fmt.Printf("    kubectl%s port-forward -n %s svc/%s %d:%d\n", kcFlag, appNS, app, port, port)
-			if isFrontendByName(app) && lab.CloudProvider == types.CloudProviderLocal {
-				fmt.Printf("    Via ingress: http://localhost:30080\n")
+			if isFrontendByName(app) && localIngress {
+				fmt.Printf("    Via ingress: http://localhost:%d\n", ingress.HTTP)
 			}
 		}
 	}
@@ -140,12 +146,14 @@ func (c *CLI) runInfo(name string) error {
 		if kubeconfigPath != "" {
 			kcFlag = fmt.Sprintf(" --kubeconfig=%s", kubeconfigPath)
 		}
-		hasIngress := false
 		for _, p := range spec.Platform {
 			switch strings.ToLower(p) {
 			case "ingress-nginx":
-				hasIngress = true
-				fmt.Printf("  ingress-nginx    NodePort http://localhost:30080  https://localhost:30443\n")
+				if localIngress {
+					fmt.Printf("  ingress-nginx    NodePort http://localhost:%d  https://localhost:%d\n", ingress.HTTP, ingress.HTTPS)
+				} else {
+					fmt.Printf("  ingress-nginx\n")
+				}
 			case "argocd":
 				fmt.Printf("  argocd           kubectl%s port-forward -n argocd svc/argocd-server 8080:80\n", kcFlag)
 				fmt.Printf("                   → http://localhost:8080  (admin / kubectl%s -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)\n", kcFlag)
@@ -156,9 +164,6 @@ func (c *CLI) runInfo(name string) error {
 			default:
 				fmt.Printf("  %s\n", p)
 			}
-		}
-		if !hasIngress {
-			_ = hasIngress // avoid unused warning; ingress line only printed when present
 		}
 	}
 
@@ -173,15 +178,15 @@ func (c *CLI) runInfo(name string) error {
 		for _, tool := range spec.Observability {
 			switch strings.ToLower(tool) {
 			case "prometheus":
-				if lab.CloudProvider == types.CloudProviderLocal {
-					fmt.Printf("  prometheus    http://localhost:30080/prometheus\n")
+				if localIngress {
+					fmt.Printf("  prometheus    http://localhost:%d/prometheus\n", ingress.HTTP)
 				} else {
 					fmt.Printf("  prometheus    kubectl%s port-forward -n monitoring svc/prometheus 9090:9090\n", kcFlag)
 					fmt.Printf("                → http://localhost:9090\n")
 				}
 			case "grafana":
-				if lab.CloudProvider == types.CloudProviderLocal {
-					fmt.Printf("  grafana       http://localhost:30080/grafana  (admin / petri-lab-admin)\n")
+				if localIngress {
+					fmt.Printf("  grafana       http://localhost:%d/grafana  (admin / petri-lab-admin)\n", ingress.HTTP)
 				} else {
 					fmt.Printf("  grafana       kubectl%s port-forward -n monitoring svc/grafana 3000:3000\n", kcFlag)
 					fmt.Printf("                → http://localhost:3000  (admin / petri-lab-admin)\n")

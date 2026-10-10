@@ -116,7 +116,7 @@ spec:
           - "--storage.tsdb.retention.time=24h"
           - "--web.enable-lifecycle"
 {{- if eq (print .Lab.LabType) "local" }}
-          - "--web.external-url=http://localhost:30080/prometheus"
+          - "--web.external-url=http://localhost:{{ .Lab.IngressHTTPPort }}/prometheus"
           - "--web.route-prefix=/prometheus"
 {{- end }}
         ports:

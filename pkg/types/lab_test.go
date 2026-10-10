@@ -100,3 +100,31 @@ func TestLabCanTransitionTo(t *testing.T) {
 		})
 	}
 }
+
+func TestLabLocalIngressHostPorts(t *testing.T) {
+	t.Parallel()
+	allocated := &IngressHostPorts{HTTP: 52001, HTTPS: 52002}
+	legacy := IngressHostPorts{HTTP: LegacyIngressHTTPHostPort, HTTPS: LegacyIngressHTTPSHostPort}
+	tests := []struct {
+		name     string
+		provider CloudProvider
+		clusters []Cluster
+		want     IngressHostPorts
+		wantOK   bool
+	}{
+		{"local with recorded ports", CloudProviderLocal, []Cluster{{Name: "c", IngressHostPorts: allocated}}, *allocated, true},
+		{"local predating allocation", CloudProviderLocal, []Cluster{{Name: "c"}}, legacy, true},
+		{"local with no cluster", CloudProviderLocal, nil, IngressHostPorts{}, false},
+		{"cloud lab", CloudProviderAWS, []Cluster{{Name: "c", IngressHostPorts: allocated}}, IngressHostPorts{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			lab := &Lab{CloudProvider: tt.provider, Metadata: LabMetadata{Clusters: tt.clusters}}
+			got, ok := lab.LocalIngressHostPorts()
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("LocalIngressHostPorts() = %+v, %v; want %+v, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}

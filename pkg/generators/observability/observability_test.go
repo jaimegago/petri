@@ -2,6 +2,7 @@ package observability_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -107,5 +108,39 @@ func TestGenerate_TemplateContext(t *testing.T) {
 	want := "lab=my-lab company=acme"
 	if files[0].Content != want {
 		t.Errorf("got %q, want %q", files[0].Content, want)
+	}
+}
+
+// A local lab's Prometheus and Grafana build their external URLs from the
+// lab's own ingress host port, not a fixed one shared by every lab.
+func TestGenerate_LocalURLsUseLabIngressPort(t *testing.T) {
+	t.Parallel()
+	tmplCtx := makeContext([]string{"prometheus", "grafana"})
+	tmplCtx.Lab.LabType = "local"
+	tmplCtx.Lab.IngressHTTPPort = 52080
+
+	files, err := observability.New().Generate(context.Background(), tmplCtx)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	want := map[string]string{
+		"observability/prometheus.yaml": "--web.external-url=http://localhost:52080/prometheus",
+		"observability/grafana.yaml":    "http://localhost:52080/grafana/",
+	}
+	for _, f := range files {
+		w, ok := want[f.Path]
+		if !ok {
+			continue
+		}
+		if !strings.Contains(f.Content, w) {
+			t.Errorf("%s missing %q", f.Path, w)
+		}
+		if strings.Contains(f.Content, "30080") {
+			t.Errorf("%s still references fixed port 30080", f.Path)
+		}
+		delete(want, f.Path)
+	}
+	if len(want) != 0 {
+		t.Errorf("files not rendered: %v", want)
 	}
 }
