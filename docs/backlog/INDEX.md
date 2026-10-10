@@ -30,5 +30,6 @@ relative link the move breaks.
 | [`cloud-kubeconfig-gcp-azure`](cloud-kubeconfig-gcp-azure.md) | cloud-kubeconfig-gcp-azure | open | |
 | [`lift-observability-signal-fixtures`](lift-observability-signal-fixtures.md) | lift-observability-signal-fixtures | open | |
 | [`ministack-aws-lab`](ministack-aws-lab.md) | ministack-aws-lab | open | |
+| [`mock-metrics-realism`](mock-metrics-realism.md) | mock-metrics-realism | open | |
 | [`node-state-entry-kind`](node-state-entry-kind.md) | node-state-entry-kind | open | |
 | [`realistic-failure-injection`](realistic-failure-injection.md) | realistic-failure-injection | open | |
