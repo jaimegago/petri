@@ -73,12 +73,13 @@ pointed at ministack (it works).
   advertises a bridge IP (pod-reachable, not host-reachable).
 
 Pre-existing gaps in petri's AWS path that the spike surfaced, independent of
-ministack: `runTerraform` reads a `kubeconfig` output the AWS template never
-emits (only `eks_*_kubeconfig_command`), so the cloud path never gets a
-kubeconfig and skips app deploy and node wait; `createCloud` never applies
-platform or observability manifests; the RDS module takes
-`module.vpc.database_subnet_group_name`, which is null because the VPC declares
-no database subnets (the instance lands in `default`).
+ministack, are **fixed** in petri `318d39e`
+(`joe-pm/threads/aws-cloud-path-kubeconfig-gap.md`): petri now assembles a
+kubeconfig per EKS cluster from the template's endpoint/CA/name outputs (exec
+auth via `aws eks get-token`) and stores it encrypted; `createCloud` waits for
+nodes and applies platform, observability and app manifests on every cluster;
+the VPC declares database subnets so RDS lands in its subnet group. The same
+kubeconfig gap on GCP and Azure is filed as `cloud-kubeconfig-gcp-azure`.
 
 **Recommendation: not yet as a drop-in provider.** The core proposition holds —
 the existing terraform applies nearly unchanged and yields usable clusters and
