@@ -35,7 +35,7 @@ the rule for what each materialises and the mechanism it uses:
 
 | State | Materializes | Mechanism |
 |---|---|---|
-| `running` | a healthy Deployment whose pods reach Ready | container `app` on the spec image, exposing containerPort 80 |
+| `running` | a healthy Deployment whose pods reach Ready | its container (see `ContainerName`) on the spec image, exposing containerPort 80 |
 | `crashloopbackoff` | a pod stuck in CrashLoopBackOff | with a **`Fault`**: the application image (`docs/application-image.md`) with the declared env, misconfigured as the fault declares, failing its own startup validation; with declared env and no fault: the spec image with each ConfigMap reference required (`optional: false`) so the kubelet names an absent key; otherwise a symptom-only exit on the util image |
 | `oomkilled` | a container the kernel OOM-kills on start | an unbounded `tail /dev/zero` allocation under a `memory: 16Mi` limit (`workloadstate.OOMKilledMemoryLimit`; below it the container's own init is OOM-killed first) |
 | `pending` | pods that never schedule, stuck Pending | an impossible `cpu: "100"` request → "Insufficient cpu" |
@@ -82,6 +82,11 @@ combinations are refused rather than rendered as something else:
 - `ManagedBy` — when set, adds an `app.kubernetes.io/managed-by` annotation.
 - `MatchLabels` — selector; defaults to `{"app": Name}`.
 - `State` — the requested state as a raw string (see rules below).
+- `ContainerName` — the name of the workload's single container, rendered
+  verbatim in every state so the cluster shows the identifier the caller
+  declared (an OASIS deployment entry's `containers[0].name`). Empty falls back
+  to `workloadstate.DefaultContainerName` (`app`); a name that is not a valid
+  Kubernetes container name (RFC 1123 label) is a render error.
 - `Env` — the container environment as declared; rendered verbatim. A
   variable is a literal value, a ConfigMap key reference, or a Secret key
   reference.

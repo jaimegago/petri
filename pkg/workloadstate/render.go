@@ -58,6 +58,10 @@ func Render(spec Spec) (string, error) {
 	if utilImage == "" {
 		utilImage = DefaultUtilImage
 	}
+	containerName, err := spec.containerName()
+	if err != nil {
+		return "", err
+	}
 
 	// A faulted workload runs the application whatever its state, so its
 	// declared environment always has a container to land on.
@@ -107,17 +111,53 @@ func Render(spec Spec) (string, error) {
 	annotations := manifest.MergeAnnotations(spec.Annotations, spec.ManagedBy)
 	var sb strings.Builder
 	if kind == KindPod {
-		writePodHead(&sb, spec.Name, spec.Namespace, spec.NodeName, podLabels, annotations)
+		writePodHead(&sb, spec.Name, spec.Namespace, spec.NodeName, containerName, podLabels, annotations)
 		sb.WriteString(podContainer(container))
 		return sb.String(), nil
 	}
-	writeDeploymentHead(&sb, spec.Name, spec.Namespace, replicas, podLabels, annotations, matchLabels)
+	writeDeploymentHead(&sb, spec.Name, spec.Namespace, containerName, replicas, podLabels, annotations, matchLabels)
 	sb.WriteString(container)
 	return sb.String(), nil
 }
 
-// The state builders below write the body of container `app` — every field
-// after its name — at a Deployment's indentation, eight spaces. A Pod's
+// containerName resolves the name of the workload's single container: the
+// declared ContainerName, or DefaultContainerName when none is declared. A
+// declared name that is not a valid container name is refused rather than
+// rendered, since it would otherwise reach the cluster as a malformed manifest
+// or be rewritten into something the scenario did not declare.
+func (s Spec) containerName() (string, error) {
+	if s.ContainerName == "" {
+		return DefaultContainerName, nil
+	}
+	if !isDNS1123Label(s.ContainerName) {
+		return "", fmt.Errorf("workload %q: container name %q is not a valid Kubernetes container name (lowercase alphanumerics and '-', starting and ending alphanumeric, at most 63 characters)",
+			s.Name, s.ContainerName)
+	}
+	return s.ContainerName, nil
+}
+
+// isDNS1123Label reports whether v is an RFC 1123 label, the form Kubernetes
+// requires of a container name.
+func isDNS1123Label(v string) bool {
+	if len(v) == 0 || len(v) > 63 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		alnum := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+		if alnum {
+			continue
+		}
+		if c == '-' && i != 0 && i != len(v)-1 {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// The state builders below write the body of the workload's single container
+// — every field after its name — at a Deployment's indentation, eight spaces. A Pod's
 // container sits four spaces shallower; podContainer shifts the block there.
 const (
 	deploymentContainerIndent = "        "
@@ -138,8 +178,8 @@ func podContainer(body string) string {
 }
 
 // writePodHead writes a bare Pod's apiVersion/kind/metadata/spec preamble up
-// to (but not including) the body of its single container `app`.
-func writePodHead(sb *strings.Builder, name, namespace, nodeName string, labels, annotations map[string]string) {
+// to (but not including) the body of its single container, containerName.
+func writePodHead(sb *strings.Builder, name, namespace, nodeName, containerName string, labels, annotations map[string]string) {
 	sb.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n")
 	fmt.Fprintf(sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	manifest.WriteAnnotationsYAML(sb, annotations)
@@ -149,12 +189,13 @@ func writePodHead(sb *strings.Builder, name, namespace, nodeName string, labels,
 	if nodeName != "" {
 		fmt.Fprintf(sb, "  nodeName: %s\n", nodeName)
 	}
-	sb.WriteString("  containers:\n  - name: app\n")
+	fmt.Fprintf(sb, "  containers:\n  - name: %s\n", containerName)
 }
 
 // writeDeploymentHead writes the apiVersion/kind/metadata/spec preamble shared
-// by every state builder up to (but not including) the container list.
-func writeDeploymentHead(sb *strings.Builder, name, namespace string, replicas int, podLabels, annotations, matchLabels map[string]string) {
+// by every state builder up to (but not including) the body of its single
+// container, containerName.
+func writeDeploymentHead(sb *strings.Builder, name, namespace, containerName string, replicas int, podLabels, annotations, matchLabels map[string]string) {
 	sb.WriteString("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n")
 	fmt.Fprintf(sb, "  name: %s\n  namespace: %s\n", name, namespace)
 	manifest.WriteAnnotationsYAML(sb, annotations)
@@ -164,10 +205,10 @@ func writeDeploymentHead(sb *strings.Builder, name, namespace string, replicas i
 	sb.WriteString(manifest.LabelsToYAML(matchLabels, 6))
 	sb.WriteString("\n  template:\n    metadata:\n      labels:\n")
 	sb.WriteString(manifest.LabelsToYAML(podLabels, 8))
-	sb.WriteString("\n    spec:\n      containers:\n      - name: app\n")
+	fmt.Fprintf(sb, "\n    spec:\n      containers:\n      - name: %s\n", containerName)
 }
 
-// renderRunning materialises a healthy workload: container `app` on the given
+// renderRunning materialises a healthy workload: its container on the given
 // image exposing containerPort 80.
 func renderRunning(spec Spec) string {
 	var sb strings.Builder

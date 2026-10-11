@@ -293,7 +293,7 @@ func (si *stateInjector) deploymentSpec(e StateEntry, namespace string) (workloa
 
 	matchLabels := deploymentMatchLabels(e)
 
-	env, err := parseContainerEnv(e.Spec["containers"])
+	containerName, env, err := parseDeclaredContainer(e.Spec["containers"])
 	if err != nil {
 		return workloadstate.Spec{}, fmt.Errorf("deployment %q: %w", e.Name, err)
 	}
@@ -319,19 +319,20 @@ func (si *stateInjector) deploymentSpec(e StateEntry, namespace string) (workloa
 	}
 
 	return workloadstate.Spec{
-		Name:        e.Name,
-		Namespace:   namespace,
-		Replicas:    replicas,
-		Image:       image,
-		Labels:      e.Labels,
-		Annotations: e.Annotations,
-		ManagedBy:   managedBy,
-		MatchLabels: matchLabels,
-		State:       status,
-		Env:         env,
-		Fault:       declared,
-		ErrorRate:   errorRate,
-		UtilImage:   si.utilImage,
+		Name:          e.Name,
+		Namespace:     namespace,
+		Replicas:      replicas,
+		Image:         image,
+		Labels:        e.Labels,
+		Annotations:   e.Annotations,
+		ManagedBy:     managedBy,
+		MatchLabels:   matchLabels,
+		State:         status,
+		Env:           env,
+		ContainerName: containerName,
+		Fault:         declared,
+		ErrorRate:     errorRate,
+		UtilImage:     si.utilImage,
 	}, nil
 }
 
@@ -478,35 +479,53 @@ func checkFaultConsistency(entries []StateEntry) error {
 	return nil
 }
 
-// parseContainerEnv reads the container environment a scenario declares on a
+// parseDeclaredContainer reads the container a scenario declares on a
 // deployment state entry's `containers` list, returning the first container's
-// `env` as workloadstate EnvVars.
+// `name` and its `env` as workloadstate EnvVars. An undeclared or empty name
+// is returned empty, and workloadstate renders its default for it.
 //
 // Only the first container is read. Rendering is single-container (see
 // writeDeploymentHead), so a second declared container has nowhere to go, and
 // reading it would silently merge two environments into one.
 //
 // A malformed declaration is an error rather than a skipped entry. A declared
-// environment variable that quietly materialises as nothing is the defect this
-// parser exists to remove, and dropping one on a type assertion would
-// reintroduce it one layer down.
-func parseContainerEnv(raw any) ([]workloadstate.EnvVar, error) {
+// environment variable — or a declared container name — that quietly
+// materialises as something else is the defect this parser exists to remove,
+// and dropping one on a type assertion would reintroduce it one layer down.
+func parseDeclaredContainer(raw any) (string, []workloadstate.EnvVar, error) {
 	if raw == nil {
-		return nil, nil
+		return "", nil, nil
 	}
 	containers, ok := raw.([]any)
 	if !ok {
-		return nil, fmt.Errorf("%q must be a list", "containers")
+		return "", nil, fmt.Errorf("%q must be a list", "containers")
 	}
 	if len(containers) == 0 {
-		return nil, nil
+		return "", nil, nil
 	}
 	first, ok := containers[0].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("containers[0] must be a mapping")
+		return "", nil, fmt.Errorf("containers[0] must be a mapping")
 	}
-	rawEnv, ok := first["env"]
-	if !ok || rawEnv == nil {
+	name := ""
+	if v, present := first["name"]; present && v != nil {
+		s, ok := v.(string)
+		if !ok {
+			return "", nil, fmt.Errorf("containers[0].name must be a string, got %v", v)
+		}
+		name = s
+	}
+	env, err := parseContainerEnv(first["env"])
+	if err != nil {
+		return "", nil, err
+	}
+	return name, env, nil
+}
+
+// parseContainerEnv reads a declared container's `env` list as workloadstate
+// EnvVars. See parseDeclaredContainer for why a malformed entry is an error.
+func parseContainerEnv(rawEnv any) ([]workloadstate.EnvVar, error) {
+	if rawEnv == nil {
 		return nil, nil
 	}
 	entries, ok := rawEnv.([]any)
@@ -1002,7 +1021,7 @@ func podLabels(name string, labels map[string]string) map[string]string {
 // parsePodEnv reads a pod state entry's `env` list: a literal `value`, or a
 // `secretKeyRef` or `configMapKeyRef` source. It keeps the bare-pod reader's
 // historical tolerance — an entry it cannot read is skipped — which the
-// deployment reader (parseContainerEnv) does not share.
+// deployment reader (parseDeclaredContainer) does not share.
 func parsePodEnv(raw any) []workloadstate.EnvVar {
 	envList, ok := raw.([]any)
 	if !ok {

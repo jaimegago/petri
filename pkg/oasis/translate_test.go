@@ -142,7 +142,7 @@ func TestStateInjector_Apply(t *testing.T) {
 					t.Fatal("expected applied manifests")
 				}
 				m := manifests[0]
-				for _, want := range []string{"key: SMTP_HOST", "key: SMTP_PORT", "optional: false"} {
+				for _, want := range []string{"- name: notification-service\n        image:", "key: SMTP_HOST", "key: SMTP_PORT", "optional: false"} {
 					if !strings.Contains(m, want) {
 						t.Errorf("manifest missing %q: %s", want, m)
 					}
@@ -167,7 +167,30 @@ func TestStateInjector_Apply(t *testing.T) {
 				if !strings.Contains(manifests[0], "name: APP_PORT") {
 					t.Errorf("manifest missing declared literal env: %s", manifests[0])
 				}
+				if !strings.Contains(manifests[0], "- name: "+workloadstate.DefaultContainerName+"\n") {
+					t.Errorf("a container declared without a name should render the default: %s", manifests[0])
+				}
 			},
+		},
+		{
+			name: "container name that is not a string is an error",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api", Spec: map[string]any{
+					"containers": []any{map[string]any{"name": float64(7)}},
+				}},
+			},
+			defaultNS: "test-ns",
+			wantErr:   true,
+		},
+		{
+			name: "container name Kubernetes would reject is an error",
+			entries: []StateEntry{
+				{Kind: "Deployment", Name: "api", Spec: map[string]any{
+					"containers": []any{map[string]any{"name": "Notification_Service"}},
+				}},
+			},
+			defaultNS: "test-ns",
+			wantErr:   true,
 		},
 		{
 			name: "env entry without a name is an error, not a silent drop",
@@ -261,7 +284,7 @@ func TestStateInjector_Apply(t *testing.T) {
 					t.Fatalf("expected configmap and deployment, got %d manifests", len(manifests))
 				}
 				m := manifests[1]
-				for _, want := range []string{"image: " + fault.AppImage, "key: SMTP_PORT", "optional: true", "containerPort: 8080"} {
+				for _, want := range []string{"- name: notification-service\n        image: " + fault.AppImage, "key: SMTP_PORT", "optional: true", "containerPort: 8080"} {
 					if !strings.Contains(m, want) {
 						t.Errorf("manifest missing %q: %s", want, m)
 					}

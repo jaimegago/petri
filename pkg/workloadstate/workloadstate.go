@@ -159,7 +159,17 @@ type Spec struct {
 	// exit-1 / busy loop (crashloopbackoff exit-1 variant, oomkilled). When
 	// empty it falls back to DefaultUtilImage.
 	UtilImage string
+	// ContainerName is the name of the workload's single container, as the
+	// caller declares it. It is rendered verbatim, so an agent reading the
+	// cluster finds the identifier the scenario declared. Empty falls back
+	// to DefaultContainerName; a non-empty value must be a valid Kubernetes
+	// container name (an RFC 1123 label) or Render refuses it.
+	ContainerName string
 }
+
+// DefaultContainerName is the container name rendered when Spec.ContainerName
+// is empty.
+const DefaultContainerName = "app"
 
 // EnvVar is one container environment variable. Exactly one source applies:
 // a literal Value, a ConfigMapKeyRef sourcing it from a ConfigMap key, or a
