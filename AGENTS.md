@@ -38,7 +38,7 @@ make svc-test                     # the nested images/svc module; root go test d
 
 ## Repo-Specific Conventions
 
-- Go standards: follow the `go-backend` skill (`~/.claude/skills/go-backend/`).
+- Go standards: follow the **go-backend** skill, vendored at `agent-skills/go-backend/SKILL.md` (the `agent-skills` submodule, pinned to a tag; a skill is edited in that repository, never here). Read it and its `references/` before writing, reviewing or scaffolding Go code.
 - Architecture details: `docs/petri-architecture.md`.
 - Company definitions: `configs/companies.yaml` (acme/aws/terraform/argocd, techflow/azure/pulumi/flux, cloudnative/gcp/terraform/anthos).
 - Config loaded from `~/.petri/config.yaml`; default state backend is SQLite (`~/.petri/petri.db`).
