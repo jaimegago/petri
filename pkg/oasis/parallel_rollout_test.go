@@ -129,7 +129,10 @@ func TestWaitForHealthyDeployments_SiblingsCancelOnFailure(t *testing.T) {
 	}()
 
 	select {
-	case <-doneCh:
+	case err := <-doneCh:
+		if err == nil {
+			t.Error("waitForHealthyDeployments returned nil; want the fast-fail error")
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("waitForHealthyDeployments did not return within 5s — siblings not cancelled")
 	}

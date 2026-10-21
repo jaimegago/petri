@@ -477,7 +477,10 @@ func TestTeardown_ConcurrentSecondCall_ReturnsInProgressWithoutKubectl(t *testin
 	// Release the first call so it completes cleanly.
 	close(mock.deleteNamespaceWithTimeoutBlock)
 	select {
-	case <-firstDone:
+	case err := <-firstDone:
+		if err != nil {
+			t.Errorf("first teardown error: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("first teardown did not finish after release")
 	}
