@@ -39,6 +39,13 @@ instance, not the source.
 find a public source repository. That limit is accepted and stated in
 `joe-pm/queue/lab-app-family.md` § The accepted gap.
 
+## How an agent learns of it
+
+Each scenario can deploy a different version, so each can have a different instance.
+Petri's provision response lists the scenario's instances, and `oasisctl` adds them to
+its per-scenario request to the agent's adapter. The prompt never mentions them. The
+ruling is in `joe-pm/queue/lab-app-family.md`.
+
 ## Where it starts from
 
 - Local labs already get per-lab on-disk repositories with `file://` URLs
@@ -63,5 +70,6 @@ find a public source repository. That limit is accepted and stated in
 - **Is history preserved or rewritten?** Preserved commit hashes can be searched for
   on the open web, and rewritten ones no longer match the source repository. Tags and
   image provenance have to agree with whichever is chosen.
-- **What does the source set look like?** How it is declared, and how a lab or
-  scenario names the version it wants.
+- **What does the source set look like?** How it is declared. A scenario never names
+  a version: petri's catalog resolves its fault class to an app and version. A
+  `petri create` lab names one directly.
