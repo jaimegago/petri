@@ -44,8 +44,11 @@ const (
 // ISPs, corporate networks, and mobile carriers. When R2 is unreachable,
 // every scenario default-falling-back to Docker Hub fails with
 // ImagePullBackOff and the failure is misattributed to petri.
+//
+// It is multi-arch so it runs natively on arm64 labs; see
+// workloadstate.HTTPServerImage for what an emulated nginx logged.
 const (
-	DefaultOASISImage = "registry.k8s.io/nginx-slim:0.27"
+	DefaultOASISImage = "registry.k8s.io/e2e-test-images/nginx:1.15-4"
 )
 
 // Default cleanup durations.

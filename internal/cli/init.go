@@ -107,5 +107,5 @@ oasis:
   # Default image for OASIS Deployment/Pod state entries that omit spec.image.
   # Hosted on registry.k8s.io to avoid Docker Hub's Cloudflare R2 dependency
   # (R2 is null-routed by some ISPs and corporate networks). Pin to a tag.
-  default_image: registry.k8s.io/nginx-slim:0.27
+  default_image: registry.k8s.io/e2e-test-images/nginx:1.15-4
 `

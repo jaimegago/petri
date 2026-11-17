@@ -856,7 +856,7 @@ func TestStateInjector_Apply(t *testing.T) {
 		},
 		// ── Traces mock server ──────────────────────────────────────────────
 		{
-			name: "traces creates configmap, pod, and service",
+			name: "traces creates a jaeger and a tempo mock, each configmap, pod, and service",
 			entries: []StateEntry{
 				{Kind: "traces", Name: "slow-request", Spec: map[string]any{
 					"trace_id": "abc123",
@@ -866,8 +866,17 @@ func TestStateInjector_Apply(t *testing.T) {
 			defaultNS: "test-ns",
 			checkApply: func(t *testing.T, manifests []string) {
 				t.Helper()
-				if len(manifests) != 3 {
-					t.Fatalf("expected 3 manifests, got %d", len(manifests))
+				if len(manifests) != 6 {
+					t.Fatalf("expected 6 manifests, got %d", len(manifests))
+				}
+				if !strings.Contains(manifests[3], "mock-tempo-slow-request") || !strings.Contains(manifests[3], "abc123") {
+					t.Errorf("fourth manifest should be the tempo configmap carrying the trace ID: %s", manifests[3])
+				}
+				if !strings.Contains(manifests[4], "3200") {
+					t.Errorf("tempo pod should expose port 3200: %s", manifests[4])
+				}
+				if !strings.Contains(manifests[5], `petri.io/mock: "tempo"`) {
+					t.Errorf("tempo service should carry the mock label: %s", manifests[5])
 				}
 				if !strings.Contains(manifests[0], "mock-jaeger-slow-request") {
 					t.Errorf("configmap should be named mock-jaeger: %s", manifests[0])
@@ -1191,9 +1200,9 @@ func TestStateInjector_DefaultImage(t *testing.T) {
 	}{
 		{
 			name:         "deployment without spec.image uses configured default",
-			defaultImage: "registry.k8s.io/nginx-slim:0.27",
+			defaultImage: "registry.k8s.io/e2e-test-images/nginx:1.15-4",
 			entry:        StateEntry{Kind: "Deployment", Name: "web", Spec: map[string]any{"status": "running"}},
-			wantImage:    "registry.k8s.io/nginx-slim:0.27",
+			wantImage:    "registry.k8s.io/e2e-test-images/nginx:1.15-4",
 			notWant:      []string{"docker.io", "nginx:latest"},
 		},
 		{
@@ -1205,10 +1214,10 @@ func TestStateInjector_DefaultImage(t *testing.T) {
 		},
 		{
 			name:         "explicit spec.image overrides default",
-			defaultImage: "registry.k8s.io/nginx-slim:0.27",
+			defaultImage: "registry.k8s.io/e2e-test-images/nginx:1.15-4",
 			entry:        StateEntry{Kind: "Deployment", Name: "web", Spec: map[string]any{"image": "my-registry.example.com/app:v1"}},
 			wantImage:    "my-registry.example.com/app:v1",
-			notWant:      []string{"registry.k8s.io/nginx-slim", "docker.io"},
+			notWant:      []string{"registry.k8s.io/e2e-test-images/nginx", "docker.io"},
 		},
 		{
 			name:         "empty defaultImage falls back to embedded default",
@@ -1219,9 +1228,9 @@ func TestStateInjector_DefaultImage(t *testing.T) {
 		},
 		{
 			name:         "pod without spec.image uses configured default",
-			defaultImage: "registry.k8s.io/nginx-slim:0.27",
+			defaultImage: "registry.k8s.io/e2e-test-images/nginx:1.15-4",
 			entry:        StateEntry{Kind: "Pod", Name: "p", Spec: map[string]any{}},
-			wantImage:    "registry.k8s.io/nginx-slim:0.27",
+			wantImage:    "registry.k8s.io/e2e-test-images/nginx:1.15-4",
 			notWant:      []string{"docker.io", "nginx:latest"},
 		},
 	}

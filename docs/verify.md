@@ -154,7 +154,7 @@ overridden by flag — see the entry points above.
 
 ```yaml
 oasis:
-  default_image: registry.k8s.io/nginx-slim:0.27
+  default_image: registry.k8s.io/e2e-test-images/nginx:1.15-4
   audit_log_path: /var/log/k8s/audit.log    # optional
 ```
 

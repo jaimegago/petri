@@ -22,3 +22,12 @@ a snapshot gap look identical in the evidence.
 
 Fix: snapshot every kind `applyEntry` can apply, across every namespace the
 environment provisioned.
+
+## Resolution — 2026-11-17
+
+Delivered by joe-pm `threads/ca-oi-lab-gaps.md`. The snapshot lists
+`snapshotKinds` (every namespaced kind a state entry can create, plus pods
+and events) across the environment's own namespace and every owned one, each
+preceded by its Namespace object. `/v1/state-snapshot`, the before snapshot
+and an `observe` with no kind or name all read it. An `observe` that names a
+namespace is scoped to that namespace on both sides of the diff.

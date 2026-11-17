@@ -481,11 +481,21 @@ func renderPromResponses(series []metricSeries, now time.Time) (string, error) {
 			"value":  []any{now.Unix(), s.value},
 		})
 	}
+	names := make([]string, 0, len(series))
+	seenName := make(map[string]bool, len(series))
+	for _, s := range series {
+		if n := s.labels["__name__"]; n != "" && !seenName[n] {
+			seenName[n] = true
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
 	resp := map[string]any{
 		"query": map[string]any{
 			"status": "success",
 			"data":   map[string]any{"resultType": "vector", "result": instant},
 		},
+		"metric_names": map[string]any{"status": "success", "data": names},
 	}
 
 	windowStart := now

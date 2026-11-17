@@ -34,7 +34,7 @@ cleanup:
   grace_period: 30m
 
 oasis:
-  default_image: registry.k8s.io/nginx-slim:0.27
+  default_image: registry.k8s.io/e2e-test-images/nginx:1.15-4
   image_pull_timeout: 5m
   rollout_timeout: 60s
 ```
@@ -48,7 +48,7 @@ This avoids a real-world failure mode: Docker Hub blob storage is served from Cl
 Override behaviour:
 
 - Scenarios that explicitly set `spec.image` are unaffected — that value is honored as-is.
-- Empty / unset `oasis.default_image` falls back to the built-in default (`registry.k8s.io/nginx-slim:0.27`). Setting `default_image: ""` in YAML restores the default rather than disabling it.
+- Empty / unset `oasis.default_image` falls back to the built-in default (`registry.k8s.io/e2e-test-images/nginx:1.15-4`). Setting `default_image: ""` in YAML restores the default rather than disabling it.
 - Pin to a specific tag. `:latest` is allowed but not recommended — kind clusters cache by tag and you may end up with an unpredictable version.
 
 Internal builders (CrashLoopBackOff, OOMKilled, log emission) use `registry.k8s.io/e2e-test-images/busybox:1.37.0-2` and are not configurable through this field — they are implementation details of how petri synthesises specific pod behaviours.

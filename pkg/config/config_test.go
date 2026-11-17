@@ -82,7 +82,7 @@ func TestOASISDefaultImage(t *testing.T) {
 		},
 		{
 			name:      "PETRI_OASIS_DEFAULT_IMAGE overrides yaml",
-			yaml:      "oasis:\n  default_image: registry.k8s.io/nginx-slim:0.27\n",
+			yaml:      "oasis:\n  default_image: registry.k8s.io/e2e-test-images/nginx:1.15-4\n",
 			envValue:  "registry.k8s.io/e2e-test-images/agnhost:2.45",
 			wantImage: "registry.k8s.io/e2e-test-images/agnhost:2.45",
 		},

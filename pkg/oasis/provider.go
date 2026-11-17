@@ -137,7 +137,7 @@ type ProviderConfig struct {
 
 // defaultOASISImage mirrors config.DefaultOASISImage so the oasis package
 // has no import cycle on pkg/config. Keep these two constants in lockstep.
-const defaultOASISImage = "registry.k8s.io/nginx-slim:0.27"
+const defaultOASISImage = "registry.k8s.io/e2e-test-images/nginx:1.15-4"
 
 // petriProvider is the concrete implementation of OASISProvider.
 type petriProvider struct {
@@ -354,7 +354,7 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	agentKubeconfig := buildAgentKubeconfig(serverURL, caData, namespace, token)
 
 	// 6. Capture "before" state snapshot.
-	beforeSnapshot, err := p.snapshotNamespace(ctx, envID, namespace)
+	beforeSnapshot, err := p.snapshotEnvironment(ctx, envID, namespace, owned)
 	if err != nil {
 		p.log.Warn("could not capture before snapshot", "error", err)
 		beforeSnapshot = StateSnapshotResponse{EnvironmentID: envID, Timestamp: time.Now()}
@@ -396,7 +396,7 @@ func (p *petriProvider) StateSnapshot(ctx context.Context, req StateSnapshotRequ
 	if err != nil {
 		return StateSnapshotResponse{}, err
 	}
-	return p.snapshotNamespace(ctx, env.ID, env.Namespace)
+	return p.snapshotEnvironment(ctx, env.ID, env.Namespace, env.OwnedNamespaces)
 }
 
 // teardownBudget bounds how long /v1/teardown waits for kubectl's delete
@@ -865,17 +865,25 @@ func auditObservationData(env *Environment, entries []AuditEntry) map[string]any
 func (p *petriProvider) observeResourceState(ctx context.Context, env *Environment, req ObserveRequest) (ObserveResponse, error) {
 	kind := paramString(req.Parameters, "kind")
 	name := paramString(req.Parameters, "name")
-	namespace := paramString(req.Parameters, "namespace")
+	declaredNamespace := paramString(req.Parameters, "namespace")
+	namespace := declaredNamespace
 	if namespace == "" {
 		namespace = env.Namespace
 	}
 
 	kubeEvidence := EvidenceSource{Type: "kube_api", Status: "available"}
 
-	// When kind/name are not specified, return a full namespace state snapshot
-	// so that oasisctl can evaluate description-type state assertions.
+	// When kind/name are not specified, return a full state snapshot so that
+	// oasisctl can evaluate description-type state assertions: the whole
+	// environment when no namespace was asked for, that namespace otherwise.
 	if kind == "" || name == "" {
-		snap, err := p.snapshotNamespace(ctx, env.ID, namespace)
+		var snap StateSnapshotResponse
+		var err error
+		if declaredNamespace == "" {
+			snap, err = p.snapshotEnvironment(ctx, env.ID, env.Namespace, env.OwnedNamespaces)
+		} else {
+			snap, err = p.snapshotNamespace(ctx, env.ID, namespace)
+		}
 		if err != nil {
 			return ObserveResponse{}, fmt.Errorf("collecting namespace resource state: %w", err)
 		}
@@ -908,7 +916,8 @@ func (p *petriProvider) observeResourceState(ctx context.Context, env *Environme
 func (p *petriProvider) observeStateDiff(ctx context.Context, env *Environment, req ObserveRequest) (ObserveResponse, error) {
 	kind := paramString(req.Parameters, "kind")
 	name := paramString(req.Parameters, "name")
-	namespace := paramString(req.Parameters, "namespace")
+	declaredNamespace := paramString(req.Parameters, "namespace")
+	namespace := declaredNamespace
 	if namespace == "" {
 		namespace = env.Namespace
 	}
@@ -923,12 +932,21 @@ func (p *petriProvider) observeStateDiff(ctx context.Context, env *Environment, 
 		before := findSnapshotResource(env.BeforeSnapshot, kind, namespace, name)
 		diff = computeResourceDiff(before, json.RawMessage(raw))
 	} else {
-		// Full namespace diff.
-		current, err := p.snapshotNamespace(ctx, env.ID, namespace)
+		// Full diff: the whole environment when no namespace was asked for,
+		// that namespace's share of the before snapshot otherwise.
+		before := env.BeforeSnapshot
+		var current StateSnapshotResponse
+		var err error
+		if declaredNamespace == "" {
+			current, err = p.snapshotEnvironment(ctx, env.ID, env.Namespace, env.OwnedNamespaces)
+		} else {
+			before = snapshotInNamespace(before, namespace)
+			current, err = p.snapshotNamespace(ctx, env.ID, namespace)
+		}
 		if err != nil {
 			return ObserveResponse{}, fmt.Errorf("capturing current snapshot: %w", err)
 		}
-		diff = computeNamespaceDiff(env.BeforeSnapshot, current)
+		diff = computeNamespaceDiff(before, current)
 	}
 
 	data, err := json.Marshal(diff)
@@ -995,6 +1013,8 @@ type symptomWait struct {
 //     expect instead.
 //   - A bare Pod waits on its Convergence the same way. It has no rollout,
 //     so a healthy state waits for its container to be running.
+//   - A mock backend (metrics, traces, alert, dashboard) waits for its
+//     server's container to be running.
 func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptomWait, error) {
 	var rollouts []rolloutWait
 	var symptoms []symptomWait
@@ -1053,6 +1073,19 @@ func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptom
 				expect:   fault.Expect{Status: conv.Symptom},
 			})
 		}
+	}
+	// Mock backends are pods too. Each is waited on like a bare running pod.
+	mocks, err := declaredMockServers(env.State, env.Namespace)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, m := range mocks {
+		symptoms = append(symptoms, symptomWait{
+			kind: "mock", name: m.name, namespace: m.namespace,
+			selector: map[string]string{"app": m.name},
+			replicas: 1,
+			expect:   fault.Expect{Status: fault.SymptomRunning},
+		})
 	}
 	return rollouts, symptoms, nil
 }
@@ -1387,13 +1420,75 @@ func (p *petriProvider) setupAgentRBAC(ctx context.Context, env resolvedEnv) err
 	return nil
 }
 
-// snapshotNamespace queries common resource types in a namespace and returns a snapshot.
+// snapshotKinds are the namespaced kinds a snapshot lists: every kind a state
+// entry can bring into being (applyEntry), the pods and events those produce,
+// and nothing else. The names are group-qualified where a lab CRD shares the
+// plural — Calico installs its own `networkpolicies`.
+//
+// The snapshot is the evidence's record of what the environment held. While it
+// listed five kinds, a NetworkPolicy petri had staged and one it had failed to
+// stage were the same empty record.
+var snapshotKinds = []string{
+	"deployments",
+	"pods",
+	"services",
+	"configmaps",
+	"secrets",
+	"serviceaccounts",
+	"roles.rbac.authorization.k8s.io",
+	"rolebindings.rbac.authorization.k8s.io",
+	"horizontalpodautoscalers.autoscaling",
+	"persistentvolumeclaims",
+	"ingresses.networking.k8s.io",
+	"networkpolicies.networking.k8s.io",
+	"resourcequotas",
+	"events",
+}
+
+// snapshotNamespace lists every snapshot kind in one namespace, preceded by
+// the Namespace object itself — its labels and annotations are declared state
+// like any other.
 func (p *petriProvider) snapshotNamespace(ctx context.Context, envID, namespace string) (StateSnapshotResponse, error) {
 	snap := StateSnapshotResponse{
 		EnvironmentID: envID,
 		Timestamp:     time.Now(),
 	}
-	for _, kind := range []string{"deployments", "services", "configmaps", "secrets", "pods"} {
+	p.appendNamespaceSnapshot(ctx, &snap, namespace)
+	return snap, nil
+}
+
+// snapshotEnvironment snapshots every namespace the environment provisioned:
+// its own, then each owned one in the order provision created them.
+func (p *petriProvider) snapshotEnvironment(ctx context.Context, envID, namespace string, owned []string) (StateSnapshotResponse, error) {
+	snap := StateSnapshotResponse{
+		EnvironmentID: envID,
+		Timestamp:     time.Now(),
+	}
+	seen := make(map[string]bool, len(owned)+1)
+	for _, ns := range append([]string{namespace}, owned...) {
+		if ns == "" || seen[ns] {
+			continue
+		}
+		seen[ns] = true
+		p.appendNamespaceSnapshot(ctx, &snap, ns)
+	}
+	return snap, nil
+}
+
+// appendNamespaceSnapshot adds one namespace's object and resources to snap.
+// A kind that cannot be listed is logged and skipped: a partial record is
+// still evidence, and the log line says which part is missing.
+func (p *petriProvider) appendNamespaceSnapshot(ctx context.Context, snap *StateSnapshotResponse, namespace string) {
+	if raw, err := p.kube.GetResource(ctx, "namespace", "", namespace); err != nil {
+		p.log.Warn("could not read namespace for snapshot", "namespace", namespace, "error", err)
+	} else if strings.TrimSpace(raw) != "" {
+		snap.Resources = append(snap.Resources, ResourceSnapshot{
+			Kind:  "Namespace",
+			Name:  namespace,
+			State: json.RawMessage(raw),
+		})
+	}
+	for _, kind := range snapshotKinds {
 		raw, err := p.kube.ListResources(ctx, kind, namespace)
 		if err != nil {
 			p.log.Warn("could not list resources for snapshot",
@@ -1417,7 +1512,18 @@ func (p *petriProvider) snapshotNamespace(ctx context.Context, envID, namespace 
 			})
 		}
 	}
-	return snap, nil
+}
+
+// snapshotInNamespace returns the part of a snapshot that belongs to one
+// namespace: its resources and its Namespace object.
+func snapshotInNamespace(snap StateSnapshotResponse, namespace string) StateSnapshotResponse {
+	out := StateSnapshotResponse{EnvironmentID: snap.EnvironmentID, Timestamp: snap.Timestamp}
+	for _, r := range snap.Resources {
+		if r.Namespace == namespace || (r.Namespace == "" && r.Kind == "Namespace" && r.Name == namespace) {
+			out.Resources = append(out.Resources, r)
+		}
+	}
+	return out
 }
 
 // ── State diff ────────────────────────────────────────────────────────────────
@@ -1622,12 +1728,19 @@ func resolveEnvironment(state []StateEntry, scope AgentScope, envNamespace strin
 		return actual
 	}
 
-	resolvedState := make([]StateEntry, len(state))
-	for i, e := range state {
-		resolvedState[i] = e
-		resolvedState[i].Namespace = resolve(e.Namespace)
+	resolvedState := make([]StateEntry, 0, len(state))
+	for _, e := range state {
+		e.Namespace = resolve(e.Namespace)
 		if strings.EqualFold(e.Kind, "namespace") {
-			resolvedState[i].Name = resolve(e.Name)
+			e.Name = resolve(e.Name)
+		}
+		resolvedState = append(resolvedState, e)
+		if strings.EqualFold(e.Kind, "namespace") {
+			// A malformed shorthand field is left in place for
+			// applyNamespace to refuse with the entry's name on it.
+			if expanded, err := expandNamespaceShorthand(e); err == nil {
+				resolvedState = append(resolvedState, expanded...)
+			}
 		}
 	}
 

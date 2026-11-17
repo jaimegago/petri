@@ -43,6 +43,7 @@ func TestNoDefaultImageIsOnDockerHub(t *testing.T) {
 		StateEntry{Kind: "metrics", Name: "metrics", Spec: map[string]any{"metric_name": "up", "value": float64(1)}},
 		StateEntry{Kind: "traces", Name: "traces", Spec: map[string]any{"trace_id": "abc"}},
 		StateEntry{Kind: "alert", Name: "alert", Spec: map[string]any{"alertname": "High"}},
+		StateEntry{Kind: "dashboard", Name: "dash", Spec: map[string]any{"panels": []any{"cpu_usage"}}},
 	)
 
 	mock := newMockKube()
@@ -64,8 +65,10 @@ func TestNoDefaultImageIsOnDockerHub(t *testing.T) {
 			}
 		}
 	}
-	// Every deployment, pod, logs deployment and the three mock servers.
-	if want := 2*len(workloadstate.AcceptedStates()) - 1 + 4; containers != want {
+	// Every deployment, pod, logs deployment and the mock servers: one each
+	// for metrics and alert, two for traces (Jaeger and Tempo), and a
+	// dashboard's Grafana.
+	if want := 2*len(workloadstate.AcceptedStates()) - 1 + 6; containers != want {
 		t.Errorf("checked %d images, want %d — an entry kind stopped rendering, or the set grew", containers, want)
 	}
 }

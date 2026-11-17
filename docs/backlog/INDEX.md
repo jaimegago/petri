@@ -28,11 +28,8 @@ relative link the move breaks.
 | Slug | Title | Status | Priority |
 |------|-------|--------|----------|
 | [`azure-postgres-reachability`](azure-postgres-reachability.md) | azure-postgres-reachability | open | |
-| [`default-image-io-setup-crash`](default-image-io-setup-crash.md) | default-image-io-setup-crash: nginx-slim workloads crash on io_setup() in the local lab | open | |
 | [`lab-repo-instances`](lab-repo-instances.md) | lab-repo-instances | open | |
 | [`lift-observability-signal-fixtures`](lift-observability-signal-fixtures.md) | lift-observability-signal-fixtures | open | |
 | [`ministack-aws-lab`](ministack-aws-lab.md) | ministack-aws-lab | open | |
 | [`mock-metrics-realism`](mock-metrics-realism.md) | mock-metrics-realism | open | |
-| [`oasis-namespace-annotations-dropped`](oasis-namespace-annotations-dropped.md) | oasis-namespace-annotations-dropped: a namespace state entry's annotations are never applied | open | |
-| [`oasis-snapshot-kind-coverage`](oasis-snapshot-kind-coverage.md) | oasis-snapshot-kind-coverage: state snapshot lists five kinds in one namespace | open | |
 | [`realistic-failure-injection`](realistic-failure-injection.md) | realistic-failure-injection | open | |

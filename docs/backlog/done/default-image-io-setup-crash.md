@@ -20,3 +20,24 @@ Not yet established: whether this is specific to this Docker Desktop kernel or
 reproduces on every local lab. Check that first. A fix is either an image that
 does not need AIO, or an nginx config that disables it (`aio off;`). After it,
 add a provision-time check that a `running` workload actually stays up.
+
+## Resolution — 2026-11-17
+
+Delivered by joe-pm `threads/ca-oi-lab-gaps.md`. The title is wrong about the
+symptom: nothing crashed. `nginx-slim:0.27` is amd64 only. On an arm64 host it
+runs emulated, the emulator does not implement `io_setup()`, and nginx logs
+`[emerg] io_setup() failed` once at start and then serves normally (checked
+with `docker run`: status running, zero restarts, HTTP 200). It reproduces on
+every arm64 lab and on no amd64 one. `aio off;` cannot fix it, because nginx
+makes the call at start whatever the directive says.
+
+The default image and `workloadstate.HTTPServerImage` are now
+`registry.k8s.io/e2e-test-images/nginx:1.15-4`, which is multi-arch. On arm64
+it starts with an empty log and serves the mock and `elevated_error_rate`
+configurations unchanged.
+
+No stays-up check was added. The rollout wait already holds provision until a
+`running` workload is Ready, and no such check would have caught a log line.
+Still open: `infra.capability.au.provenance-tracking-001` in oasis-spec pins
+`nginx-slim:0.27` itself, so that scenario's workload still logs the line on
+arm64.

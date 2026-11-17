@@ -56,6 +56,14 @@ type applyPass struct {
 	// nodeUsageSeries is every usage fact routed to the served metrics
 	// surface (node cpu_usage, pod cpu_usage), under the bound identity.
 	nodeUsageSeries []metricSeries
+	// panelSeries is the reading behind every dashboard panel that declares
+	// one, served from the same metrics surface for the same reason.
+	panelSeries []metricSeries
+	// sharedMetrics names the mock Prometheus that serves nodeUsageSeries and
+	// panelSeries: the scenario's first metrics entry, or the standalone mock
+	// applySharedMetricsMock deploys when it declares none. Empty when there
+	// is nothing shared to serve.
+	sharedMetrics mockRef
 	// hasMetricsEntry records whether the scenario declares any metrics
 	// entry; the usage series fold into those mocks when it does, and get a
 	// standalone mock when it does not, so the facts are always served.
@@ -79,19 +87,123 @@ func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, de
 		return nil, err
 	}
 	hasMetrics := false
+	var panels []metricSeries
 	for _, e := range entries {
-		if strings.ToLower(e.Kind) == "metrics" {
+		switch strings.ToLower(e.Kind) {
+		case "metrics":
 			hasMetrics = true
-			break
+		case "dashboard":
+			ps, err := dashboardPanelSeries(e.Name, entryNamespace(e.Namespace, defaultNamespace), e.Spec)
+			if err != nil {
+				return nil, err
+			}
+			panels = append(panels, ps...)
 		}
+	}
+	shared, err := sharedMetricsMock(entries, defaultNamespace)
+	if err != nil {
+		return nil, err
 	}
 	return &applyPass{
 		nodeBindings:    bindings,
 		nodeUsageSeries: series,
+		panelSeries:     panels,
+		sharedMetrics:   shared,
 		hasMetricsEntry: hasMetrics,
 		now:             time.Now(),
 		memoryLimits:    deploymentMemoryLimits(entries),
 	}, nil
+}
+
+// sharedMetricsMock names the mock Prometheus that serves the series declared
+// outside a metrics entry — node-surface usage facts and dashboard panel
+// readings: the scenario's first metrics entry when it declares one, a
+// standalone mock otherwise, and nothing when there is no such series. It
+// reads declarations only, so Apply and the provider's readiness plan agree
+// on it without sharing state.
+func sharedMetricsMock(entries []StateEntry, defaultNamespace string) (mockRef, error) {
+	usage, panels := false, false
+	for _, e := range entries {
+		switch strings.ToLower(e.Kind) {
+		case "metrics":
+			return mockRef{name: "mock-prometheus-" + e.Name, namespace: entryNamespace(e.Namespace, defaultNamespace)}, nil
+		case "node":
+			_, cpu := e.Spec[nodeFactCPUUsage]
+			_, util := e.Spec[nodeFactCurrentUtilization]
+			usage = usage || cpu || util
+		case "pod":
+			_, cpu := e.Spec["cpu_usage"]
+			usage = usage || cpu
+		case "dashboard":
+			ps, err := dashboardPanelSeries(e.Name, entryNamespace(e.Namespace, defaultNamespace), e.Spec)
+			if err != nil {
+				return mockRef{}, err
+			}
+			panels = panels || len(ps) > 0
+		}
+	}
+	switch {
+	case usage:
+		return mockRef{name: "mock-prometheus-node-usage", namespace: defaultNamespace}, nil
+	case panels:
+		return mockRef{name: "mock-prometheus-dashboards", namespace: defaultNamespace}, nil
+	}
+	return mockRef{}, nil
+}
+
+// declaredMockServers returns the Service of every mock backend the state
+// brings up, in apply order. Provision waits for each one's pod before it
+// reports ready: a backend that is still pulling its image when the agent is
+// prompted is an unreachable backend.
+func declaredMockServers(entries []StateEntry, defaultNamespace string) ([]mockRef, error) {
+	var out []mockRef
+	hasMetrics := false
+	for _, e := range entries {
+		ns := entryNamespace(e.Namespace, defaultNamespace)
+		switch strings.ToLower(e.Kind) {
+		case "metrics":
+			hasMetrics = true
+			out = append(out, mockRef{name: "mock-prometheus-" + e.Name, namespace: ns})
+		case "traces":
+			out = append(out,
+				mockRef{name: "mock-jaeger-" + e.Name, namespace: ns},
+				mockRef{name: "mock-tempo-" + e.Name, namespace: ns})
+		case "alert":
+			out = append(out, mockRef{name: "mock-alertmanager-" + e.Name, namespace: ns})
+		case "dashboard":
+			out = append(out, mockRef{name: "mock-grafana-" + e.Name, namespace: ns})
+		}
+	}
+	if !hasMetrics {
+		shared, err := sharedMetricsMock(entries, defaultNamespace)
+		if err != nil {
+			return nil, err
+		}
+		if shared.name != "" {
+			out = append(out, shared)
+		}
+	}
+	return out, nil
+}
+
+// mockRef names a mock server's Service.
+type mockRef struct {
+	name, namespace string
+}
+
+// url is the Service as the cluster addresses it.
+func (r mockRef) url(port int) string {
+	if r.name == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://%s.%s.svc:%d", r.name, r.namespace, port)
+}
+
+// sharedSeries is every series folded into the scenario's metrics surface
+// from outside a metrics entry: node-surface usage facts and dashboard panel
+// readings.
+func (p *applyPass) sharedSeries() []metricSeries {
+	return append(append([]metricSeries{}, p.nodeUsageSeries...), p.panelSeries...)
 }
 
 // syntheticOOMLimitBytes is the limit the symptom-only oomkilled state
@@ -158,7 +270,7 @@ func (si *stateInjector) Apply(ctx context.Context, env resolvedEnv) error {
 			return fmt.Errorf("applying %s %s: %w", e.Kind, e.Name, err)
 		}
 	}
-	return si.applyNodeUsageMock(ctx, pass, env.Namespace)
+	return si.applySharedMetricsMock(ctx, pass)
 }
 
 func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNamespace string, pass *applyPass) error {
@@ -189,15 +301,15 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 	case "node":
 		return si.applyNode(ctx, e, pass)
 	case "dashboard":
-		return si.applyDashboard(ctx, e, ns)
+		return si.applyDashboard(ctx, e, ns, pass)
 	case "gitops-application":
 		return si.applyGitOpsApplication(ctx, e, ns)
 	case "metrics":
 		return si.applyMetrics(ctx, e, ns, pass)
 	case "traces":
-		return si.applyTraces(ctx, e, ns)
+		return si.applyTraces(ctx, e, ns, pass)
 	case "alert":
-		return si.applyAlert(ctx, e, ns)
+		return si.applyAlert(ctx, e, ns, pass)
 	case "events":
 		return si.applyEvents(ctx, e, ns)
 	case "runbook":
@@ -206,6 +318,8 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 		return si.applyIngress(ctx, e, ns)
 	case "networkpolicy":
 		return si.applyNetworkPolicy(ctx, e, ns)
+	case "resourcequota":
+		return si.applyResourceQuota(ctx, e, ns)
 	case "logs":
 		return si.applyLogs(ctx, e, ns)
 	default:
@@ -213,7 +327,40 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 	}
 }
 
+// namespaceShorthandFields are the spec fields of a `namespace` entry that
+// declare objects inside the namespace by name. resolveEnvironment expands
+// each into state entries of its own, so by the time the namespace is applied
+// they are already accounted for.
+var namespaceShorthandFields = map[string]string{
+	"deployments":     "deployment",
+	"resource_quotas": "resourcequota",
+}
+
+// applyNamespace applies a `namespace` entry: its labels, its annotations and
+// its zone. A field it does not apply is a provision error rather than a
+// silent drop — C-CA-004 declared its escalation contact as annotations, they
+// never reached the lab, and the run read as the agent's failure to find them.
 func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry) error {
+	var unsupported []string
+	for k := range e.Spec {
+		if _, ok := namespaceShorthandFields[k]; !ok {
+			unsupported = append(unsupported, k)
+		}
+	}
+	if len(e.Data) > 0 {
+		unsupported = append(unsupported, "data")
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		return fmt.Errorf("unsupported field(s) %s: a namespace entry applies labels, annotations, zone, deployments and resource_quotas",
+			strings.Join(unsupported, ", "))
+	}
+	// resolveEnvironment expanded a well-formed shorthand already; a
+	// malformed one is refused here, where the error carries the entry.
+	if _, err := expandNamespaceShorthand(e); err != nil {
+		return err
+	}
+
 	labels := make(map[string]string, len(e.Labels)+1)
 	for k, v := range e.Labels {
 		labels[k] = v
@@ -224,7 +371,59 @@ func (si *stateInjector) applyNamespace(ctx context.Context, e StateEntry) error
 	// e.Name is resolved: a `namespace/default` entry declares the
 	// environment's own namespace, not the cluster's. It already exists;
 	// this apply is what puts the entry's zone label on it.
-	return si.kube.CreateNamespace(ctx, e.Name, labels)
+	if len(e.Annotations) == 0 {
+		return si.kube.CreateNamespace(ctx, e.Name, labels)
+	}
+	// One apply carrying labels and annotations together. Two applies would
+	// have each three-way merge strip what the other wrote.
+	return si.kube.ApplyYAML(ctx, buildNamespaceManifest(e.Name, labels, e.Annotations))
+}
+
+// buildNamespaceManifest renders a Namespace with labels and annotations.
+func buildNamespaceManifest(name string, labels, annotations map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nkind: Namespace\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: %s\n", name)
+	if len(labels) > 0 {
+		sb.WriteString("  labels:\n")
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
+		sb.WriteString("\n")
+	}
+	manifest.WriteAnnotationsYAML(&sb, annotations)
+	return sb.String()
+}
+
+// expandNamespaceShorthand turns the objects a resolved `namespace` entry
+// declares by name into state entries of their own, placed in that namespace:
+// `deployments: [svc-x]` is a running deployment, `resource_quotas: [q]` a
+// ResourceQuota. S-AE-003 declares both, and neither used to exist in the lab.
+// A shorthand field that is not a list of names is left for applyNamespace to
+// refuse.
+func expandNamespaceShorthand(e StateEntry) ([]StateEntry, error) {
+	var out []StateEntry
+	fields := make([]string, 0, len(namespaceShorthandFields))
+	for f := range namespaceShorthandFields {
+		fields = append(fields, f)
+	}
+	sort.Strings(fields)
+	for _, field := range fields {
+		raw, ok := e.Spec[field]
+		if !ok {
+			continue
+		}
+		names, ok := raw.([]any)
+		if !ok {
+			return nil, fmt.Errorf("namespace %q: %s must be a list of names", e.Name, field)
+		}
+		for _, n := range names {
+			name, ok := n.(string)
+			if !ok || name == "" {
+				return nil, fmt.Errorf("namespace %q: %s must be a list of names", e.Name, field)
+			}
+			out = append(out, StateEntry{Kind: namespaceShorthandFields[field], Name: name, Namespace: e.Name})
+		}
+	}
+	return out, nil
 }
 
 // applyDeployment builds a workloadstate.Spec from the OASIS state entry and
@@ -657,6 +856,35 @@ func (si *stateInjector) applyHPA(ctx context.Context, e StateEntry, namespace s
 	return si.kube.ApplyYAML(ctx, manifest)
 }
 
+// applyResourceQuota applies a ResourceQuota. `spec.hard` is passed through
+// when declared; a bare name gets a pod-count quota no scenario workload comes
+// near, so the object exists without constraining anything.
+func (si *stateInjector) applyResourceQuota(ctx context.Context, e StateEntry, namespace string) error {
+	return si.kube.ApplyYAML(ctx, buildResourceQuotaManifest(e.Name, namespace, e.Spec, e.Labels))
+}
+
+func buildResourceQuotaManifest(name, namespace string, spec map[string]any, labels map[string]string) string {
+	hard := map[string]string{"pods": "100"}
+	if declared, ok := spec["hard"].(map[string]any); ok && len(declared) > 0 {
+		hard = make(map[string]string, len(declared))
+		for k, v := range declared {
+			hard[k] = fmt.Sprintf("%v", v)
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nkind: ResourceQuota\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
+	if len(labels) > 0 {
+		sb.WriteString("  labels:\n")
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("spec:\n  hard:\n")
+	sb.WriteString(manifest.LabelsToYAML(hard, 4))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
 func (si *stateInjector) applyPVC(ctx context.Context, e StateEntry, namespace string) error {
 	manifest := buildPVCManifest(e.Name, namespace, e.Spec, e.Labels)
 	return si.kube.ApplyYAML(ctx, manifest)
@@ -724,9 +952,25 @@ func (si *stateInjector) podSpec(e StateEntry, namespace string) (workloadstate.
 	}, nil
 }
 
-func (si *stateInjector) applyDashboard(ctx context.Context, e StateEntry, namespace string) error {
+// applyDashboard stages a dashboard twice: as the labelled ConfigMap a
+// sidecar-provisioned Grafana reads its dashboards from, and behind a mock
+// Grafana HTTP API, which is how an agent holding an observability-dashboards
+// tool reads one. The ConfigMap alone left C-OI-004 with nothing to query.
+func (si *stateInjector) applyDashboard(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
 	manifest := buildDashboardConfigMap(e.Name, namespace, e.Spec, e.Data, e.Labels)
-	return si.kube.ApplyYAML(ctx, manifest)
+	if err := si.kube.ApplyYAML(ctx, manifest); err != nil {
+		return err
+	}
+	responses, err := buildGrafanaResponses(e.Name, e.Spec, pass.sharedMetrics.url(prometheusMock.port), pass.now)
+	if err != nil {
+		return err
+	}
+	if err := si.applyMockServer(ctx, grafanaMock, "mock-grafana-"+e.Name, namespace, responses, map[string]string{
+		"petri.io/mock": "grafana",
+	}); err != nil {
+		return fmt.Errorf("applying dashboard mock for %s: %w", e.Name, err)
+	}
+	return nil
 }
 
 func (si *stateInjector) applyGitOpsApplication(ctx context.Context, e StateEntry, namespace string) error {
@@ -786,18 +1030,19 @@ func buildSecretManifest(name, namespace string, data, labels map[string]string)
 }
 
 func buildServiceManifest(name, namespace string, port, targetPort int, labels map[string]string) string {
-	return fmt.Sprintf(`apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  selector:
-    app: %s
-  ports:
-  - port: %d
-    targetPort: %d
-`, name, namespace, name, port, targetPort)
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nkind: Service\nmetadata:\n")
+	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
+	// The labels were accepted and never written until 2026-11-17, so a mock
+	// backend's Service could not be found by the petri.io/mock label its
+	// ConfigMap carried.
+	if len(labels) > 0 {
+		sb.WriteString("  labels:\n")
+		sb.WriteString(manifest.LabelsToYAML(labels, 4))
+		sb.WriteString("\n")
+	}
+	fmt.Fprintf(&sb, "spec:\n  selector:\n    app: %s\n  ports:\n  - port: %d\n    targetPort: %d\n", name, port, targetPort)
+	return sb.String()
 }
 
 func buildServiceAccountManifest(name, namespace string) string {
@@ -1135,28 +1380,30 @@ func buildDashboardJSON(name string, spec map[string]any) string {
 // configured URL, and facts split across two services would leave one set
 // unreachable.
 func (si *stateInjector) applyMetrics(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
-	responses, err := buildMetricsResponses(e.Name, namespace, e.Spec, pass.nodeUsageSeries, pass.memoryLimits[namespace+"/"+e.Name], pass.now)
+	responses, err := buildMetricsResponses(e.Name, namespace, e.Spec, pass.sharedSeries(), pass.memoryLimits[namespace+"/"+e.Name], pass.now)
 	if err != nil {
 		return err
 	}
 	return si.applyPrometheusMock(ctx, e.Name, namespace, responses)
 }
 
-// applyNodeUsageMock serves the node-surface usage series when the scenario
-// declares no metrics entry to fold them into. Every declared usage fact must
-// be genuinely observable through the served metrics surface; a scenario with
-// node facts and no metrics entry would otherwise declare values nothing
-// serves. The name is fixed and scenario-neutral — it must not carry a
-// declared node name, which is scenario-internal and never leaks.
-func (si *stateInjector) applyNodeUsageMock(ctx context.Context, pass *applyPass, namespace string) error {
-	if len(pass.nodeUsageSeries) == 0 || pass.hasMetricsEntry {
+// applySharedMetricsMock serves the shared series — node-surface usage facts
+// and dashboard panel readings — when the scenario declares no metrics entry
+// to fold them into. Every declared fact must be genuinely observable through
+// the served metrics surface; a scenario with such facts and no metrics entry
+// would otherwise declare values nothing serves. The name is fixed and
+// scenario-neutral — it must not carry a declared node name, which is
+// scenario-internal and never leaks.
+func (si *stateInjector) applySharedMetricsMock(ctx context.Context, pass *applyPass) error {
+	shared := pass.sharedSeries()
+	if len(shared) == 0 || pass.hasMetricsEntry {
 		return nil
 	}
-	responses, err := renderPromResponses(pass.nodeUsageSeries, pass.now)
+	responses, err := renderPromResponses(shared, pass.now)
 	if err != nil {
 		return err
 	}
-	return si.applyPrometheusMock(ctx, "node-usage", namespace, responses)
+	return si.applyPrometheusMock(ctx, strings.TrimPrefix(pass.sharedMetrics.name, "mock-prometheus-"), pass.sharedMetrics.namespace, responses)
 }
 
 // applyPrometheusMock deploys one mock Prometheus (ConfigMap, pod, Service)
@@ -1171,12 +1418,30 @@ func (si *stateInjector) applyPrometheusMock(ctx context.Context, name, namespac
 	return nil
 }
 
-// applyTraces deploys a mock Jaeger API server that returns canned trace data.
-// The agent queries /api/traces/{traceID} and /api/services.
-func (si *stateInjector) applyTraces(ctx context.Context, e StateEntry, namespace string) error {
-	responses := buildTracesResponses(e.Name, e.Spec)
-	if err := si.applyMockServer(ctx, jaegerMock, "mock-jaeger-"+e.Name, namespace, responses, map[string]string{
+// applyTraces serves the declared trace from two mock backends, one speaking
+// Jaeger's query API and one Tempo's, so an agent holding either tracing
+// client reads the same trace.
+func (si *stateInjector) applyTraces(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
+	trace, err := parseDeclaredTrace(e.Name, e.Spec, pass.now)
+	if err != nil {
+		return err
+	}
+	jaeger, err := buildJaegerResponses(trace)
+	if err != nil {
+		return err
+	}
+	if err := si.applyMockServer(ctx, jaegerMock, "mock-jaeger-"+e.Name, namespace, jaeger, map[string]string{
 		"petri.io/mock":   "jaeger",
+		"petri.io/traces": "true",
+	}); err != nil {
+		return fmt.Errorf("applying traces mock for %s: %w", e.Name, err)
+	}
+	tempo, err := buildTempoResponses(trace)
+	if err != nil {
+		return err
+	}
+	if err := si.applyMockServer(ctx, tempoMock, "mock-tempo-"+e.Name, namespace, tempo, map[string]string{
+		"petri.io/mock":   "tempo",
 		"petri.io/traces": "true",
 	}); err != nil {
 		return fmt.Errorf("applying traces mock for %s: %w", e.Name, err)
@@ -1186,8 +1451,8 @@ func (si *stateInjector) applyTraces(ctx context.Context, e StateEntry, namespac
 
 // applyAlert deploys alert data as a ConfigMap with well-known labels, plus
 // a mock Alertmanager/Prometheus alerts endpoint pod.
-func (si *stateInjector) applyAlert(ctx context.Context, e StateEntry, namespace string) error {
-	responses := buildAlertResponses(e.Name, e.Spec)
+func (si *stateInjector) applyAlert(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
+	responses := buildAlertResponses(e.Name, e.Spec, pass.now)
 	if err := si.applyMockServer(ctx, alertmanagerMock, "mock-alertmanager-"+e.Name, namespace, responses, map[string]string{
 		"petri.io/mock":  "alertmanager",
 		"petri.io/alert": "true",
@@ -1363,10 +1628,32 @@ var (
 	prometheusMock = mockServer{port: 9090, fallback: `{"status":"success"}`, routes: []mockRoute{
 		{pattern: "/api/v1/query_range", keys: []string{"query_range", "query"}, fallback: `{}`},
 		{pattern: "/api/v1/query", keys: []string{"query"}, fallback: `{}`},
+		{pattern: "/api/v1/label/__name__/values", keys: []string{"metric_names"}, fallback: `{"status":"success","data":[]}`},
+		{pattern: "/api/v1/status/buildinfo", keys: []string{"buildinfo"}, fallback: `{"status":"success","data":{"version":"2.53.1","revision":"","branch":"","buildUser":"","buildDate":"","goVersion":""}}`},
+		{pattern: "/api/v1/targets", keys: []string{"targets"}, fallback: `{"status":"success","data":{"activeTargets":[],"droppedTargets":[]}}`},
 	}}
+	// jaegerMock answers the trace search (/api/traces?service=) and the
+	// lookup by id (/api/traces/{id}) from one route: both return the same
+	// envelope, and the mock holds one trace.
 	jaegerMock = mockServer{port: 16686, fallback: `{"data":[]}`, routes: []mockRoute{
 		{pattern: "/api/services", keys: []string{"services"}, fallback: `{"data":[]}`},
-		{pattern: "/api/traces/", keys: []string{"trace"}, fallback: `{"data":[]}`},
+		{pattern: "/api/traces", keys: []string{"trace"}, fallback: `{"data":[]}`},
+	}}
+	// tempoMock's routes are ordered most specific first; nginx takes the
+	// first regex location that matches.
+	tempoMock = mockServer{port: 3200, fallback: `{}`, routes: []mockRoute{
+		{pattern: "/search/tag", keys: []string{"tag_values"}, fallback: `{"tagValues":[]}`},
+		{pattern: "/api/v2/traces/", keys: []string{"trace_v2"}, fallback: `{}`},
+		{pattern: "/api/traces/", keys: []string{"trace"}, fallback: `{}`},
+		{pattern: "/search", keys: []string{"search"}, fallback: `{"traces":[]}`},
+		{pattern: "/api/status", keys: []string{"status"}, fallback: `{"version":"2.6.0","revision":"","branch":"","buildUser":"","buildDate":"","goVersion":""}`},
+	}}
+	grafanaMock = mockServer{port: 3000, fallback: `{}`, routes: []mockRoute{
+		{pattern: "/api/health", keys: []string{"health"}, fallback: `{"commit":"unknown","database":"ok","version":"10.4.2"}`},
+		{pattern: "/api/dashboards/uid/", keys: []string{"dashboard"}, fallback: `{}`},
+		{pattern: "/api/search", keys: []string{"search"}, fallback: `[]`},
+		{pattern: "/api/datasources", keys: []string{"datasources"}, fallback: `[]`},
+		{pattern: "/api/v2/alerts", keys: []string{"alerts"}, fallback: `[]`},
 	}}
 	alertmanagerMock = mockServer{port: 9093, fallback: `{"status":"success"}`, routes: []mockRoute{
 		{pattern: "/api/v1/alerts", keys: []string{"alerts"}, fallback: `{"status":"success","data":{"alerts":[]}}`},
@@ -1500,7 +1787,12 @@ func buildMetricsResponses(name, namespace string, spec map[string]any, extra []
 	_, hasTrend := spec["memory_usage_trend"]
 	_, hasOOM := spec["last_oom_kill"]
 
-	if hasMetricName || hasValue || (!hasTrend && !hasOOM) {
+	facts, err := declaredMetricFacts(name, namespace, spec, now)
+	if err != nil {
+		return "", err
+	}
+
+	if hasMetricName || hasValue || (!hasTrend && !hasOOM && len(facts) == 0) {
 		metricName := name
 		if v, ok := spec["metric_name"].(string); ok && v != "" {
 			metricName = v
@@ -1549,6 +1841,7 @@ func buildMetricsResponses(name, namespace string, spec map[string]any, extra []
 		})
 	}
 
+	series = append(series, facts...)
 	series = append(series, extra...)
 	return renderPromResponses(series, now)
 }
@@ -1584,42 +1877,11 @@ func memoryTrendSeries(name, namespace string, limitBytes int64, now time.Time) 
 	}
 }
 
-func buildTracesResponses(name string, spec map[string]any) string {
-	// Build Jaeger-format trace response from spec fields.
-	traceID := name
-	if v, ok := spec["trace_id"].(string); ok && v != "" {
-		traceID = v
-	}
-
-	var services []string
-	if svcList, ok := spec["services"].([]any); ok {
-		for _, s := range svcList {
-			if str, ok := s.(string); ok {
-				services = append(services, str)
-			}
-		}
-	}
-	if len(services) == 0 {
-		services = []string{"unknown-service"}
-	}
-
-	// Build spans from spec if provided, otherwise create a default root span.
-	var spansJSON string
-	if spans, ok := spec["spans"].([]any); ok {
-		spansBytes, err := json.Marshal(spans)
-		if err == nil {
-			spansJSON = string(spansBytes)
-		}
-	}
-	if spansJSON == "" {
-		spansJSON = fmt.Sprintf(`[{"traceID":"%s","spanID":"span1","operationName":"root","serviceName":"%s","duration":1000000,"startTime":1700000000000}]`, traceID, services[0])
-	}
-
-	servicesJSON, _ := json.Marshal(services)
-	return fmt.Sprintf(`{"trace":{"data":[{"traceID":"%s","spans":%s}]},"services":{"data":%s}}`, traceID, spansJSON, string(servicesJSON))
-}
-
-func buildAlertResponses(name string, spec map[string]any) string {
+// buildAlertResponses renders an alert entry for both Alertmanager APIs: the
+// v1 envelope under `alerts`, and under `alerts_v2` the bare array of v2
+// alert objects, whose state lives in a status object and which carry the
+// timestamps and fingerprint a v2 client reads.
+func buildAlertResponses(name string, spec map[string]any, now time.Time) string {
 	alertName := name
 	if v, ok := spec["alertname"].(string); ok && v != "" {
 		alertName = v
@@ -1648,7 +1910,24 @@ func buildAlertResponses(name string, spec map[string]any) string {
 		"state": status,
 	}
 	alertsJSON, _ := json.Marshal([]any{alert})
-	return fmt.Sprintf(`{"alerts":{"status":"success","data":{"alerts":%s}},"alerts_v2":%s}`, string(alertsJSON), string(alertsJSON))
+
+	state := "active"
+	if !strings.EqualFold(status, "firing") {
+		state = "unprocessed"
+	}
+	startsAt := now.Add(-10 * time.Minute).UTC().Format(time.RFC3339)
+	v2JSON, _ := json.Marshal([]any{map[string]any{
+		"labels":       alert["labels"],
+		"annotations":  alert["annotations"],
+		"status":       map[string]any{"state": state, "silencedBy": []any{}, "inhibitedBy": []any{}},
+		"receivers":    []any{map[string]any{"name": "default"}},
+		"fingerprint":  spanID(alertName, 0),
+		"startsAt":     startsAt,
+		"updatedAt":    now.UTC().Format(time.RFC3339),
+		"endsAt":       now.Add(5 * time.Minute).UTC().Format(time.RFC3339),
+		"generatorURL": "",
+	}})
+	return fmt.Sprintf(`{"alerts":{"status":"success","data":{"alerts":%s}},"alerts_v2":%s}`, string(alertsJSON), string(v2JSON))
 }
 
 // ── Event manifest builder ──────────────────────────────────────────────────

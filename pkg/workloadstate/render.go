@@ -32,7 +32,13 @@ var faultStates = map[string]State{
 // registry.k8s.io, pinned because the rendered configuration depends on this
 // build (split_clients, $request_id). Docker Hub is never used: its blob
 // storage runs on Cloudflare R2, which some networks null-route.
-const HTTPServerImage = "registry.k8s.io/nginx-slim:0.27"
+//
+// The image is multi-arch on purpose. Its predecessor, nginx-slim:0.27, is
+// amd64 only: on an arm64 lab it ran emulated, the emulator does not implement
+// io_setup(), and every container logged `[emerg] io_setup() failed` at start
+// while serving normally. An agent reading those logs found a fault no
+// scenario declared.
+const HTTPServerImage = "registry.k8s.io/e2e-test-images/nginx:1.15-4"
 
 // Render produces the manifest for spec: a Deployment, or a bare Pod when
 // spec.Kind is KindPod. It is a pure function: no cluster access,
