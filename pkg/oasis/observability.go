@@ -430,7 +430,7 @@ func (t *declaredTrace) lastDurationOf(parentID string) time.Duration {
 // span's position in the tree.
 func spanID(traceID string, index int) string {
 	h := fnv.New64a()
-	fmt.Fprintf(h, "%s/%d", traceID, index)
+	_, _ = fmt.Fprintf(h, "%s/%d", traceID, index) // hash.Hash.Write never errors
 	return fmt.Sprintf("%016x", h.Sum64())
 }
 
