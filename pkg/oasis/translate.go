@@ -64,6 +64,10 @@ type applyPass struct {
 	// applySharedMetricsMock deploys when it declares none. Empty when there
 	// is nothing shared to serve.
 	sharedMetrics mockRef
+	// workloads is every deployment and bare pod entry, keyed
+	// namespace/name: the workloads this environment renders, whose served
+	// port a Service of the same name targets by name.
+	workloads map[string]bool
 	// hasMetricsEntry records whether the scenario declares any metrics
 	// entry; the usage series fold into those mocks when it does, and get a
 	// standalone mock when it does not, so the facts are always served.
@@ -88,8 +92,11 @@ func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, de
 	}
 	hasMetrics := false
 	var panels []metricSeries
+	workloads := make(map[string]bool)
 	for _, e := range entries {
 		switch strings.ToLower(e.Kind) {
+		case "deployment", "pod":
+			workloads[entryNamespace(e.Namespace, defaultNamespace)+"/"+e.Name] = true
 		case "metrics":
 			hasMetrics = true
 		case "dashboard":
@@ -108,6 +115,7 @@ func newApplyPass(ctx context.Context, kube KubeClient, entries []StateEntry, de
 		nodeBindings:    bindings,
 		nodeUsageSeries: series,
 		panelSeries:     panels,
+		workloads:       workloads,
 		sharedMetrics:   shared,
 		hasMetricsEntry: hasMetrics,
 		now:             time.Now(),
@@ -285,7 +293,7 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 	case "secret":
 		return si.applySecret(ctx, e, ns)
 	case "service":
-		return si.applyService(ctx, e, ns)
+		return si.applyService(ctx, e, ns, pass)
 	case "serviceaccount":
 		return si.applyServiceAccount(ctx, e, ns)
 	case "role":
@@ -802,7 +810,16 @@ func (si *stateInjector) applySecret(ctx context.Context, e StateEntry, namespac
 	return si.kube.ApplyYAML(ctx, manifest)
 }
 
-func (si *stateInjector) applyService(ctx context.Context, e StateEntry, namespace string) error {
+// applyService applies a Service selecting `app: <name>`. A declared
+// targetPort is used as written. Without one, a Service fronting a workload
+// this environment renders targets that workload's port by name, because the
+// port the scenario declares is the one clients dial, not necessarily the one
+// the rendered container listens on: C-CA-002 declares `port: 8080` on a
+// stock server that listens on 80, and a numeric default left the Service
+// routing to nothing — a fault of the lab's making, which the agent found in
+// place of the scenario's. A Service fronting nothing petri renders keeps the
+// numeric default.
+func (si *stateInjector) applyService(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
 	port := 80
 	if v, ok := e.Spec["port"]; ok {
 		switch p := v.(type) {
@@ -812,13 +829,20 @@ func (si *stateInjector) applyService(ctx context.Context, e StateEntry, namespa
 			port = int(p)
 		}
 	}
-	targetPort := port
+	targetPort := strconv.Itoa(port)
+	if pass.workloads[namespace+"/"+e.Name] {
+		targetPort = workloadstate.ServedPortName
+	}
 	if v, ok := e.Spec["targetPort"]; ok {
 		switch tp := v.(type) {
 		case int:
-			targetPort = tp
+			targetPort = strconv.Itoa(tp)
 		case float64:
-			targetPort = int(tp)
+			targetPort = strconv.Itoa(int(tp))
+		case string:
+			if tp != "" {
+				targetPort = tp
+			}
 		}
 	}
 	manifest := buildServiceManifest(e.Name, namespace, port, targetPort, e.Labels)
@@ -1029,7 +1053,9 @@ func buildSecretManifest(name, namespace string, data, labels map[string]string)
 	return sb.String()
 }
 
-func buildServiceManifest(name, namespace string, port, targetPort int, labels map[string]string) string {
+// buildServiceManifest renders a Service selecting `app: <name>`. targetPort
+// is a port number or a container port's name.
+func buildServiceManifest(name, namespace string, port int, targetPort string, labels map[string]string) string {
 	var sb strings.Builder
 	sb.WriteString("apiVersion: v1\nkind: Service\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
@@ -1041,7 +1067,7 @@ func buildServiceManifest(name, namespace string, port, targetPort int, labels m
 		sb.WriteString(manifest.LabelsToYAML(labels, 4))
 		sb.WriteString("\n")
 	}
-	fmt.Fprintf(&sb, "spec:\n  selector:\n    app: %s\n  ports:\n  - port: %d\n    targetPort: %d\n", name, port, targetPort)
+	fmt.Fprintf(&sb, "spec:\n  selector:\n    app: %s\n  ports:\n  - port: %d\n    targetPort: %s\n", name, port, targetPort)
 	return sb.String()
 }
 
@@ -1473,7 +1499,7 @@ func (si *stateInjector) applyMockServer(ctx context.Context, m mockServer, name
 	}
 	configMap := buildMockServerConfigMap(name, namespace, files, cmLabels)
 	pod := buildMockServerPod(name, namespace, name, m.port, map[string]string{"app": name})
-	svc := buildServiceManifest(name, namespace, m.port, m.port, map[string]string{
+	svc := buildServiceManifest(name, namespace, m.port, strconv.Itoa(m.port), map[string]string{
 		"petri.io/mock": cmLabels["petri.io/mock"],
 	})
 	for _, manifest := range []string{configMap, pod, svc} {

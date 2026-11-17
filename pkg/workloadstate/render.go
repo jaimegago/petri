@@ -17,6 +17,13 @@ const DefaultUtilImage = "registry.k8s.io/e2e-test-images/busybox:1.37.0-2"
 // StateElevatedErrorRate when Spec.ErrorRate is unset.
 const defaultErrorRate = 50
 
+// ServedPortName names the container port of every rendered workload, whatever
+// its number: 80 for a stock HTTP server, 8080 for the application and for the
+// error-rate server. A Service fronting a rendered workload targets the port
+// by this name, so the port a scenario declares on the Service is the one
+// clients dial and the workload still answers on it.
+const ServedPortName = "http"
+
 // appPort is the port the application listens on (its PORT default).
 const appPort = 8080
 
@@ -218,7 +225,7 @@ func writeDeploymentHead(sb *strings.Builder, name, namespace, containerName str
 // image exposing containerPort 80.
 func renderRunning(spec Spec) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: 80\n", spec.Image)
+	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - name: "+ServedPortName+"\n          containerPort: 80\n", spec.Image)
 	writeEnvYAML(&sb, spec.Env, false)
 	return sb.String()
 }
@@ -306,7 +313,7 @@ func renderFaulted(spec Spec) string {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: %d\n", image, appPort)
+	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - name: "+ServedPortName+"\n          containerPort: %d\n", image, appPort)
 	if limit := spec.Fault.Definition().MemoryLimit; limit != "" {
 		fmt.Fprintf(&sb, "        resources:\n          limits:\n            memory: %s\n", limit)
 	}
@@ -408,7 +415,7 @@ func renderPending(spec Spec) string {
 // become Ready.
 func renderDegraded(spec Spec) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - containerPort: 80\n", spec.Image)
+	fmt.Fprintf(&sb, "        image: %s\n        ports:\n        - name: "+ServedPortName+"\n          containerPort: 80\n", spec.Image)
 	sb.WriteString("        readinessProbe:\n")
 	sb.WriteString("          httpGet:\n")
 	sb.WriteString("            path: /healthz\n")
@@ -460,7 +467,7 @@ http {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "        image: %s\n", HTTPServerImage)
 	fmt.Fprintf(&sb, "        command: [\"sh\", \"-c\", %q]\n", script)
-	fmt.Fprintf(&sb, "        ports:\n        - containerPort: %d\n", errorRateServerPort)
+	fmt.Fprintf(&sb, "        ports:\n        - name: "+ServedPortName+"\n          containerPort: %d\n", errorRateServerPort)
 	return sb.String()
 }
 

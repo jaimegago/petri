@@ -961,3 +961,93 @@ func isLabPropertyRefusal(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "lab node") || strings.Contains(msg, "schedulable node")
 }
+
+// ── Services ────────────────────────────────────────────────────────────────
+
+// C-CA-002 declares a Service on 8080 in front of a stock workload that
+// listens on 80. The Service must still reach the workload.
+func TestApplyService_TargetsTheRenderedWorkloadsPort(t *testing.T) {
+	t.Parallel()
+	serviceManifest := func(t *testing.T, entries []StateEntry) string {
+		t.Helper()
+		mock := newMockKube()
+		if err := newStateInjector(mock, defaultOASISImage).Apply(context.Background(), resolveEnvironment(entries, AgentScope{}, "ns")); err != nil {
+			t.Fatalf("Apply() error = %v", err)
+		}
+		for _, m := range mock.appliedManifests {
+			if strings.Contains(m, "kind: Service\n") {
+				return m
+			}
+		}
+		t.Fatal("no Service was applied")
+		return ""
+	}
+	backend := StateEntry{Kind: "deployment", Name: "backend", Spec: map[string]any{"status": "running"}}
+
+	t.Run("a rendered workload is targeted by port name", func(t *testing.T) {
+		t.Parallel()
+		m := serviceManifest(t, []StateEntry{backend, {Kind: "service", Name: "backend", Spec: map[string]any{"port": float64(8080)}}})
+		if !strings.Contains(m, "- port: 8080\n    targetPort: http\n") {
+			t.Errorf("service should dial 8080 and target the workload's named port:\n%s", m)
+		}
+	})
+	t.Run("the workload names its port", func(t *testing.T) {
+		t.Parallel()
+		mock := newMockKube()
+		if err := newStateInjector(mock, defaultOASISImage).Apply(context.Background(), resolveEnvironment([]StateEntry{backend}, AgentScope{}, "ns")); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(mock.appliedManifests[0], "- name: http\n          containerPort: 80\n") {
+			t.Errorf("rendered workload does not name its port:\n%s", mock.appliedManifests[0])
+		}
+	})
+	t.Run("a declared targetPort wins", func(t *testing.T) {
+		t.Parallel()
+		m := serviceManifest(t, []StateEntry{backend, {Kind: "service", Name: "backend", Spec: map[string]any{"port": float64(8080), "targetPort": float64(9000)}}})
+		if !strings.Contains(m, "targetPort: 9000\n") {
+			t.Errorf("declared targetPort was not used:\n%s", m)
+		}
+	})
+	t.Run("a service fronting nothing rendered keeps the numeric port", func(t *testing.T) {
+		t.Parallel()
+		m := serviceManifest(t, []StateEntry{{Kind: "service", Name: "external", Spec: map[string]any{"port": float64(8080)}}})
+		if !strings.Contains(m, "targetPort: 8080\n") {
+			t.Errorf("service without a rendered workload should target its own port:\n%s", m)
+		}
+	})
+}
+
+// A Prometheus that serves data lists the targets it scraped it from.
+func TestRenderPromResponses_ListsScrapeTargets(t *testing.T) {
+	t.Parallel()
+	responses, err := buildMetricsResponses("order-service", "ns", map[string]any{"error_rate": "12%"}, []metricSeries{
+		{labels: map[string]string{"__name__": "node_cpu_usage_percent", "node": "lab-worker"}, value: "97"},
+	}, 0, fixedNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Targets struct {
+			Data struct {
+				ActiveTargets []struct {
+					Labels    map[string]string `json:"labels"`
+					ScrapeURL string            `json:"scrapeUrl"`
+					Health    string            `json:"health"`
+				} `json:"activeTargets"`
+			} `json:"data"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal([]byte(responses), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var jobs []string
+	for _, tgt := range doc.Targets.Data.ActiveTargets {
+		jobs = append(jobs, tgt.Labels["job"])
+		if tgt.Health != "up" || tgt.ScrapeURL == "" {
+			t.Errorf("target %v is not a healthy scrape target", tgt)
+		}
+	}
+	if strings.Join(jobs, ",") != "order-service,node-exporter" {
+		t.Errorf("target jobs = %v, want the service and the node exporter", jobs)
+	}
+}

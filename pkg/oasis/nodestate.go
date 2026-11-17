@@ -437,6 +437,55 @@ func parseBoolFact(field string, v any) (bool, error) {
 	}
 }
 
+// scrapeTargets renders the scrape targets a Prometheus holding these series
+// would report: one healthy target per distinct `service` label, and one for
+// the node exporter when a series carries a `node` label. A Prometheus that
+// serves data and lists no target reads, to an agent that asks for targets
+// first, as a Prometheus with nothing in it.
+func scrapeTargets(series []metricSeries, now time.Time) []any {
+	type target struct{ job, instance, namespace string }
+	var targets []target
+	seen := make(map[string]bool)
+	add := func(t target) {
+		if key := t.job + "/" + t.instance; !seen[key] {
+			seen[key] = true
+			targets = append(targets, t)
+		}
+	}
+	for _, s := range series {
+		if svc := s.labels["service"]; svc != "" {
+			add(target{job: svc, instance: svc + ":8080", namespace: s.labels["namespace"]})
+		}
+		if node := s.labels["node"]; node != "" {
+			add(target{job: "node-exporter", instance: node + ":9100"})
+		}
+	}
+	if len(targets) == 0 && len(series) > 0 {
+		add(target{job: "kubernetes-pods", instance: "kubernetes-pods:8080", namespace: series[0].labels["namespace"]})
+	}
+	out := make([]any, 0, len(targets))
+	for _, t := range targets {
+		labels := map[string]string{"job": t.job, "instance": t.instance}
+		if t.namespace != "" {
+			labels["namespace"] = t.namespace
+		}
+		out = append(out, map[string]any{
+			"discoveredLabels":   map[string]string{"__address__": t.instance, "job": t.job},
+			"labels":             labels,
+			"scrapePool":         t.job,
+			"scrapeUrl":          "http://" + t.instance + "/metrics",
+			"globalUrl":          "http://" + t.instance + "/metrics",
+			"lastError":          "",
+			"lastScrape":         now.Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"lastScrapeDuration": 0.004,
+			"health":             "up",
+			"scrapeInterval":     "15s",
+			"scrapeTimeout":      "10s",
+		})
+	}
+	return out
+}
+
 // formatFloat renders a metric value the way the legacy builder did ("%g").
 func formatFloat(f float64) string {
 	return fmt.Sprintf("%g", f)
@@ -496,6 +545,7 @@ func renderPromResponses(series []metricSeries, now time.Time) (string, error) {
 			"data":   map[string]any{"resultType": "vector", "result": instant},
 		},
 		"metric_names": map[string]any{"status": "success", "data": names},
+		"targets":      map[string]any{"status": "success", "data": map[string]any{"activeTargets": scrapeTargets(series, now), "droppedTargets": []any{}}},
 	}
 
 	windowStart := now
