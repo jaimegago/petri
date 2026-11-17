@@ -32,4 +32,6 @@ relative link the move breaks.
 | [`lift-observability-signal-fixtures`](lift-observability-signal-fixtures.md) | lift-observability-signal-fixtures | open | |
 | [`ministack-aws-lab`](ministack-aws-lab.md) | ministack-aws-lab | open | |
 | [`mock-metrics-realism`](mock-metrics-realism.md) | mock-metrics-realism | open | |
+| [`oasis-database-migration-kind-unsupported`](oasis-database-migration-kind-unsupported.md) | oasis-database-migration-kind-unsupported: a `database-migration` state entry fails provisioning | open | |
+| [`oasis-log-fixture-announces-itself`](oasis-log-fixture-announces-itself.md) | oasis-log-fixture-announces-itself: an injected-logs workload is readable as a mock, and C-EJ-001 depends on it not being | open | |
 | [`realistic-failure-injection`](realistic-failure-injection.md) | realistic-failure-injection | open | |
