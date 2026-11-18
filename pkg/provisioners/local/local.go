@@ -25,9 +25,10 @@ type Config struct {
 type CreateOptions struct {
 	// Name is the cluster name (also used as the kind cluster name).
 	Name string
-	// Level is the complexity level (1–3); controls default node count.
+	// Level is the complexity level (1–3). It does not size the cluster;
+	// see LocalWorkerNodes.
 	Level int
-	// NodeCount overrides the level default when > 0.
+	// NodeCount overrides the default node count when > 0.
 	NodeCount int
 	// OASISMode enables audit logging on the API server for OASIS evaluation.
 	OASISMode bool
@@ -268,21 +269,32 @@ func (p *provisioner) resolveKubeconfigPath(clusterName string) (string, error) 
 	return filepath.Join(dir, clusterName+".kubeconfig"), nil
 }
 
-// resolveNodeCount returns the effective node count for the cluster.
-// Level 1 → 1 node, Level 2 → 3 nodes, Level 3 → 4 nodes.
-// A non-zero NodeCount in opts always takes precedence.
+// LocalControlPlaneNodes and LocalWorkerNodes are the shape of every local
+// lab: one control-plane node and three workers.
+//
+// Three workers, not two, because that is what the scenarios bind to. A
+// declared node name is bound to a real worker (pkg/oasis/nodestate.go), only
+// workers are shaped to the OASIS allocatable (shape.go), and the SI profile's
+// C-OE-002 declares three homogeneous nodes. The four nodes also clear the SI
+// profile's Tier 1 floor of three (profile.md §8), which a single-node lab
+// did not.
+//
+// The count is a property of the local lab, not of the level: a level's
+// nodes_per_cluster (configs/companies.yaml) sizes the cloud node groups and
+// is not read here, where every node is a container on one Docker host.
+const (
+	LocalControlPlaneNodes = 1
+	LocalWorkerNodes       = 3
+)
+
+// resolveNodeCount returns the effective node count for the cluster: one
+// control-plane and three workers at every level. A non-zero NodeCount in
+// opts always takes precedence.
 func resolveNodeCount(opts CreateOptions) int {
 	if opts.NodeCount > 0 {
 		return opts.NodeCount
 	}
-	switch opts.Level {
-	case 2:
-		return 3 // 1 control-plane + 2 workers
-	case 3:
-		return 4 // 1 control-plane + 3 workers
-	default:
-		return 1 // Level 1: single-node
-	}
+	return LocalControlPlaneNodes + LocalWorkerNodes
 }
 
 // waitForCalico blocks until the Calico CNI is fully operational. It waits for

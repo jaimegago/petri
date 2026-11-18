@@ -313,7 +313,7 @@ func shapeWorkers(ctx context.Context, ops shapeOps, kubeconfig string, target a
 		}
 	}
 	if len(workers) == 0 {
-		shape.Reason = "the lab has no worker nodes; shaping applies to workers only (a level-1 lab is single-node)"
+		shape.Reason = "the lab has no worker nodes; shaping applies to workers only"
 		return shape, nil
 	}
 

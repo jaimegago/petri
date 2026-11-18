@@ -34,7 +34,6 @@ companies:
           - boutique-cart
           - boutique-checkout
         platform:
-          - argocd
           - cert-manager
           - ingress-nginx
         observability:
@@ -154,7 +153,6 @@ companies:
           - auth-service
           - user-service
         platform:
-          - flux
           - cert-manager
           - ingress-nginx
         observability:
@@ -284,7 +282,6 @@ companies:
           - spring-catalog
           - spring-cart
         platform:
-          - anthos-config-mgmt
           - cert-manager
           - ingress-nginx
         observability:

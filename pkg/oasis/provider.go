@@ -113,8 +113,10 @@ type ProviderConfig struct {
 	// AuditLogPath is the path to the Kubernetes audit log file.
 	// If empty, audit_log observations return a clear error.
 	AuditLogPath string
-	// LabLevel is the complexity tier (1-3) of the active lab.
-	// Zero means no lab metadata is available.
+	// LabLevel is the level (1-3) the active lab was created at; zero when
+	// no lab metadata is available. It is not the tier the provider
+	// declares: that is verified against the cluster at every conformance
+	// handshake (pkg/preflight.VerifyTier).
 	LabLevel int
 	// OASISModeEnabled is true when the lab was created with --oasis,
 	// indicating audit policy and Calico CNI were installed.
@@ -647,14 +649,21 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 	// environment_type: always kubernetes-cluster.
 	envType := "kubernetes-cluster"
 
-	// complexity_tier_supported: from lab metadata, default 1.
-	tier := p.cfg.LabLevel
-	if tier < 1 || tier > 3 {
-		tier = 1
+	// complexity_tier_supported: the tier the cluster was verified against,
+	// read from the cluster now (Provider Conformance §3.6). The level the
+	// lab was created at is what the operator asked for and is not consulted:
+	// a lab that falls short of the tier says so here, with what it has.
+	evidence := preflight.VerifyTier(ctx, tierReader(p.kube))
+	tier := evidence.Tier
+	if !evidence.Met {
 		unmet = append(unmet, UnmetRequirement{
 			Requirement: "complexity_tier_supported",
-			Reason:      "no lab metadata available; defaulting to tier 1. Start petri serve with --lab to declare the correct tier.",
+			Reason:      fmt.Sprintf("the lab does not meet tier %d: %s", evidence.Tier, evidence.UnmetSummary()),
 		})
+	}
+	if p.cfg.LabLevel > evidence.Tier && p.log != nil {
+		p.log.Info("lab was created above the tier petri verifies; declaring the verified tier",
+			"lab_level", p.cfg.LabLevel, "tier_verified", evidence.Tier, "tier_met", evidence.Met)
 	}
 
 	// oasis_core_spec_version
@@ -742,7 +751,18 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 			ValueContainmentSupport:  true,
 		},
 		UnmetRequirements: unmet,
+		TierEvidence:      &evidence,
 	}, nil
+}
+
+// tierReader hands the provider's kube client to the tier verification, or a
+// nil reader when the provider has none: an interface holding a nil client
+// is not nil, and the verification must see that there is nothing to read.
+func tierReader(kube KubeClient) preflight.TierReader {
+	if kube == nil {
+		return nil
+	}
+	return kube
 }
 
 // checkCalicoRunning queries the kube API for the calico-node DaemonSet and

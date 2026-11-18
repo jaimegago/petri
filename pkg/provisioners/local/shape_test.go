@@ -258,7 +258,7 @@ func TestShapeWorkers(t *testing.T) {
 		}
 	})
 
-	t.Run("single-node lab has no workers to shape", func(t *testing.T) {
+	t.Run("a lab with no workers has nothing to shape", func(t *testing.T) {
 		t.Parallel()
 		ops := &fakeShapeOps{before: nodeListJSON(t, kindHostNode("lab-control-plane", true)), configz: kindConfigz}
 		shape, err := shapeWorkers(context.Background(), ops, "kc", mustTarget(t), time.Second, time.Millisecond)

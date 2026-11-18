@@ -77,12 +77,22 @@ type AppsGenerator interface {
 
 // ObservabilityGenerator renders observability stack manifests (Prometheus, Grafana).
 type ObservabilityGenerator interface {
-	Generate(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+	componentGenerator
 }
 
 // PlatformGenerator renders platform component manifests (cert-manager, ingress-nginx).
 type PlatformGenerator interface {
+	componentGenerator
+}
+
+// componentGenerator is a generator over a level's list of named components.
+// Besides the manifests, it says which listed names it installs nothing for
+// and which Deployments the installed ones create, so a create can report
+// the first and wait on the second.
+type componentGenerator interface {
 	Generate(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+	Unrendered(tmplCtx generators.TemplateContext) []string
+	Deployments(tmplCtx generators.TemplateContext) []generators.Deployment
 }
 
 // CommitsGenerator generates realistic git commit history.

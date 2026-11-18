@@ -15,8 +15,15 @@ import (
 
 // Generator renders observability stack manifests based on the lab context.
 type Generator interface {
-	// Generate returns manifests for all observability tools listed in the level spec.
+	// Generate returns manifests for the observability tools in the level
+	// spec that petri installs.
 	Generate(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+	// Unrendered returns the tools the level spec lists and Generate
+	// produces nothing for, in the order listed, for a caller to report.
+	Unrendered(tmplCtx generators.TemplateContext) []string
+	// Deployments returns the Deployments the rendered tools create, for a
+	// caller to wait on.
+	Deployments(tmplCtx generators.TemplateContext) []generators.Deployment
 }
 
 type generator struct {
@@ -33,49 +40,68 @@ func NewWithFS(fsys fs.FS) Generator {
 	return &generator{fs: fsys}
 }
 
-// Generate renders manifests for each observability tool in the level spec.
-// Unknown tools are silently skipped (not all tools have templates).
+// tool is what the generator installs for one observability tool name.
+type tool struct {
+	// source is the template; out is the rendered path.
+	source, out string
+	// deployments are the Deployments the manifest creates.
+	deployments []generators.Deployment
+}
+
+// tools is every observability tool petri installs. A name a level spec lists
+// and this table lacks — loki, tempo, jaeger, otel-collector,
+// cloud-monitoring, cloud-logging — is installed by nothing and is returned
+// by Unrendered.
+var tools = map[string]tool{
+	"prometheus": {
+		source:      "observability/prometheus.yaml.tmpl",
+		out:         "observability/prometheus.yaml",
+		deployments: []generators.Deployment{{Namespace: "monitoring", Name: "prometheus"}},
+	},
+	"grafana": {
+		source:      "observability/grafana.yaml.tmpl",
+		out:         "observability/grafana.yaml",
+		deployments: []generators.Deployment{{Namespace: "monitoring", Name: "grafana"}},
+	},
+}
+
+// Generate renders manifests for each observability tool in the level spec
+// that petri installs. The rest are named by Unrendered.
 func (g *generator) Generate(_ context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error) {
 	var files []generators.RenderedFile
 
-	for _, tool := range tmplCtx.Level.Observability {
-		rendered, err := g.renderTool(tool, tmplCtx)
-		if err != nil {
-			return nil, fmt.Errorf("rendering observability tool %q: %w", tool, err)
+	for _, name := range tmplCtx.Level.Observability {
+		t, ok := tools[name]
+		if !ok {
+			continue
 		}
-		files = append(files, rendered...)
+		content, err := g.renderFile(t.source, tmplCtx)
+		if err != nil {
+			return nil, fmt.Errorf("rendering observability tool %q: %w", name, err)
+		}
+		files = append(files, generators.RenderedFile{Path: t.out, Content: content})
 	}
 	return files, nil
 }
 
-// renderTool renders manifests for a single observability tool.
-// Returns an empty slice for tools without templates (not an error).
-func (g *generator) renderTool(tool string, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error) {
-	tmplPath, outPath := templatePathFor(tool)
-	if tmplPath == "" {
-		// No template for this tool — skip silently.
-		return nil, nil
+// Unrendered returns the listed tools petri installs nothing for.
+func (g *generator) Unrendered(tmplCtx generators.TemplateContext) []string {
+	var names []string
+	for _, name := range tmplCtx.Level.Observability {
+		if _, ok := tools[name]; !ok {
+			names = append(names, name)
+		}
 	}
-
-	content, err := g.renderFile(tmplPath, tmplCtx)
-	if err != nil {
-		return nil, err
-	}
-	return []generators.RenderedFile{{Path: outPath, Content: content}}, nil
+	return names
 }
 
-// templatePathFor maps an observability tool name to its template and output paths.
-func templatePathFor(tool string) (tmplPath, outPath string) {
-	switch tool {
-	case "prometheus":
-		return "observability/prometheus.yaml.tmpl", "observability/prometheus.yaml"
-	case "grafana":
-		return "observability/grafana.yaml.tmpl", "observability/grafana.yaml"
-	default:
-		// Tools like loki, tempo, jaeger, otel-collector, cloud-monitoring, cloud-logging
-		// are managed by cloud-native integrations or Helm charts outside Petri templates.
-		return "", ""
+// Deployments returns the Deployments of the listed tools petri installs.
+func (g *generator) Deployments(tmplCtx generators.TemplateContext) []generators.Deployment {
+	var out []generators.Deployment
+	for _, name := range tmplCtx.Level.Observability {
+		out = append(out, tools[name].deployments...)
 	}
+	return out
 }
 
 func (g *generator) renderFile(templatePath string, data any) (string, error) {

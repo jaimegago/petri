@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +23,9 @@ import (
 // ── mockPlatformGen / mockObsGen ─────────────────────────────────────────────
 
 type mockPlatformGen struct {
-	generateFn func(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+	generateFn  func(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+	unrendered  []string
+	deployments []generators.Deployment
 }
 
 func (m *mockPlatformGen) Generate(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error) {
@@ -31,8 +35,16 @@ func (m *mockPlatformGen) Generate(ctx context.Context, tmplCtx generators.Templ
 	return []generators.RenderedFile{{Path: "platform.yaml", Content: "apiVersion: v1\nkind: Namespace"}}, nil
 }
 
+func (m *mockPlatformGen) Unrendered(generators.TemplateContext) []string { return m.unrendered }
+
+func (m *mockPlatformGen) Deployments(generators.TemplateContext) []generators.Deployment {
+	return m.deployments
+}
+
 type mockObsGen struct {
-	generateFn func(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+	generateFn  func(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error)
+	unrendered  []string
+	deployments []generators.Deployment
 }
 
 func (m *mockObsGen) Generate(ctx context.Context, tmplCtx generators.TemplateContext) ([]generators.RenderedFile, error) {
@@ -40,6 +52,12 @@ func (m *mockObsGen) Generate(ctx context.Context, tmplCtx generators.TemplateCo
 		return m.generateFn(ctx, tmplCtx)
 	}
 	return []generators.RenderedFile{{Path: "obs.yaml", Content: "apiVersion: v1\nkind: Namespace"}}, nil
+}
+
+func (m *mockObsGen) Unrendered(generators.TemplateContext) []string { return m.unrendered }
+
+func (m *mockObsGen) Deployments(generators.TemplateContext) []generators.Deployment {
+	return m.deployments
 }
 
 // ── applyPlatformManifests ───────────────────────────────────────────────────
@@ -116,6 +134,85 @@ func TestApplyPlatformManifests_ApplyError(t *testing.T) {
 	}, kctl)
 	if err == nil {
 		t.Error("expected error when apply fails")
+	}
+}
+
+// An applied manifest is not a running component: the create waits for
+// every Deployment the generator names.
+func TestApplyPlatformManifests_WaitsForDeployments(t *testing.T) {
+	kctl := &mockKubectl{}
+	o := New(Config{}, Deps{
+		Log: logger.Nop(),
+		PlatformGen: &mockPlatformGen{deployments: []generators.Deployment{
+			{Namespace: "cert-manager", Name: "cert-manager"},
+			{Namespace: "cert-manager", Name: "cert-manager-webhook"},
+		}},
+	})
+	err := o.applyPlatformManifests(context.Background(), CreateOptions{
+		Lab:     newTestLab(types.CloudProviderLocal),
+		Company: newTestCompany(),
+		Spec:    newTestCompany().Levels[1],
+	}, kctl)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"cert-manager/cert-manager", "cert-manager/cert-manager-webhook"}
+	if !slices.Equal(kctl.rollouts, want) {
+		t.Errorf("rollouts waited on = %v, want %v", kctl.rollouts, want)
+	}
+}
+
+// A Deployment that never rolls out is named in the error, and the others
+// are still waited on.
+func TestApplyPlatformManifests_RolloutFailureIsNamed(t *testing.T) {
+	kctl := &mockKubectl{rolloutFn: func(_, deployment string) error {
+		if deployment == "cert-manager-webhook" {
+			return errors.New("timed out waiting for the condition")
+		}
+		return nil
+	}}
+	o := New(Config{}, Deps{
+		Log: logger.Nop(),
+		PlatformGen: &mockPlatformGen{deployments: []generators.Deployment{
+			{Namespace: "cert-manager", Name: "cert-manager-webhook"},
+			{Namespace: "ingress-nginx", Name: "ingress-nginx-controller"},
+		}},
+	})
+	err := o.applyPlatformManifests(context.Background(), CreateOptions{
+		Lab:     newTestLab(types.CloudProviderLocal),
+		Company: newTestCompany(),
+		Spec:    newTestCompany().Levels[1],
+	}, kctl)
+	if err == nil || !strings.Contains(err.Error(), "cert-manager/cert-manager-webhook") {
+		t.Fatalf("error = %v, want one naming cert-manager/cert-manager-webhook", err)
+	}
+	if len(kctl.rollouts) != 2 {
+		t.Errorf("rollouts waited on = %v, want both", kctl.rollouts)
+	}
+}
+
+// A component the level lists and nothing installs is recorded on the lab,
+// platform and observability alike.
+func TestRecordNotInstalled(t *testing.T) {
+	o := New(Config{}, Deps{
+		Log:              logger.Nop(),
+		PlatformGen:      &mockPlatformGen{unrendered: []string{"vault", "external-dns"}},
+		ObservabilityGen: &mockObsGen{unrendered: []string{"loki"}},
+	})
+	lab := newTestLab(types.CloudProviderLocal)
+	o.recordNotInstalled(CreateOptions{Lab: lab, Company: newTestCompany(), Spec: newTestCompany().Levels[1]})
+
+	want := []string{"vault", "external-dns", "loki"}
+	if !slices.Equal(lab.Metadata.NotInstalled, want) {
+		t.Errorf("NotInstalled = %v, want %v", lab.Metadata.NotInstalled, want)
+	}
+
+	// A lab whose lists petri installs in full records nothing.
+	o = New(Config{}, Deps{Log: logger.Nop(), PlatformGen: &mockPlatformGen{}, ObservabilityGen: &mockObsGen{}})
+	lab = newTestLab(types.CloudProviderLocal)
+	o.recordNotInstalled(CreateOptions{Lab: lab, Company: newTestCompany(), Spec: newTestCompany().Levels[1]})
+	if len(lab.Metadata.NotInstalled) != 0 {
+		t.Errorf("NotInstalled = %v, want none", lab.Metadata.NotInstalled)
 	}
 }
 

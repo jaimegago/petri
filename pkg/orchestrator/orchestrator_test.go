@@ -100,9 +100,12 @@ func (m *mockTFProv) Output(ctx context.Context, workDir string, env []string) (
 }
 
 type mockKubectl struct {
-	applyFn func(ctx context.Context, manifest string) error
-	waitFn  func(ctx context.Context, timeout time.Duration) error
-	applied []string
+	applyFn   func(ctx context.Context, manifest string) error
+	waitFn    func(ctx context.Context, timeout time.Duration) error
+	rolloutFn func(namespace, deployment string) error
+	applied   []string
+	// rollouts records every WaitForRollout call as "namespace/deployment".
+	rollouts []string
 }
 
 func (m *mockKubectl) ApplyManifest(ctx context.Context, manifest string) error {
@@ -120,7 +123,11 @@ func (m *mockKubectl) WaitForNodes(ctx context.Context, timeout time.Duration) e
 	return nil
 }
 
-func (m *mockKubectl) WaitForRollout(_ context.Context, _, _ string, _ time.Duration) error {
+func (m *mockKubectl) WaitForRollout(_ context.Context, namespace, deployment string, _ time.Duration) error {
+	m.rollouts = append(m.rollouts, namespace+"/"+deployment)
+	if m.rolloutFn != nil {
+		return m.rolloutFn(namespace, deployment)
+	}
 	return nil
 }
 

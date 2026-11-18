@@ -96,6 +96,11 @@ data:
   use-forwarded-headers: "true"
   compute-full-forwarded-for: "true"
   use-proxy-protocol: "false"
+  # nginx defaults to one worker per CPU it can see, and a kind node sees the
+  # whole Docker host. On a ten-CPU host that was ten workers resting at
+  # 247Mi of a 256Mi limit, and every reload - one per Ingress created -
+  # ended in an OOM kill. Two workers rest near 90Mi on any host.
+  worker-processes: "2"
 ---
 apiVersion: networking.k8s.io/v1
 kind: IngressClass
@@ -166,7 +171,7 @@ spec:
             memory: "128Mi"
             cpu: "100m"
           limits:
-            memory: "256Mi"
+            memory: "512Mi"
             cpu: "500m"
 ---
 apiVersion: v1

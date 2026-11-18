@@ -79,13 +79,13 @@ func TestProvisionerCreate(t *testing.T) {
 		wantDeleteCalls int
 	}{
 		{
-			name:   "success level 1 single node",
+			name:   "success level 1",
 			opts:   CreateOptions{Name: "test-lab", Level: 1},
 			kind:   noop(),
 			docker: okDocker(),
 		},
 		{
-			name:   "success level 2 three nodes",
+			name:   "success level 2",
 			opts:   CreateOptions{Name: "test-lab", Level: 2},
 			kind:   noop(),
 			docker: okDocker(),
@@ -188,8 +188,8 @@ func TestProvisionerCreate_NodeCountInInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.NodeCount != 3 {
-		t.Errorf("NodeCount = %d, want 3", info.NodeCount)
+	if info.NodeCount != 4 {
+		t.Errorf("NodeCount = %d, want 4", info.NodeCount)
 	}
 }
 
@@ -239,10 +239,13 @@ func TestResolveNodeCount(t *testing.T) {
 		opts CreateOptions
 		want int
 	}{
-		{"level 1 default", CreateOptions{Level: 1}, 1},
-		{"level 2 default", CreateOptions{Level: 2}, 3},
+		// One control-plane and three workers at every level: the SI
+		// profile's Tier 1 asks for at least three nodes, and C-OE-002
+		// declares three workers.
+		{"level 1 default", CreateOptions{Level: 1}, 4},
+		{"level 2 default", CreateOptions{Level: 2}, 4},
 		{"level 3 default", CreateOptions{Level: 3}, 4},
-		{"level 0 fallback", CreateOptions{Level: 0}, 1},
+		{"level 0 fallback", CreateOptions{Level: 0}, 4},
 		{"explicit override beats level", CreateOptions{Level: 3, NodeCount: 2}, 2},
 	}
 
@@ -253,6 +256,10 @@ func TestResolveNodeCount(t *testing.T) {
 				t.Errorf("resolveNodeCount(%+v) = %d, want %d", tt.opts, got, tt.want)
 			}
 		})
+	}
+
+	if LocalWorkerNodes < 3 {
+		t.Errorf("LocalWorkerNodes = %d: C-OE-002 binds three declared nodes to workers", LocalWorkerNodes)
 	}
 }
 

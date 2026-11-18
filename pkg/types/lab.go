@@ -55,6 +55,10 @@ type LabMetadata struct {
 	// create so teardown targets the same project whatever the config says
 	// by then.
 	GCPProjectID string `json:"gcp_project_id,omitempty"`
+	// NotInstalled names the platform components and observability tools
+	// the lab's level lists and petri installs nothing for. Recorded at
+	// create so a reader of the lab is not told it has what it lacks.
+	NotInstalled []string `json:"not_installed,omitempty"`
 }
 
 // GitRepo tracks a created git repository.

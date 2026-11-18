@@ -34,10 +34,10 @@ Companies have different:
 ### Complexity Levels
 
 **Level 1 - Validation**
-- Single K8s cluster (1 node)
+- Single K8s cluster (local: 1 control-plane + 3 workers)
 - 1-3 microservices
 - Minimal observability (Prometheus + Grafana)
-- Basic platform (ArgoCD, cert-manager, ingress)
+- Basic platform (cert-manager, ingress)
 - Target: <5m local, <10m cloud
 
 **Level 2 - Integration**
@@ -441,7 +441,6 @@ companies:
           - boutique-cart
           - boutique-checkout
         platform:
-          - argocd
           - cert-manager
           - ingress-nginx
         observability:

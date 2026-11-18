@@ -2,6 +2,7 @@ package observability_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -71,9 +72,38 @@ func TestGenerate_SkipsUnknownTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	// Only prometheus has a template; others are skipped silently.
+	// Only prometheus is installed; Unrendered names the rest.
 	if len(files) != 1 {
 		t.Errorf("expected 1 file (prometheus only), got %d", len(files))
+	}
+	if got, want := g.Unrendered(ctx), []string{"loki", "tempo", "cloud-monitoring"}; !slices.Equal(got, want) {
+		t.Errorf("Unrendered = %v, want %v", got, want)
+	}
+}
+
+// Every Deployment the generator tells a caller to wait on is one the
+// embedded templates create.
+func TestDeployments_AreCreatedByTheEmbeddedTemplates(t *testing.T) {
+	g := observability.New()
+	ctx := makeContext([]string{"prometheus", "loki", "grafana"})
+
+	files, err := g.Generate(context.Background(), ctx)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var rendered strings.Builder
+	for _, f := range files {
+		rendered.WriteString(f.Content)
+	}
+	deployments := g.Deployments(ctx)
+	if len(deployments) != 2 {
+		t.Errorf("Deployments = %v, want prometheus and grafana", deployments)
+	}
+	for _, d := range deployments {
+		want := "kind: Deployment\nmetadata:\n  name: " + d.Name + "\n  namespace: " + d.Namespace + "\n"
+		if !strings.Contains(rendered.String(), want) {
+			t.Errorf("no rendered manifest creates Deployment %s/%s", d.Namespace, d.Name)
+		}
 	}
 }
 

@@ -157,7 +157,23 @@ petri serve [flags]
 
 Implements the OASIS evaluation spec for scenario-based testing of AI agents against live Kubernetes clusters.
 
-For best results, create the lab with `--oasis` to auto-configure audit logging and Calico CNI (NetworkPolicy enforcement), and to shape every worker node's allocatable to exactly `cpu: 4000m`, `memory: 4Gi`. Scenarios that declare `allocatable_cpu` / `allocatable_memory` on a node entry are verified against the real node and refused on mismatch; a lab whose Docker host is too small for the target is created unshaped, with a warning, and the shaping outcome is recorded in lab state. Use level 3 (three workers) for scenarios that declare three nodes:
+For best results, create the lab with `--oasis` to auto-configure audit logging and Calico CNI (NetworkPolicy enforcement), and to shape every worker node's allocatable to exactly `cpu: 4000m`, `memory: 4Gi`. Scenarios that declare `allocatable_cpu` / `allocatable_memory` on a node entry are verified against the real node and refused on mismatch; a lab whose Docker host is too small for the target is created unshaped, with a warning, and the shaping outcome is recorded in lab state. Every local lab has one control-plane node and three workers, at every level, so a scenario that declares three nodes binds each to a worker.
+
+The complexity tier the provider declares is **verified, not configured**. On every `GET /v1/conformance` petri reads the cluster and checks it against the SI profile's Tier 1 environment: at least three Ready nodes, a metrics backend, a dashboard service, an ingress controller, and a certificate controller with its CRDs. `complexity_tier_supported` is the tier that check covers — `1`, whatever `--level` the lab was created at — and the response carries what was read as a top-level `tier_evidence` object:
+
+```json
+"tier_evidence": {
+  "tier": 1,
+  "met": true,
+  "observed_at": "2026-11-18T10:21:07Z",
+  "checks": [
+    {"requirement": "nodes", "required": "a single cluster of at least 3 Ready nodes",
+     "observed": "4 Ready of 4 (1 control-plane, 3 worker)", "status": "met"}
+  ]
+}
+```
+
+`status` is `met`, `unmet` or `not_assessed`. A lab that falls short answers `supported: false`, with an `unmet_requirements` entry for `complexity_tier_supported` that names the requirement, what was observed and what was required. The namespace count, the microservice count and the security zones are reported as `not_assessed`: the profile does not yet say what counts toward them, and petri states what the lab has without deciding. See [ADR 0019](decisions/0019-the-tier-is-read-from-the-cluster.md).
 
 ```bash
 petri create --company=acme --level=1 --local --oasis --name=eval-lab

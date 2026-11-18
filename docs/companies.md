@@ -32,7 +32,7 @@ Companies are defined in `configs/companies.yaml`. Each profile maps to a specif
 
 ### Level 1 — Validation
 
-- 1 cluster, 1 node (local) or small cloud nodes
+- 1 cluster: 1 control-plane and 3 workers (local, at every level) or small cloud nodes
 - 1-3 microservices
 - Basic platform + observability
 - Single namespace

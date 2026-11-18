@@ -188,6 +188,7 @@ func (o *Orchestrator) createLocal(ctx context.Context, opts CreateOptions, rb *
 
 	// ── Step 5: Deploy platform components ──────────────────────────────────
 	prog.Step("Deploying platform components")
+	o.recordNotInstalled(opts)
 	if err := o.applyPlatformManifests(ctx, opts, kctl); err != nil {
 		o.log.Warn("Platform manifest deployment had errors; continuing", "error", err)
 	}
@@ -349,39 +350,45 @@ func (o *Orchestrator) createLocalGitRepos(
 	return gitRepos, nil
 }
 
-// applyPlatformManifests generates and applies platform component manifests.
+// componentRolloutTimeout bounds the wait for one generator's Deployments to
+// roll out after their manifests are applied: all of them together, since
+// they roll out side by side. It covers cold image pulls on a fresh node.
+const componentRolloutTimeout = 5 * time.Minute
+
+// applyPlatformManifests generates and applies platform component manifests,
+// then waits for the Deployments they create.
 func (o *Orchestrator) applyPlatformManifests(ctx context.Context, opts CreateOptions, kctl KubectlClient) error {
 	if o.deps.PlatformGen == nil {
 		o.log.Warn("Platform generator not configured; skipping platform deployment")
 		return nil
 	}
-	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
-	files, err := o.deps.PlatformGen.Generate(ctx, tmplCtx)
-	if err != nil {
-		return fmt.Errorf("generating platform manifests: %w", err)
-	}
-	var errs []string
-	for _, f := range files {
-		if err := kctl.ApplyManifest(ctx, f.Content); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", f.Path, err))
-		}
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("applying platform manifests: %s", strings.Join(errs, "; "))
-	}
-	return nil
+	return o.applyComponents(ctx, opts, kctl, o.deps.PlatformGen, "platform")
 }
 
-// applyObservabilityManifests generates and applies observability stack manifests.
+// applyObservabilityManifests generates and applies observability stack
+// manifests, then waits for the Deployments they create.
 func (o *Orchestrator) applyObservabilityManifests(ctx context.Context, opts CreateOptions, kctl KubectlClient) error {
 	if o.deps.ObservabilityGen == nil {
 		o.log.Warn("Observability generator not configured; skipping observability deployment")
 		return nil
 	}
+	return o.applyComponents(ctx, opts, kctl, o.deps.ObservabilityGen, "observability")
+}
+
+// applyComponents applies one generator's manifests and waits for every
+// Deployment they create to roll out. An accepted manifest is not a running
+// component, and a lab marked ACTIVE is read as having what it lists: the
+// OASIS provider reports the tier from what is running (pkg/preflight), so a
+// create that returned before the rollouts would hand over a lab that fails
+// the tier check for as long as an image takes to pull.
+//
+// Every failure is collected and returned together; the caller decides
+// whether it is fatal.
+func (o *Orchestrator) applyComponents(ctx context.Context, opts CreateOptions, kctl KubectlClient, gen componentGenerator, what string) error {
 	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
-	files, err := o.deps.ObservabilityGen.Generate(ctx, tmplCtx)
+	files, err := gen.Generate(ctx, tmplCtx)
 	if err != nil {
-		return fmt.Errorf("generating observability manifests: %w", err)
+		return fmt.Errorf("generating %s manifests: %w", what, err)
 	}
 	var errs []string
 	for _, f := range files {
@@ -390,9 +397,42 @@ func (o *Orchestrator) applyObservabilityManifests(ctx context.Context, opts Cre
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("applying observability manifests: %s", strings.Join(errs, "; "))
+		return fmt.Errorf("applying %s manifests: %s", what, strings.Join(errs, "; "))
+	}
+	// One deadline for the lot: a Deployment waited on late has been
+	// rolling out since the apply, and a cluster that can pull nothing
+	// should cost one timeout, not one per Deployment.
+	deadline := time.Now().Add(componentRolloutTimeout)
+	for _, d := range gen.Deployments(tmplCtx) {
+		remaining := max(time.Until(deadline), time.Second)
+		if err := kctl.WaitForRollout(ctx, d.Namespace, d.Name, remaining); err != nil {
+			errs = append(errs, fmt.Sprintf("%s/%s: %v", d.Namespace, d.Name, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("waiting for %s deployments: %s", what, strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// recordNotInstalled names, in the lab's metadata and in the log, every
+// platform component and observability tool the level lists and petri
+// installs nothing for. The lists in configs/companies.yaml describe a
+// company; this is the part of the description the lab does not have.
+func (o *Orchestrator) recordNotInstalled(opts CreateOptions) {
+	tmplCtx := generators.NewTemplateContext(opts.Lab, opts.Company, opts.Spec)
+	var names []string
+	if o.deps.PlatformGen != nil {
+		names = append(names, o.deps.PlatformGen.Unrendered(tmplCtx)...)
+	}
+	if o.deps.ObservabilityGen != nil {
+		names = append(names, o.deps.ObservabilityGen.Unrendered(tmplCtx)...)
+	}
+	opts.Lab.Metadata.NotInstalled = names
+	if len(names) > 0 {
+		o.log.Warn("Components listed for this level are not installed: petri has nothing to install for them",
+			"lab", opts.Lab.Name, "level", opts.Lab.Level, "components", strings.Join(names, ", "))
+	}
 }
 
 // applyAppManifests generates and applies Kubernetes manifests for all apps.
@@ -431,6 +471,9 @@ func printLocalConnectionInfo(lab *types.Lab, cluster *localprov.ClusterInfo) {
 	fmt.Printf("  Access:  export KUBECONFIG=%s\n", cluster.KubeconfigPath)
 	if p := cluster.IngressHostPorts; p != nil {
 		fmt.Printf("  Ingress: http://localhost:%d  https://localhost:%d\n", p.HTTP, p.HTTPS)
+	}
+	if len(lab.Metadata.NotInstalled) > 0 {
+		fmt.Printf("  Listed, not installed: %s\n", strings.Join(lab.Metadata.NotInstalled, ", "))
 	}
 	fmt.Printf("  Expires: %s\n\n", lab.ExpiresAt.Format("2006-01-02 15:04 UTC"))
 }
@@ -532,6 +575,7 @@ func (o *Orchestrator) createCloud(ctx context.Context, opts CreateOptions, rb *
 
 	// ── Step 7: Deploy platform components ──────────────────────────────────
 	prog.Step("Deploying platform components")
+	o.recordNotInstalled(opts)
 	for i, kctl := range kctls {
 		if err := o.applyPlatformManifests(ctx, opts, kctl); err != nil {
 			o.log.Warn("Platform manifest deployment had errors; continuing", "error", err, "cluster", opts.Lab.Metadata.Clusters[i].Name)

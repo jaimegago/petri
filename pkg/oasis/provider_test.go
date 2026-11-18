@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -967,8 +968,184 @@ func TestConformance_NetworkPolicyTrue_WhenCalicoRunning(t *testing.T) {
 	if !resp.Requirements.NetworkPolicyEnforcement {
 		t.Error("network_policy_enforcement should be true when calico-node and calico-kube-controllers are ready")
 	}
-	if resp.Requirements.ComplexityTierSupported != 2 {
-		t.Errorf("complexity_tier_supported = %d, want 2", resp.Requirements.ComplexityTierSupported)
+	// The lab was created at level 2 and the provider still declares 1:
+	// the tier is what it verified, never the level echoed back.
+	if resp.Requirements.ComplexityTierSupported != 1 {
+		t.Errorf("complexity_tier_supported = %d, want 1", resp.Requirements.ComplexityTierSupported)
+	}
+}
+
+// seedTier1Cluster makes the mock cluster one that meets the SI profile's
+// Tier 1: four Ready nodes and every required component running.
+func seedTier1Cluster(mock *mockKubeClient) {
+	node := func(name string, controlPlane bool) string {
+		labels := `{}`
+		if controlPlane {
+			labels = `{"node-role.kubernetes.io/control-plane":""}`
+		}
+		return fmt.Sprintf(`{"metadata":{"name":%q,"labels":%s},"status":{"conditions":[{"type":"Ready","status":"True"}]}}`, name, labels)
+	}
+	mock.resources["nodes/"] = `{"items":[` + strings.Join([]string{
+		node("lab-control-plane", true), node("lab-worker", false), node("lab-worker2", false), node("lab-worker3", false),
+	}, ",") + `]}`
+	ready := `{"spec":{"replicas":1},"status":{"readyReplicas":1}}`
+	for _, d := range []string{
+		"monitoring/prometheus", "monitoring/grafana", "ingress-nginx/ingress-nginx-controller",
+		"cert-manager/cert-manager", "cert-manager/cert-manager-cainjector", "cert-manager/cert-manager-webhook",
+	} {
+		mock.resources["deployments/"+d] = ready
+	}
+	for _, crd := range []string{
+		"certificates.cert-manager.io", "certificaterequests.cert-manager.io",
+		"issuers.cert-manager.io", "clusterissuers.cert-manager.io",
+	} {
+		mock.resources["customresourcedefinitions//"+crd] = `{"status":{"conditions":[{"type":"Established","status":"True"}]}}`
+	}
+}
+
+func unmetReason(resp ConformanceResponse, requirement string) (string, bool) {
+	for _, u := range resp.UnmetRequirements {
+		if u.Requirement == requirement {
+			return u.Reason, true
+		}
+	}
+	return "", false
+}
+
+// The tier a provider declares is verified against the cluster, and the
+// evidence it read travels with the declaration (Provider Conformance §3.6).
+func TestConformance_TierEvidenceIsReadFromTheCluster(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	seedTier1Cluster(mock)
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := New(ProviderConfig{LabLevel: 1}, mock, log).(*petriProvider)
+
+	resp, err := p.Conformance(context.Background(), "oasis-profile-software-infrastructure")
+	if err != nil {
+		t.Fatalf("Conformance() error: %v", err)
+	}
+	ev := resp.TierEvidence
+	if ev == nil {
+		t.Fatal("conformance response carries no tier_evidence")
+	}
+	if ev.Tier != 1 || !ev.Met {
+		t.Fatalf("tier_evidence tier = %d, met = %v, want tier 1 met; unmet: %s", ev.Tier, ev.Met, ev.UnmetSummary())
+	}
+	if resp.Requirements.ComplexityTierSupported != ev.Tier {
+		t.Errorf("complexity_tier_supported = %d, tier_evidence.tier = %d: the declaration is not the verified tier",
+			resp.Requirements.ComplexityTierSupported, ev.Tier)
+	}
+	if reason, unmet := unmetReason(resp, "complexity_tier_supported"); unmet {
+		t.Errorf("complexity_tier_supported is unmet on a lab that meets the tier: %s", reason)
+	}
+	var nodes string
+	for _, c := range ev.Checks {
+		if c.Requirement == "nodes" {
+			nodes = c.Observed
+		}
+	}
+	if nodes != "4 Ready of 4 (1 control-plane, 3 worker)" {
+		t.Errorf("nodes observed %q, want the mock cluster's four nodes", nodes)
+	}
+}
+
+// A lab that does not meet the tier says so. The level it was created at is
+// not consulted: here the operator asked for level 3 and the cluster is one
+// node with nothing on it.
+func TestConformance_LabBelowTheTierIsNotDeclaredConformant(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	mock.resources["nodes/"] = `{"items":[{"metadata":{"name":"lab-control-plane","labels":{"node-role.kubernetes.io/control-plane":""}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}`
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := New(ProviderConfig{LabLevel: 3}, mock, log).(*petriProvider)
+
+	resp, err := p.Conformance(context.Background(), "oasis-profile-software-infrastructure")
+	if err != nil {
+		t.Fatalf("Conformance() error: %v", err)
+	}
+	if resp.Supported {
+		t.Error("supported = true for a single-node lab with no platform")
+	}
+	if resp.Requirements.ComplexityTierSupported == 3 {
+		t.Error("complexity_tier_supported echoes the lab's level")
+	}
+	if resp.TierEvidence == nil || resp.TierEvidence.Met {
+		t.Fatalf("tier_evidence = %+v, want present and unmet", resp.TierEvidence)
+	}
+	reason, unmet := unmetReason(resp, "complexity_tier_supported")
+	if !unmet {
+		t.Fatal("no unmet_requirements entry for complexity_tier_supported")
+	}
+	for _, want := range []string{
+		"does not meet tier 1",
+		"nodes: 1 Ready of 1",
+		"at least 3 Ready nodes",
+		"certificate-management: deployment cert-manager/cert-manager not found",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("reason %q does not carry %q", reason, want)
+		}
+	}
+}
+
+// tier_evidence sits beside the requirements map, not inside it: the SI
+// profile's schema for that map sets additionalProperties false, and a ninth
+// key would fail the runner's schema validation.
+func TestConformance_TierEvidenceStaysOutOfTheRequirementsMap(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockKube()
+	seedTier1Cluster(mock)
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := New(ProviderConfig{LabLevel: 1}, mock, log).(*petriProvider)
+
+	resp, err := p.Conformance(context.Background(), "oasis-profile-software-infrastructure")
+	if err != nil {
+		t.Fatalf("Conformance() error: %v", err)
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshalling response: %v", err)
+	}
+	var wire struct {
+		Requirements map[string]json.RawMessage `json:"requirements"`
+		TierEvidence struct {
+			Tier   int  `json:"tier"`
+			Met    bool `json:"met"`
+			Checks []struct {
+				Requirement string `json:"requirement"`
+				Required    string `json:"required"`
+				Observed    string `json:"observed"`
+				Status      string `json:"status"`
+			} `json:"checks"`
+		} `json:"tier_evidence"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshalling response: %v", err)
+	}
+	wantKeys := []string{
+		"audit_policy_installation", "complexity_tier_supported", "environment_type",
+		"evidence_sources_available", "network_policy_enforcement", "oasis_core_spec_version",
+		"state_injection", "value_containment_support",
+	}
+	var gotKeys []string
+	for k := range wire.Requirements {
+		gotKeys = append(gotKeys, k)
+	}
+	sort.Strings(gotKeys)
+	if !slices.Equal(gotKeys, wantKeys) {
+		t.Errorf("requirements keys = %v, want the SI schema's eight: %v", gotKeys, wantKeys)
+	}
+	if wire.TierEvidence.Tier != 1 || !wire.TierEvidence.Met || len(wire.TierEvidence.Checks) == 0 {
+		t.Fatalf("tier_evidence on the wire = %+v", wire.TierEvidence)
+	}
+	for _, c := range wire.TierEvidence.Checks {
+		if c.Requirement == "" || c.Required == "" || c.Observed == "" || c.Status == "" {
+			t.Errorf("check with an empty field on the wire: %+v", c)
+		}
 	}
 }
 

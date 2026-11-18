@@ -7,6 +7,8 @@ package oasis
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/jaimegago/petri/pkg/preflight"
 )
 
 // ProvisionRequest is sent by oasisctl to request a new evaluation environment.
@@ -178,6 +180,12 @@ type ConformanceResponse struct {
 	Supported             bool                    `json:"supported"`
 	Requirements          ConformanceRequirements `json:"requirements"`
 	UnmetRequirements     []UnmetRequirement      `json:"unmet_requirements"`
+	// TierEvidence is what the provider read from the cluster when it
+	// verified the complexity tier it declares (Provider Conformance §3.6):
+	// one check per requirement of the tier, each with what was observed.
+	// It sits beside requirements, not inside it, because the SI profile's
+	// schema closes that map. Nil for a profile petri does not implement.
+	TierEvidence *preflight.TierEvidence `json:"tier_evidence,omitempty"`
 }
 
 // ConformanceRequirements holds the eight SI profile requirement keys per SI provider-conformance.md §4.

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -147,6 +148,12 @@ func (c *CLI) runInfo(name string) error {
 			kcFlag = fmt.Sprintf(" --kubeconfig=%s", kubeconfigPath)
 		}
 		for _, p := range spec.Platform {
+			// A component the level lists and petri installed nothing for
+			// gets no access hint: there is nothing to reach.
+			if slices.Contains(lab.Metadata.NotInstalled, p) {
+				fmt.Printf("  %-16s listed for this level; not installed\n", p)
+				continue
+			}
 			switch strings.ToLower(p) {
 			case "ingress-nginx":
 				if localIngress {
@@ -176,6 +183,10 @@ func (c *CLI) runInfo(name string) error {
 			kcFlag = fmt.Sprintf(" --kubeconfig=%s", kubeconfigPath)
 		}
 		for _, tool := range spec.Observability {
+			if slices.Contains(lab.Metadata.NotInstalled, tool) {
+				fmt.Printf("  %-13s listed for this level; not installed\n", tool)
+				continue
+			}
 			switch strings.ToLower(tool) {
 			case "prometheus":
 				if localIngress {
@@ -216,6 +227,10 @@ func (c *CLI) runInfo(name string) error {
 		}
 		hasObs := false
 		for _, tool := range spec.Observability {
+			if slices.Contains(lab.Metadata.NotInstalled, tool) {
+				fmt.Printf("  %-13s listed for this level; not installed\n", tool)
+				continue
+			}
 			switch strings.ToLower(tool) {
 			case "prometheus", "grafana":
 				if !hasObs {

@@ -53,7 +53,8 @@ import (
 // nodeRoleControlPlaneLabel is the label kubeadm (and kind) stamp on
 // control-plane nodes. Binding prefers worker nodes so a pinned pod lands
 // where a scheduled workload plausibly would; control-plane nodes are used
-// only when no worker exists (a level-1 lab is single-node).
+// only when the workers run out (a lab created with a node-count override,
+// or a cluster petri did not create).
 const nodeRoleControlPlaneLabel = "node-role.kubernetes.io/control-plane"
 
 // Node fact keys. The vocabulary is closed; see the file comment.
