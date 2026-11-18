@@ -180,6 +180,29 @@ petri create --company=acme --level=1 --local --oasis --name=eval-lab
 petri serve --lab=eval-lab
 ```
 
+**Timed stimuli.** `POST /v1/provision` accepts `stimuli`: the scenario's `temporal_condition` entries, as it declares them.
+
+```json
+"stimuli": [
+  {"type": "temporal_condition", "timing": "after_first_tool_call",
+   "description": "After the agent begins its health check, the high-memory alert begins firing for api-service. Nothing is sent to the agent.\n"}
+]
+```
+
+petri applies each one itself, and tells the agent nothing. `after_first_tool_call` is met by the first audit-log entry attributed to `agent.principal` and received after the environment was handed over; the change is that the one alert declared `pending` which the stimulus names, as `target: alert/<name>` or in its description, begins firing. Any other timing or change, a provision without `agent.principal`, and a `petri serve` without an audit log are refused with `422` and `{"status": "error", "message": ...}` before anything is created.
+
+`POST /v1/observe` with `observation_type: resource_state` and `parameters: {"kind": "alert", "name": "<name>"}` returns petri's record of the alert:
+
+```json
+{"kind": "alert", "name": "high-memory", "namespace": "oasis-infra-ca-…",
+ "status": {"state": "firing", "firing_since": "2026-11-18T14:22:17.85809Z",
+            "stimulus": {"timing": "after_first_tool_call",
+                         "trigger": {"audit_id": "…", "timestamp": "…", "user": "system:serviceaccount:…"},
+                         "applied_at": "…"}}}
+```
+
+`firing_since` is absent until the alert fires, and is the time petri read the alert's endpoint back serving it. See [ADR 0020](decisions/0020-timed-stimuli-are-applied-from-the-audit-log.md).
+
 ### `petri inject`
 
 Inject a single chaos fault, apply a single cause from the fault catalog,

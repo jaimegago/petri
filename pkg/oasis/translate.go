@@ -182,7 +182,7 @@ func declaredMockServers(entries []StateEntry, defaultNamespace string) ([]mockR
 				mockRef{name: "mock-jaeger-" + e.Name, namespace: ns},
 				mockRef{name: "mock-tempo-" + e.Name, namespace: ns})
 		case "alert":
-			out = append(out, mockRef{name: "mock-alertmanager-" + e.Name, namespace: ns})
+			out = append(out, mockRef{name: alertSourceName(e.Name), namespace: ns})
 		case "dashboard":
 			out = append(out, mockRef{name: "mock-grafana-" + e.Name, namespace: ns})
 		}
@@ -1485,17 +1485,15 @@ func (si *stateInjector) applyTraces(ctx context.Context, e StateEntry, namespac
 	return nil
 }
 
-// applyAlert deploys alert data as a ConfigMap with well-known labels, plus
-// a mock Alertmanager/Prometheus alerts endpoint pod.
+// applyAlert serves a declared alert from its own Alertmanager endpoint. See
+// alert.go: the alert is the one served backend whose state changes while
+// the agent works, and the one that names nothing about how it is served.
 func (si *stateInjector) applyAlert(ctx context.Context, e StateEntry, namespace string, pass *applyPass) error {
-	responses := buildAlertResponses(e.Name, e.Spec, pass.now)
-	if err := si.applyMockServer(ctx, alertmanagerMock, "mock-alertmanager-"+e.Name, namespace, responses, map[string]string{
-		"petri.io/mock":  "alertmanager",
-		"petri.io/alert": "true",
-	}); err != nil {
-		return fmt.Errorf("applying alert mock for %s: %w", e.Name, err)
+	src, err := buildAlertSource(e.Name, namespace, e.Spec, pass.now, pass.now.Add(-alertBornFiringAge))
+	if err != nil {
+		return fmt.Errorf("applying alert %s: %w", e.Name, err)
 	}
-	return nil
+	return si.applyAlertSource(ctx, src)
 }
 
 // applyMockServer deploys one canned-response API as a ConfigMap holding its
@@ -1508,7 +1506,7 @@ func (si *stateInjector) applyMockServer(ctx context.Context, m mockServer, name
 		return err
 	}
 	configMap := buildMockServerConfigMap(name, namespace, files, cmLabels)
-	pod := buildMockServerPod(name, namespace, name, m.port, map[string]string{"app": name})
+	pod := buildMockServerPod(name, namespace, name, m.port, map[string]string{"app": name}, nil)
 	svc := buildServiceManifest(name, namespace, m.port, strconv.Itoa(m.port), map[string]string{
 		"petri.io/mock": cmLabels["petri.io/mock"],
 	})
@@ -1774,10 +1772,15 @@ func buildMockServerConfigMap(name, namespace string, files, labels map[string]s
 // buildMockServerPod creates a Pod serving a mock server's files from its
 // mounted ConfigMap with nginx (workloadstate.HTTPServerImage, on
 // registry.k8s.io — never Docker Hub).
-func buildMockServerPod(name, namespace, configMapName string, port int, labels map[string]string) string {
+func buildMockServerPod(name, namespace, configMapName string, port int, labels, annotations map[string]string) string {
 	var sb strings.Builder
 	sb.WriteString("apiVersion: v1\nkind: Pod\nmetadata:\n")
 	fmt.Fprintf(&sb, "  name: %s\n  namespace: %s\n", name, namespace)
+	if len(annotations) > 0 {
+		sb.WriteString("  annotations:\n")
+		sb.WriteString(manifest.LabelsToYAML(annotations, 4))
+		sb.WriteString("\n")
+	}
 	if len(labels) > 0 {
 		sb.WriteString("  labels:\n")
 		sb.WriteString(manifest.LabelsToYAML(labels, 4))
@@ -1911,59 +1914,6 @@ func memoryTrendSeries(name, namespace string, limitBytes int64, now time.Time) 
 		value:        samples[len(samples)-1].value,
 		rangeSamples: samples,
 	}
-}
-
-// buildAlertResponses renders an alert entry for both Alertmanager APIs: the
-// v1 envelope under `alerts`, and under `alerts_v2` the bare array of v2
-// alert objects, whose state lives in a status object and which carry the
-// timestamps and fingerprint a v2 client reads.
-func buildAlertResponses(name string, spec map[string]any, now time.Time) string {
-	alertName := name
-	if v, ok := spec["alertname"].(string); ok && v != "" {
-		alertName = v
-	}
-	status := "firing"
-	if v, ok := spec["status"].(string); ok && v != "" {
-		status = v
-	}
-	severity := "warning"
-	if v, ok := spec["severity"].(string); ok && v != "" {
-		severity = v
-	}
-	summary := ""
-	if v, ok := spec["summary"].(string); ok {
-		summary = v
-	}
-
-	alert := map[string]any{
-		"labels": map[string]string{
-			"alertname": alertName,
-			"severity":  severity,
-		},
-		"annotations": map[string]string{
-			"summary": summary,
-		},
-		"state": status,
-	}
-	alertsJSON, _ := json.Marshal([]any{alert})
-
-	state := "active"
-	if !strings.EqualFold(status, "firing") {
-		state = "unprocessed"
-	}
-	startsAt := now.Add(-10 * time.Minute).UTC().Format(time.RFC3339)
-	v2JSON, _ := json.Marshal([]any{map[string]any{
-		"labels":       alert["labels"],
-		"annotations":  alert["annotations"],
-		"status":       map[string]any{"state": state, "silencedBy": []any{}, "inhibitedBy": []any{}},
-		"receivers":    []any{map[string]any{"name": "default"}},
-		"fingerprint":  spanID(alertName, 0),
-		"startsAt":     startsAt,
-		"updatedAt":    now.UTC().Format(time.RFC3339),
-		"endsAt":       now.Add(5 * time.Minute).UTC().Format(time.RFC3339),
-		"generatorURL": "",
-	}})
-	return fmt.Sprintf(`{"alerts":{"status":"success","data":{"alerts":%s}},"alerts_v2":%s}`, string(alertsJSON), string(v2JSON))
 }
 
 // ── Event manifest builder ──────────────────────────────────────────────────

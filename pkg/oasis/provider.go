@@ -159,6 +159,17 @@ type petriProvider struct {
 	// detection goroutine. Defaults to preflight.ProbeImage; tests inject
 	// a stub to control timing and outcome without doing real HTTP.
 	probeImage probeImageFunc
+	// stimulusCtx is the lifetime of every timed-stimulus watch;
+	// StopTimedStimuli cancels it at shutdown.
+	stimulusCtx    context.Context
+	stimulusCancel context.CancelFunc
+	// stimulusPoll is how often the audit log is read for a stimulus's
+	// timing; alertConfirmInterval and alertConfirmTimeout bound the wait for
+	// an alert's endpoint to answer with a state just applied. Tests shorten
+	// them.
+	stimulusPoll         time.Duration
+	alertConfirmInterval time.Duration
+	alertConfirmTimeout  time.Duration
 }
 
 // probeImageFunc is the signature of the registry probe entry point.
@@ -198,7 +209,12 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 		tasks:      newAsyncTasks(log),
 		teardown:   newTeardownRegistry(),
 		probeImage: defaultProbeImage,
+
+		stimulusPoll:         defaultStimulusPollInterval,
+		alertConfirmInterval: defaultAlertConfirmInterval,
+		alertConfirmTimeout:  defaultAlertConfirmTimeout,
 	}
+	p.stimulusCtx, p.stimulusCancel = context.WithCancel(context.Background())
 	// A declared database gets what any workload gets to pull its image and
 	// start before its state is loaded.
 	p.injector.databaseReadyTimeout = p.pullBudget() + p.rolloutBudget()
@@ -212,6 +228,13 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 // a bounded chance to complete before the process exits.
 func (p *petriProvider) WaitAsyncTasks(ctx context.Context) bool {
 	return p.tasks.Wait(ctx)
+}
+
+// StopTimedStimuli ends every timed-stimulus watch. The server calls it at
+// shutdown, before it waits on background tasks: a watch runs until its
+// trigger or its environment's teardown, and neither comes once requests stop.
+func (p *petriProvider) StopTimedStimuli() {
+	p.stimulusCancel()
 }
 
 // Provision creates a new evaluation environment for the given scenario.
@@ -236,6 +259,21 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	// is created, not left to teardown to fail on quietly.
 	if err := checkReservedNamespaces(env); err != nil {
 		return ProvisionResponse{}, err
+	}
+
+	// The scenario's timed stimuli are resolved to the changes they make
+	// before anything is created, and the audit log their timing is read from
+	// is checked to be followable. One the provider cannot apply fails the
+	// provision here (SI provider-guide.md §3.3).
+	timedChanges, err := planTimedStimuli(req.Stimuli, env, req.Agent.Principal)
+	if err != nil {
+		return ProvisionResponse{}, err
+	}
+	if len(timedChanges) > 0 {
+		if _, err := p.followAudit(); err != nil {
+			return ProvisionResponse{}, &ErrStimulusNotApplicable{Reason: fmt.Sprintf(
+				"its timing is read from the audit log, which cannot be followed: %v", err)}
+		}
 	}
 
 	// Everything beyond the scenario namespace that this environment will
@@ -380,17 +418,40 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 
 	// 7. Register environment. ResolvedNamespaces is carried so that a later
 	// InjectState answers a declared token the same way provision did.
+	//
+	// The audit log is followed from here: the hand-over is the earliest an
+	// entry can be the agent starting. Following is the last thing that can
+	// fail, so a provision that returns ready is watching.
+	var cursor auditCursor
+	if len(timedChanges) > 0 {
+		cursor, err = p.followAudit()
+		if err != nil {
+			p.deleteEnvironmentNamespaces(ctx, namespace, owned)
+			return ProvisionResponse{}, &ErrStimulusNotApplicable{Reason: fmt.Sprintf(
+				"its timing is read from the audit log, which cannot be followed: %v", err)}
+		}
+	}
+	provisionedAt := time.Now()
 	record := &Environment{
 		ID:                 envID,
 		ScenarioID:         req.ScenarioID,
 		Namespace:          namespace,
 		KubeconfigPath:     p.cfg.KubeconfigPath,
 		BeforeSnapshot:     beforeSnapshot,
-		ProvisionedAt:      time.Now(),
+		ProvisionedAt:      provisionedAt,
 		AgentEndpoint:      serverURL,
 		AgentPrincipal:     req.Agent.Principal,
 		OwnedNamespaces:    owned,
 		ResolvedNamespaces: env.Resolution,
+		Alerts:             newAlertLedger(env.State, provisionedAt),
+	}
+	if cursor != nil {
+		watchCtx, stop := context.WithCancel(p.stimulusCtx)
+		record.stopStimuli = stop
+		p.tasks.Go("timed-stimuli", func() {
+			defer stop()
+			p.watchStimuli(watchCtx, record, timedChanges, cursor)
+		})
 	}
 	p.store.put(record)
 
@@ -437,6 +498,10 @@ func (p *petriProvider) Teardown(ctx context.Context, req TeardownRequest) (Tear
 	}
 
 	p.log.Info("tearing down OASIS environment", "env_id", req.EnvironmentID, "namespace", env.Namespace)
+
+	// A timed stimulus not yet triggered is not applied to an environment
+	// that is going away.
+	env.stopTimedStimuli()
 
 	// Registry: refuse to spawn a duplicate kubectl invocation when
 	// another path is already deleting this namespace. Part 5 of ADR 0014.
@@ -519,6 +584,17 @@ func (p *petriProvider) InjectState(ctx context.Context, req InjectStateRequest)
 	// for the server itself, since nothing else on this path waits.
 	if err := p.injector.loadDatabases(ctx, injected); err != nil {
 		return InjectStateResponse{Status: "error", Error: err.Error()}, fmt.Errorf("loading declared databases: %w", err)
+	}
+	// An injected alert changes a running endpoint, and the provider's
+	// record of the alert follows what the endpoint answers, not what was
+	// applied to it.
+	for _, e := range injected.State {
+		if !strings.EqualFold(e.Kind, "alert") {
+			continue
+		}
+		if err := p.settleAlert(ctx, env, e); err != nil {
+			return InjectStateResponse{Status: "error", Error: err.Error()}, fmt.Errorf("confirming injected state: %w", err)
+		}
 	}
 	return InjectStateResponse{Status: "applied"}, nil
 }
@@ -914,6 +990,13 @@ func (p *petriProvider) observeResourceState(ctx context.Context, env *Environme
 
 	kubeEvidence := EvidenceSource{Type: "kube_api", Status: "available"}
 
+	// An alert is not a cluster object. It is answered from the provider's
+	// own record, which carries what no object does: when the alert began
+	// firing (SI provider-guide.md §3.3).
+	if strings.EqualFold(kind, "alert") && name != "" {
+		return p.observeAlert(env, name, declaredNamespace)
+	}
+
 	// When kind/name are not specified, return a full state snapshot so that
 	// oasisctl can evaluate description-type state assertions: the whole
 	// environment when no namespace was asked for, that namespace otherwise.
@@ -951,6 +1034,31 @@ func (p *petriProvider) observeResourceState(ctx context.Context, env *Environme
 		ObservationType: "resource_state",
 		Data:            json.RawMessage(raw),
 		EvidenceSource:  kubeEvidence,
+	}, nil
+}
+
+// observeAlert answers a resource_state observation of a declared alert from
+// the provider's record. A declared namespace token is resolved the way
+// provision resolved it; without one the alert is found by name.
+func (p *petriProvider) observeAlert(env *Environment, name, declaredNamespace string) (ObserveResponse, error) {
+	namespace := ""
+	if declaredNamespace != "" {
+		namespace = entryNamespace(declaredNamespace, env.Namespace)
+	}
+	rec, err := env.Alerts.find(name, namespace)
+	if err != nil {
+		return ObserveResponse{}, err
+	}
+	data, err := json.Marshal(rec.observation())
+	if err != nil {
+		return ObserveResponse{}, fmt.Errorf("marshalling alert state: %w", err)
+	}
+	return ObserveResponse{
+		EnvironmentID:   env.ID,
+		Timestamp:       time.Now(),
+		ObservationType: "resource_state",
+		Data:            data,
+		EvidenceSource:  EvidenceSource{Type: "provider_record", Status: "available"},
 	}, nil
 }
 

@@ -56,6 +56,14 @@ type asyncShutdowner interface {
 	WaitAsyncTasks(ctx context.Context) bool
 }
 
+// stimulusStopper is the optional interface a provider implements when it
+// watches for timed stimuli. Those watches are tracked background tasks that
+// end only on their trigger or their environment's teardown, so shutdown
+// stops them before it waits on the rest.
+type stimulusStopper interface {
+	StopTimedStimuli()
+}
+
 // asyncShutdownTimeout bounds how long the server will wait for in-flight
 // async work (probes + cleanups) during graceful shutdown before forcing
 // exit. Matches the per-task cleanup budget in provider.go so a cleanup
@@ -100,6 +108,9 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 // so operators reading run.log can tell whether cleanups landed before
 // petri serve exited.
 func (s *Server) drainAsyncTasks() {
+	if w, ok := s.provider.(stimulusStopper); ok {
+		w.StopTimedStimuli()
+	}
 	a, ok := s.provider.(asyncShutdowner)
 	if !ok {
 		return
@@ -146,7 +157,7 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeProvisionError maps a Provision-side error to the right HTTP status
-// and body shape. ErrImagePullFailure → 502 with structured fields,
+// and body shape. ErrStimulusNotApplicable → 422, ErrImagePullFailure → 502 with structured fields,
 // ErrImagePullTimeout → 502 with a retry hint, ErrNamespaceTerminating → 409
 // with retry hint, ErrRolloutTimeout → 500 with the historical phrasing,
 // everything else → 500 with the generic envelope.
@@ -155,6 +166,13 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 // provision-specific: other endpoints don't have an "unreachable upstream
 // registry" failure mode and shouldn't sprout one.
 func writeProvisionError(w http.ResponseWriter, err error) {
+	// A timed stimulus the provider cannot apply is the request's, not the
+	// substrate's: nothing is left behind and a retry changes nothing.
+	var stimulus *ErrStimulusNotApplicable
+	if errors.As(err, &stimulus) {
+		writeError(w, http.StatusUnprocessableEntity, stimulus.Error())
+		return
+	}
 	var pull *ErrImagePullFailure
 	if errors.As(err, &pull) {
 		writeJSON(w, http.StatusBadGateway, imagePullErrorResponse{

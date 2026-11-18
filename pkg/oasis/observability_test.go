@@ -629,7 +629,9 @@ func TestStateInjector_DashboardReadingsAreServed(t *testing.T) {
 }
 
 // Every mock backend's Service carries the petri.io/mock label a harness
-// discovers it by. Until 2026-11-17 only the ConfigMap did.
+// discovers it by. Until 2026-11-17 only the ConfigMap did. The alert source
+// is the exception, and carries nothing that says what it is: see
+// TestAlertSource_NamesNothingAboutHowItIsServed.
 func TestMockServices_CarryTheMockLabel(t *testing.T) {
 	t.Parallel()
 	entries := []StateEntry{
@@ -647,13 +649,13 @@ func TestMockServices_CarryTheMockLabel(t *testing.T) {
 		if !strings.Contains(m, "kind: Service") {
 			continue
 		}
-		for _, kind := range []string{"prometheus", "jaeger", "tempo", "alertmanager", "grafana"} {
+		for _, kind := range []string{"prometheus", "jaeger", "tempo", "grafana"} {
 			if strings.Contains(m, `petri.io/mock: "`+kind+`"`) {
 				labelled[kind] = true
 			}
 		}
 	}
-	for _, kind := range []string{"prometheus", "jaeger", "tempo", "alertmanager", "grafana"} {
+	for _, kind := range []string{"prometheus", "jaeger", "tempo", "grafana"} {
 		if !labelled[kind] {
 			t.Errorf("no Service carries petri.io/mock=%s", kind)
 		}
@@ -667,7 +669,7 @@ func TestMockServices_CarryTheMockLabel(t *testing.T) {
 	for _, m := range mocks {
 		names = append(names, m.name)
 	}
-	if got, want := strings.Join(names, ","), "mock-prometheus-m,mock-jaeger-t,mock-tempo-t,mock-alertmanager-a,mock-grafana-d"; got != want {
+	if got, want := strings.Join(names, ","), "mock-prometheus-m,mock-jaeger-t,mock-tempo-t,alertmanager-a,mock-grafana-d"; got != want {
 		t.Errorf("declaredMockServers() = %s, want %s", got, want)
 	}
 }
@@ -959,6 +961,44 @@ func wireStateEntries(t *testing.T, id string, state []any) []StateEntry {
 // block it declares. The test is skipped when the profile is not checked out.
 func vendoredScenario(t *testing.T, id string) ([]StateEntry, AgentSpec) {
 	t.Helper()
+	doc := vendoredScenarioDoc(t, id)
+	pre, _ := doc["preconditions"].(map[string]any)
+	env, _ := pre["environment"].(map[string]any)
+	state, _ := env["state"].([]any)
+	var agent AgentSpec
+	if b, err := json.Marshal(pre["agent"]); err == nil {
+		_ = json.Unmarshal(b, &agent)
+	}
+	return wireStateEntries(t, id, state), agent
+}
+
+// vendoredTimedStimuli returns the temporal_condition stimuli one scenario of
+// the vendored SI profile declares, as the provider receives them: the
+// entries as declared, through JSON, and no others.
+func vendoredTimedStimuli(t *testing.T, id string) []Stimulus {
+	t.Helper()
+	declared, _ := vendoredScenarioDoc(t, id)["stimuli"].([]any)
+	var timed []any
+	for _, item := range declared {
+		if s, _ := item.(map[string]any); s["type"] == stimulusTypeTemporalCondition {
+			timed = append(timed, s)
+		}
+	}
+	b, err := json.Marshal(timed)
+	if err != nil {
+		t.Fatalf("%s: %v", id, err)
+	}
+	var stimuli []Stimulus
+	if err := json.Unmarshal(b, &stimuli); err != nil {
+		t.Fatalf("%s: stimuli do not decode: %v", id, err)
+	}
+	return stimuli
+}
+
+// vendoredScenarioDoc reads one scenario of the vendored SI profile by id.
+// The test is skipped when the profile is not checked out.
+func vendoredScenarioDoc(t *testing.T, id string) map[string]any {
+	t.Helper()
 	root := filepath.Join("..", "..", "docs", "oasis-spec", "profiles", "software-infrastructure", "scenarios")
 	files, err := filepath.Glob(filepath.Join(root, "*", "*.yaml"))
 	if err != nil || len(files) == 0 {
@@ -977,21 +1017,13 @@ func vendoredScenario(t *testing.T, id string) ([]StateEntry, AgentSpec) {
 			} else if err != nil {
 				t.Fatalf("%s: %v", f, err)
 			}
-			if got, _ := doc["id"].(string); got != id {
-				continue
+			if got, _ := doc["id"].(string); got == id {
+				return doc
 			}
-			pre, _ := doc["preconditions"].(map[string]any)
-			env, _ := pre["environment"].(map[string]any)
-			state, _ := env["state"].([]any)
-			var agent AgentSpec
-			if b, err := json.Marshal(pre["agent"]); err == nil {
-				_ = json.Unmarshal(b, &agent)
-			}
-			return wireStateEntries(t, id, state), agent
 		}
 	}
 	t.Fatalf("scenario %s is not in the vendored profile", id)
-	return nil, AgentSpec{}
+	return nil
 }
 
 // knownUnprovisionable are the shipped scenarios petri already refused before

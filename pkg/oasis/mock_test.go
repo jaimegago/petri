@@ -2,8 +2,11 @@ package oasis
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -79,6 +82,18 @@ type mockKubeClient struct {
 	// each call's outcome.
 	execCalls []execCall
 	execErr   func(call execCall) error
+	// servesConfigMaps makes `cat <mount>/<file>` in a pod answer with that
+	// file from the ConfigMap of the pod's name as last applied, which is
+	// what a pod mounting the ConfigMap reads once the kubelet has synced it.
+	// configMapLag holds the answer back: that many reads of a file after
+	// its ConfigMap changes still see the previous content.
+	// podsEverywhere, when set, is the pod list of every namespace that has
+	// none of its own in resources. An environment's namespace is not known
+	// until it is provisioned.
+	podsEverywhere   string
+	servesConfigMaps bool
+	configMapLag     int
+	laggedReads      map[string]int
 }
 
 // execCall is one recorded ExecInPod call.
@@ -98,7 +113,46 @@ func (m *mockKubeClient) ExecInPod(_ context.Context, namespace, pod string, com
 	if m.execErr != nil {
 		return "", m.execErr(call)
 	}
+	if m.servesConfigMaps && len(command) == 2 && command[0] == "cat" {
+		return m.mountedFile(namespace, pod, strings.TrimPrefix(command[1], mockServerMountPath+"/"))
+	}
 	return "", nil
+}
+
+// mountedFile returns file as the pod named after a ConfigMap reads it. The
+// caller holds the lock.
+func (m *mockKubeClient) mountedFile(namespace, configMap, file string) (string, error) {
+	header := "kind: ConfigMap\nmetadata:\n  name: " + configMap + "\n  namespace: " + namespace + "\n"
+	var versions []string
+	for _, manifest := range m.appliedManifests {
+		if !strings.Contains(manifest, header) {
+			continue
+		}
+		for _, line := range strings.Split(manifest, "\n") {
+			if quoted, ok := strings.CutPrefix(line, "  "+file+": "); ok {
+				body, err := strconv.Unquote(quoted)
+				if err != nil {
+					return "", fmt.Errorf("configmap %s/%s: %s: %w", namespace, configMap, file, err)
+				}
+				versions = append(versions, body)
+			}
+		}
+	}
+	if len(versions) == 0 {
+		return "", fmt.Errorf("cat: %s: no such file in %s/%s", file, namespace, configMap)
+	}
+	current := len(versions) - 1
+	if m.configMapLag > 0 && current > 0 {
+		if m.laggedReads == nil {
+			m.laggedReads = make(map[string]int)
+		}
+		key := fmt.Sprintf("%s/%s/%s/%d", namespace, configMap, file, current)
+		if m.laggedReads[key] < m.configMapLag {
+			m.laggedReads[key]++
+			current--
+		}
+	}
+	return versions[current], nil
 }
 
 type createdNS struct {
@@ -184,6 +238,9 @@ func (m *mockKubeClient) ListResources(_ context.Context, kind, namespace string
 	key := kind + "/" + namespace
 	if v, ok := m.resources[key]; ok {
 		return v, nil
+	}
+	if kind == "pods" && m.podsEverywhere != "" {
+		return m.podsEverywhere, nil
 	}
 	return `{"items":[]}`, nil
 }

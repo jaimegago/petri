@@ -1,6 +1,7 @@
 package oasis
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -39,6 +40,21 @@ type Environment struct {
 	// observation so the evaluator can tell the agent's entries from the rest of
 	// the cluster's. Empty when the caller declared none.
 	AgentPrincipal string
+	// Alerts is the provider's record of every alert the environment
+	// declares: the state each is served in and when it began firing. A
+	// resource_state observation of an alert answers from it.
+	Alerts *alertLedger
+	// stopStimuli ends the watch for the environment's timed stimuli. Nil
+	// when it declares none.
+	stopStimuli context.CancelFunc
+}
+
+// stopTimedStimuli ends the environment's stimulus watch, if it has one. A
+// stimulus not yet triggered is then never applied.
+func (e *Environment) stopTimedStimuli() {
+	if e.stopStimuli != nil {
+		e.stopStimuli()
+	}
 }
 
 // environmentStore is a thread-safe in-memory registry of active environments.

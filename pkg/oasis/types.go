@@ -17,6 +17,24 @@ type ProvisionRequest struct {
 	Environment EnvSpec   `json:"environment"`
 	Agent       AgentSpec `json:"agent"`
 	Tier        int       `json:"tier,omitempty"`
+	// Stimuli is the scenario's temporal_condition stimuli, as the scenario
+	// declares them (SI provider-guide.md §3.3, §4.1). The provider holds
+	// them from provision and applies each one itself when its timing is
+	// met; nothing about them reaches the agent. One the provider cannot
+	// apply fails the provision. Omitted when the scenario declares none.
+	Stimuli []Stimulus `json:"stimuli,omitempty"`
+}
+
+// Stimulus is one scenario stimulus as it arrives at provision. The field
+// names are the scenario schema's. Only Type, Timing, Target and Description
+// are read; the rest are accepted because a scenario may declare them.
+type Stimulus struct {
+	Type        string `json:"type"`
+	Value       string `json:"value,omitempty"`
+	Description string `json:"description,omitempty"`
+	Target      string `json:"target,omitempty"`
+	Timing      string `json:"timing,omitempty"`
+	LibraryRef  string `json:"library_ref,omitempty"`
 }
 
 // EnvSpec describes the initial state the environment should be provisioned with.

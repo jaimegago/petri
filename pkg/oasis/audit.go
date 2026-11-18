@@ -2,10 +2,12 @@ package oasis
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
@@ -125,49 +127,134 @@ func (r *fileAuditLogReader) Query(_ context.Context, q AuditLogQuery) ([]AuditE
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1 MiB per line
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		var ev kubeAuditEvent
-		if err := json.Unmarshal(line, &ev); err != nil {
-			continue // skip malformed lines
-		}
-		if ev.Stage != "ResponseComplete" {
+		entry, ok := parseAuditLine(scanner.Bytes())
+		if !ok {
 			continue
 		}
-		ts := ev.RequestReceivedTimestamp
-		if !q.Start.IsZero() && ts.Before(q.Start) {
+		if !q.Start.IsZero() && entry.Timestamp.Before(q.Start) {
 			continue
 		}
-		if !q.End.IsZero() && ts.After(q.End) {
+		if !q.End.IsZero() && entry.Timestamp.After(q.End) {
 			continue
 		}
-		if q.Namespace != "" && ev.ObjectRef.Namespace != q.Namespace {
+		if q.Namespace != "" && entry.Namespace != q.Namespace {
 			continue
 		}
-		if q.Verb != "" && ev.Verb != q.Verb {
+		if q.Verb != "" && entry.Verb != q.Verb {
 			continue
 		}
-		if q.Resource != "" && ev.ObjectRef.Resource != q.Resource {
+		if q.Resource != "" && entry.Resource != q.Resource {
 			continue
 		}
-		// Copy line to avoid scanner buffer reuse.
-		rawCopy := make([]byte, len(line))
-		copy(rawCopy, line)
-		entries = append(entries, AuditEntry{
-			AuditID:     ev.AuditID,
-			Stage:       ev.Stage,
-			Verb:        ev.Verb,
-			Namespace:   ev.ObjectRef.Namespace,
-			Resource:    ev.ObjectRef.Resource,
-			Subresource: ev.ObjectRef.Subresource,
-			Name:        ev.ObjectRef.Name,
-			User:        ev.User.Username,
-			Timestamp:   ts,
-			RequestBody: string(ev.RequestObject),
-			Raw:         rawCopy,
-		})
+		entries = append(entries, entry)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading audit log: %w", err)
+	}
+	return entries, nil
+}
+
+// parseAuditLine parses one line of the audit log. It reports false for a
+// malformed line and for any stage but ResponseComplete, the one stage every
+// request reaches exactly once.
+func parseAuditLine(line []byte) (AuditEntry, bool) {
+	var ev kubeAuditEvent
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return AuditEntry{}, false
+	}
+	if ev.Stage != "ResponseComplete" {
+		return AuditEntry{}, false
+	}
+	// Copy line: a caller's buffer is reused.
+	rawCopy := make([]byte, len(line))
+	copy(rawCopy, line)
+	return AuditEntry{
+		AuditID:     ev.AuditID,
+		Stage:       ev.Stage,
+		Verb:        ev.Verb,
+		Namespace:   ev.ObjectRef.Namespace,
+		Resource:    ev.ObjectRef.Resource,
+		Subresource: ev.ObjectRef.Subresource,
+		Name:        ev.ObjectRef.Name,
+		User:        ev.User.Username,
+		Timestamp:   ev.RequestReceivedTimestamp,
+		RequestBody: string(ev.RequestObject),
+		Raw:         rawCopy,
+	}, true
+}
+
+// auditFollower is an AuditLogReader whose log can be followed as it grows.
+// A timed stimulus is triggered by an entry appearing in the audit log (SI
+// provider-guide.md §3.3), so the provider has to see entries as they are
+// written, and Query scans the whole file on every call.
+type auditFollower interface {
+	// Follow returns a cursor positioned at the log's current end.
+	Follow() (auditCursor, error)
+}
+
+// auditCursor reads the entries appended to an audit log since the previous
+// call.
+type auditCursor interface {
+	Next() ([]AuditEntry, error)
+}
+
+// Follow returns a cursor at the current end of the audit log file. It fails
+// when the file cannot be read, which is what a caller that depends on
+// following it needs to know before it starts.
+func (r *fileAuditLogReader) Follow() (auditCursor, error) {
+	info, err := os.Stat(r.path)
+	if err != nil {
+		return nil, fmt.Errorf("following audit log %s: %w", r.path, err)
+	}
+	return &fileAuditCursor{path: r.path, offset: info.Size()}, nil
+}
+
+// fileAuditCursor follows an audit log file by byte offset.
+type fileAuditCursor struct {
+	path   string
+	offset int64
+}
+
+// Next returns the complete lines appended since the last call. A line still
+// being written is left for the next call.
+//
+// The API server rotates the log by renaming it and starting a new file. A
+// file shorter than the offset is that new file, and it is read from its
+// start; what the old file gained between the last call and the rotation is
+// not read.
+func (c *fileAuditCursor) Next() ([]AuditEntry, error) {
+	f, err := os.Open(c.path)
+	if err != nil {
+		return nil, fmt.Errorf("opening audit log %s: %w", c.path, err)
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("reading audit log %s: %w", c.path, err)
+	}
+	if info.Size() < c.offset {
+		c.offset = 0
+	}
+	if info.Size() == c.offset {
+		return nil, nil
+	}
+	if _, err := f.Seek(c.offset, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("reading audit log %s: %w", c.path, err)
+	}
+	buf, err := io.ReadAll(io.LimitReader(f, info.Size()-c.offset))
+	if err != nil {
+		return nil, fmt.Errorf("reading audit log %s: %w", c.path, err)
+	}
+	end := bytes.LastIndexByte(buf, '\n')
+	if end < 0 {
+		return nil, nil
+	}
+	c.offset += int64(end + 1)
+	var entries []AuditEntry
+	for _, line := range bytes.Split(buf[:end], []byte{'\n'}) {
+		if entry, ok := parseAuditLine(line); ok {
+			entries = append(entries, entry)
+		}
 	}
 	return entries, nil
 }
