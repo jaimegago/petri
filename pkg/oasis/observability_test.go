@@ -839,6 +839,9 @@ func TestSnapshotKinds_CoverAppliedKinds(t *testing.T) {
 		"hpa": "horizontalpodautoscalers.", "pvc": "persistentvolumeclaims", "pod": "pods",
 		"events": "events", "ingress": "ingresses.", "networkpolicy": "networkpolicies.",
 		"resourcequota": "resourcequotas",
+		// A database is a Deployment, a Service, a Secret and a claim; the
+		// claim is the one no other entry of a scenario would bring.
+		"database-migration": "persistentvolumeclaims",
 	}
 	for entryKind, plural := range applied {
 		found := false
@@ -866,8 +869,6 @@ func TestProfileScenarios_Apply(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Skipf("vendored profile not present at %s", root)
 	}
-	topLevel := map[string]bool{"namespace": true, "labels": true, "annotations": true, "zone": true, "data": true}
-
 	scenarios := 0
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
@@ -890,41 +891,7 @@ func TestProfileScenarios_Apply(t *testing.T) {
 				continue
 			}
 
-			// oasisctl's translation: kind/name out of `resource`, the
-			// known fields at top level, everything else under spec.
-			wire := make([]map[string]any, 0, len(state))
-			for _, item := range state {
-				decl, _ := item.(map[string]any)
-				resource, _ := decl["resource"].(string)
-				kind, name, ok := strings.Cut(resource, "/")
-				if !ok {
-					t.Fatalf("%s: resource %q is not kind/name", id, resource)
-				}
-				entry := map[string]any{"kind": kind, "name": name}
-				spec := map[string]any{}
-				for k, v := range decl {
-					switch {
-					case k == "resource":
-					case topLevel[k]:
-						entry[k] = v
-					default:
-						spec[k] = v
-					}
-				}
-				if len(spec) > 0 {
-					entry["spec"] = spec
-				}
-				wire = append(wire, entry)
-			}
-			// Through JSON, as the provider receives it.
-			b, err := json.Marshal(wire)
-			if err != nil {
-				t.Fatalf("%s: %v", id, err)
-			}
-			var entries []StateEntry
-			if err := json.Unmarshal(b, &entries); err != nil {
-				t.Fatalf("%s: state does not decode as state entries: %v", id, err)
-			}
+			entries := wireStateEntries(t, id, state)
 
 			mock := newMockKube()
 			mock.resources["node/"] = labNodeListJSON(labNode{name: "lab-worker"}, labNode{name: "lab-worker2"}, labNode{name: "lab-worker3"})
@@ -945,12 +912,93 @@ func TestProfileScenarios_Apply(t *testing.T) {
 	}
 }
 
+// wireStateEntries turns a scenario's declared state into the state entries
+// the provider receives, by oasisctl's translation: kind/name out of
+// `resource`, the known fields at top level, everything else under spec, and
+// the whole of it through JSON.
+func wireStateEntries(t *testing.T, id string, state []any) []StateEntry {
+	t.Helper()
+	topLevel := map[string]bool{"namespace": true, "labels": true, "annotations": true, "zone": true, "data": true}
+	wire := make([]map[string]any, 0, len(state))
+	for _, item := range state {
+		decl, _ := item.(map[string]any)
+		resource, _ := decl["resource"].(string)
+		kind, name, ok := strings.Cut(resource, "/")
+		if !ok {
+			t.Fatalf("%s: resource %q is not kind/name", id, resource)
+		}
+		entry := map[string]any{"kind": kind, "name": name}
+		spec := map[string]any{}
+		for k, v := range decl {
+			switch {
+			case k == "resource":
+			case topLevel[k]:
+				entry[k] = v
+			default:
+				spec[k] = v
+			}
+		}
+		if len(spec) > 0 {
+			entry["spec"] = spec
+		}
+		wire = append(wire, entry)
+	}
+	b, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("%s: %v", id, err)
+	}
+	var entries []StateEntry
+	if err := json.Unmarshal(b, &entries); err != nil {
+		t.Fatalf("%s: state does not decode as state entries: %v", id, err)
+	}
+	return entries
+}
+
+// vendoredScenario reads one scenario of the vendored SI profile by id and
+// returns its declared state as the provider receives it, with the agent
+// block it declares. The test is skipped when the profile is not checked out.
+func vendoredScenario(t *testing.T, id string) ([]StateEntry, AgentSpec) {
+	t.Helper()
+	root := filepath.Join("..", "..", "docs", "oasis-spec", "profiles", "software-infrastructure", "scenarios")
+	files, err := filepath.Glob(filepath.Join(root, "*", "*.yaml"))
+	if err != nil || len(files) == 0 {
+		t.Skipf("vendored profile not present at %s", root)
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec := yaml.NewDecoder(bytes.NewReader(raw))
+		for {
+			var doc map[string]any
+			if err := dec.Decode(&doc); errors.Is(err, io.EOF) {
+				break
+			} else if err != nil {
+				t.Fatalf("%s: %v", f, err)
+			}
+			if got, _ := doc["id"].(string); got != id {
+				continue
+			}
+			pre, _ := doc["preconditions"].(map[string]any)
+			env, _ := pre["environment"].(map[string]any)
+			state, _ := env["state"].([]any)
+			var agent AgentSpec
+			if b, err := json.Marshal(pre["agent"]); err == nil {
+				_ = json.Unmarshal(b, &agent)
+			}
+			return wireStateEntries(t, id, state), agent
+		}
+	}
+	t.Fatalf("scenario %s is not in the vendored profile", id)
+	return nil, AgentSpec{}
+}
+
 // knownUnprovisionable are the shipped scenarios petri already refused before
 // this test existed, with the refusal each one draws. They are listed so the
 // test pins the set: a new refusal fails, and so does one that goes away
 // without being removed from here.
 var knownUnprovisionable = map[string]string{
-	"infra.capability.ej.impact-escalation-001":     `unsupported state entry kind "database-migration"`,
 	"infra.capability.mr.interruption-recovery-001": `unsupported node fact "conditions"`,
 }
 

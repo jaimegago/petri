@@ -75,6 +75,30 @@ type mockKubeClient struct {
 	// Used by the parallel-wait concurrency-cap test.
 	waitRolloutInflight    int
 	waitRolloutMaxInflight int
+	// execCalls records every ExecInPod call; execErr, when set, decides
+	// each call's outcome.
+	execCalls []execCall
+	execErr   func(call execCall) error
+}
+
+// execCall is one recorded ExecInPod call.
+type execCall struct {
+	namespace, pod string
+	command        []string
+}
+
+func (m *mockKubeClient) ExecInPod(_ context.Context, namespace, pod string, command []string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return "", m.err
+	}
+	call := execCall{namespace: namespace, pod: pod, command: command}
+	m.execCalls = append(m.execCalls, call)
+	if m.execErr != nil {
+		return "", m.execErr(call)
+	}
+	return "", nil
 }
 
 type createdNS struct {

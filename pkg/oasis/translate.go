@@ -32,6 +32,11 @@ type stateInjector struct {
 	// labNodeShape summarises the lab's recorded allocatable shaping, quoted
 	// when a declared allocatable fact is refused. See nodestate.go.
 	labNodeShape string
+	// databaseReadyTimeout bounds the wait for a declared database to accept
+	// connections before its state is loaded; databaseReadyPoll is how often
+	// the wait asks. Zero falls back to the defaults in database.go.
+	databaseReadyTimeout time.Duration
+	databaseReadyPoll    time.Duration
 }
 
 func newStateInjector(kube KubeClient, defaultImage string) *stateInjector {
@@ -269,6 +274,9 @@ func (si *stateInjector) Apply(ctx context.Context, env resolvedEnv) error {
 	if err := si.checkFaultedRenders(env.State); err != nil {
 		return err
 	}
+	if _, err := declaredDatabases(env.State, env.Namespace); err != nil {
+		return err
+	}
 	pass, err := newApplyPass(ctx, si.kube, env.State, env.Namespace)
 	if err != nil {
 		return err
@@ -330,6 +338,8 @@ func (si *stateInjector) applyEntry(ctx context.Context, e StateEntry, defaultNa
 		return si.applyResourceQuota(ctx, e, ns)
 	case "logs":
 		return si.applyLogs(ctx, e, ns)
+	case "database-migration":
+		return si.applyDatabaseMigration(ctx, e, ns)
 	default:
 		return fmt.Errorf("unsupported state entry kind %q", e.Kind)
 	}

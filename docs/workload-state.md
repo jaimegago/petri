@@ -158,6 +158,14 @@ state, as a deployment's is. A workload
 that does not converge within the image-pull plus rollout budget fails the
 provision.
 
+One case waits for something other than the entry's own state. A `logs` entry
+is served as a Deployment named after it, so one declared after a `deployment`
+of the same name replaces that deployment's workload, and `petri serve` waits
+for the rollout the cluster then holds. Waiting for the replaced entry's state
+would wait for pods that no longer exist: a deployment declared `error` beside
+its own logs could never be provisioned. A deployment that declares a `fault`
+is not treated this way and keeps its symptom wait.
+
 See [ADR 0015](decisions/0015-workload-state-capability.md) for why this was
 extracted into a Petri-core capability and the seam choices, and
 [ADR 0017](decisions/0017-causes-through-the-application.md) for why a cause

@@ -95,6 +95,10 @@ type KubeClient interface {
 	TokenForServiceAccount(ctx context.Context, namespace, name string) (string, error)
 	// WaitForRollout waits for a Deployment to complete its rollout.
 	WaitForRollout(ctx context.Context, namespace, deployment string, timeout time.Duration) error
+	// ExecInPod runs command in the first container of pod and returns its
+	// output. pod is a pod name or a TYPE/NAME reference kubectl resolves to
+	// one (deployment/<name>).
+	ExecInPod(ctx context.Context, namespace, pod string, command []string) (string, error)
 }
 
 // namespacePhaseTerminating is the .status.phase value kube reports while
@@ -182,7 +186,7 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 	if cfg.DefaultImage == "" {
 		cfg.DefaultImage = defaultOASISImage
 	}
-	return &petriProvider{
+	p := &petriProvider{
 		cfg:        cfg,
 		kube:       kube,
 		store:      newEnvironmentStore(),
@@ -193,6 +197,10 @@ func New(cfg ProviderConfig, kube KubeClient, log *slog.Logger) OASISProvider {
 		teardown:   newTeardownRegistry(),
 		probeImage: defaultProbeImage,
 	}
+	// A declared database gets what any workload gets to pull its image and
+	// start before its state is loaded.
+	p.injector.databaseReadyTimeout = p.pullBudget() + p.rolloutBudget()
+	return p
 }
 
 // WaitAsyncTasks blocks until in-flight background tasks (registry probes,
@@ -311,6 +319,14 @@ func (p *petriProvider) Provision(ctx context.Context, req ProvisionRequest) (Pr
 	if err := p.waitForDeclaredSymptoms(ctx, env); err != nil {
 		p.scheduleNamespaceCleanup(namespace, owned, envID, asyncCleanupReason(err))
 		return ProvisionResponse{}, fmt.Errorf("verifying declared symptoms: %w", err)
+	}
+
+	// 3d. Load every declared database. The servers rolled out in 3b; this
+	// is what makes them hold the state the scenario declares, and an
+	// environment whose database does not hold it is not handed over.
+	if err := p.injector.loadDatabases(ctx, env); err != nil {
+		p.scheduleNamespaceCleanup(namespace, owned, envID, "database-load")
+		return ProvisionResponse{}, fmt.Errorf("loading declared databases: %w", err)
 	}
 
 	// 4. Setup RBAC for the agent.
@@ -496,6 +512,11 @@ func (p *petriProvider) InjectState(ctx context.Context, req InjectStateRequest)
 	}
 	if err := p.injector.Apply(ctx, injected); err != nil {
 		return InjectStateResponse{Status: "error", Error: err.Error()}, fmt.Errorf("applying state: %w", err)
+	}
+	// An injected database is loaded like a provisioned one. The load waits
+	// for the server itself, since nothing else on this path waits.
+	if err := p.injector.loadDatabases(ctx, injected); err != nil {
+		return InjectStateResponse{Status: "error", Error: err.Error()}, fmt.Errorf("loading declared databases: %w", err)
 	}
 	return InjectStateResponse{Status: "applied"}, nil
 }
@@ -1015,10 +1036,17 @@ type symptomWait struct {
 //     so a healthy state waits for its container to be running.
 //   - A mock backend (metrics, traces, alert, dashboard) waits for its
 //     server's container to be running.
+//   - A declared database (database-migration) waits for its Deployment's
+//     rollout; loadDatabases then loads its state.
+//   - A Deployment that a later logs entry of the same name replaces waits
+//     for the rollout of what replaced it (logsReplacedDeployments). A
+//     declared fault is the exception: it keeps its symptom wait, so a
+//     cause under diagnosis is never dropped quietly.
 func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptomWait, error) {
 	var rollouts []rolloutWait
 	var symptoms []symptomWait
-	for _, e := range env.State {
+	replaced := logsReplacedDeployments(env.State)
+	for i, e := range env.State {
 		// e.Namespace is resolved; resolveEnvironment is the only place that
 		// reads a declared token.
 		switch strings.ToLower(e.Kind) {
@@ -1037,6 +1065,14 @@ func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptom
 					replicas: deploymentReplicas(e),
 					expect:   *expect,
 				})
+				continue
+			}
+			if replaced[i] {
+				// The cluster holds the logs entry's workload under this
+				// name, and that one rolls out whatever state this entry
+				// declared. Waiting for the declared state would wait for
+				// pods that no longer exist.
+				rollouts = append(rollouts, rolloutWait{name: e.Name, namespace: e.Namespace})
 				continue
 			}
 			spec, err := p.injector.deploymentSpec(e, e.Namespace)
@@ -1072,6 +1108,10 @@ func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptom
 				replicas: 1,
 				expect:   fault.Expect{Status: conv.Symptom},
 			})
+		case "database-migration":
+			// A declared database is a Deployment that must be serving
+			// before its state can be loaded.
+			rollouts = append(rollouts, rolloutWait{name: databaseWorkloadName(e.Name), namespace: e.Namespace})
 		}
 	}
 	// Mock backends are pods too. Each is waited on like a bare running pod.
@@ -1090,6 +1130,38 @@ func (p *petriProvider) readinessPlan(env resolvedEnv) ([]rolloutWait, []symptom
 	return rollouts, symptoms, nil
 }
 
+// logsReplacedDeployments reports, by index, the deployment entries whose
+// workload a later `logs` entry of the same name and namespace replaces.
+//
+// A logs entry is served as a Deployment named after it, entries are applied
+// in the scenario's order, and the later apply wins: the cluster ends up
+// holding the container that prints the declared lines. Five shipped scenarios
+// pair a `running` deployment with its logs this way and roll out. C-EJ-003
+// pairs one declared `error` — whose pods would never start, and so could
+// never log — and waiting for that state failed provision on every attempt.
+// Readiness waits for what the cluster holds.
+func logsReplacedDeployments(entries []StateEntry) map[int]bool {
+	replaced := make(map[int]bool)
+	for i, d := range entries {
+		if strings.ToLower(d.Kind) != "deployment" {
+			continue
+		}
+		// A declared fault is a cause under diagnosis. It keeps the symptom
+		// wait its `expect` asks for, and fails loudly if a logs entry took
+		// its workload away.
+		if _, faulted := d.Spec["fault"]; faulted {
+			continue
+		}
+		for _, l := range entries[i+1:] {
+			if strings.ToLower(l.Kind) == "logs" && l.Name == d.Name && l.Namespace == d.Namespace {
+				replaced[i] = true
+				break
+			}
+		}
+	}
+	return replaced
+}
+
 // waitForHealthyDeployments waits for every declared Deployment whose state
 // is healthy to finish rolling out (see readinessPlan). Intentionally
 // unhealthy states would never complete a rollout; waitForDeclaredSymptoms
@@ -1106,6 +1178,11 @@ func (p *petriProvider) waitForHealthyDeployments(ctx context.Context, env resol
 		return nil
 	}
 
+	for i := range logsReplacedDeployments(env.State) {
+		e := env.State[i]
+		p.log.Warn("deployment is replaced by a logs entry of the same name; waiting for the rollout the cluster holds",
+			"deployment", e.Name, "namespace", e.Namespace, "declared_status", e.Spec["status"])
+	}
 	p.log.Info("waiting for healthy deployments to roll out", "count", len(pending))
 
 	// Per-deployment waits run concurrently with first-failure-wins semantics.
