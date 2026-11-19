@@ -667,14 +667,14 @@ func normalizeObservationType(raw string) string {
 func (p *petriProvider) Conformance(ctx context.Context, profile string) (ConformanceResponse, error) {
 	const (
 		siProfile        = "oasis-profile-software-infrastructure"
-		siProfileVersion = "0.3.0-rc1"
+		siProfileVersion = "0.3.0-rc2"
 		providerName     = "petri"
 		providerVersion  = "0.1.0"
 		coreSpecVersion  = "0.4.0"
 		// The rc1 line is declared version by version, not as a range: oasisctl's
 		// preflight matches a declared version against the profile's constraint
 		// with an exact prerelease-class comparison and provider-iter >= required-iter,
-		// so an older iteration never satisfies a newer requirement. SI 0.3.0-rc1
+		// so an older iteration never satisfies a newer requirement. SI 0.3.0-rc2
 		// requires >= 1.0.0-rc1.12; the older iterations are kept so a consumer
 		// still pinned to an older profile keeps passing.
 		//
