@@ -98,6 +98,11 @@ func (m *mockKubeClient) ExecInPod(_ context.Context, namespace, pod string, _ [
 	return "ok", m.err
 }
 
+func (m *mockKubeClient) PodLogs(_ context.Context, namespace, pod, _ string, _ int) (string, error) {
+	m.record("pod_logs:" + namespace + "/" + pod)
+	return "ok\n", m.err
+}
+
 func (m *mockKubeClient) CreateNamespace(_ context.Context, name string, _ map[string]string) error {
 	m.record("create_namespace:" + name)
 	return m.err

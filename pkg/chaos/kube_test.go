@@ -265,6 +265,37 @@ func TestCLIKubeClient_DeleteSecret(t *testing.T) {
 	}
 }
 
+func TestCLIKubeClient_PodLogs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+		r := newFakeRunner(map[string]string{"logs": "line one\nline two\n"})
+		c := newKubeClientWithRunner(r)
+		out, err := c.PodLogs(context.Background(), "kube-system", "kube-proxy-abc", "kube-proxy", 5)
+		if err != nil {
+			t.Fatalf("PodLogs() error: %v", err)
+		}
+		if out != "line one\nline two\n" {
+			t.Errorf("output = %q", out)
+		}
+		want := "logs kube-proxy-abc -n kube-system -c kube-proxy --tail=5 --request-timeout=15s"
+		if got := strings.Join(r.calls[0], " "); got != want {
+			t.Errorf("kubectl args = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("runner error propagated", func(t *testing.T) {
+		t.Parallel()
+		r := &fakeRunner{err: errors.New("unable to upgrade connection")}
+		c := newKubeClientWithRunner(r)
+		_, err := c.PodLogs(context.Background(), "kube-system", "kube-proxy-abc", "kube-proxy", 5)
+		if err == nil || !strings.Contains(err.Error(), "kube-system/kube-proxy-abc (kube-proxy)") {
+			t.Fatalf("error = %v, want one naming the pod and container", err)
+		}
+	})
+}
+
 func TestCLIKubeClient_ExecInPod(t *testing.T) {
 	t.Parallel()
 

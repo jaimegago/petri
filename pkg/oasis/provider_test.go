@@ -976,7 +976,8 @@ func TestConformance_NetworkPolicyTrue_WhenCalicoRunning(t *testing.T) {
 }
 
 // seedTier1Cluster makes the mock cluster one that meets the SI profile's
-// Tier 1: four Ready nodes and every required component running.
+// Tier 1: four Ready nodes, a pod on each whose log can be read, and every
+// required component running.
 func seedTier1Cluster(mock *mockKubeClient) {
 	node := func(name string, controlPlane bool) string {
 		labels := `{}`
@@ -988,6 +989,14 @@ func seedTier1Cluster(mock *mockKubeClient) {
 	mock.resources["nodes/"] = `{"items":[` + strings.Join([]string{
 		node("lab-control-plane", true), node("lab-worker", false), node("lab-worker2", false), node("lab-worker3", false),
 	}, ",") + `]}`
+	var proxies []string
+	for _, n := range []string{"lab-control-plane", "lab-worker", "lab-worker2", "lab-worker3"} {
+		pod := "kube-proxy-" + n
+		proxies = append(proxies, fmt.Sprintf(
+			`{"metadata":{"name":%q},"spec":{"nodeName":%q,"containers":[{"name":"kube-proxy"}]},"status":{"phase":"Running"}}`, pod, n))
+		mock.resources["logs/kube-system/"+pod] = "Starting kube-proxy\n"
+	}
+	mock.resources["pods/kube-system"] = `{"items":[` + strings.Join(proxies, ",") + `]}`
 	ready := `{"spec":{"replicas":1},"status":{"readyReplicas":1}}`
 	for _, d := range []string{
 		"monitoring/prometheus", "monitoring/grafana", "ingress-nginx/ingress-nginx-controller",
@@ -1040,14 +1049,24 @@ func TestConformance_TierEvidenceIsReadFromTheCluster(t *testing.T) {
 	if reason, unmet := unmetReason(resp, "complexity_tier_supported"); unmet {
 		t.Errorf("complexity_tier_supported is unmet on a lab that meets the tier: %s", reason)
 	}
-	var nodes string
+	var nodes, logging string
 	for _, c := range ev.Checks {
-		if c.Requirement == "nodes" {
+		switch c.Requirement {
+		case "nodes":
 			nodes = c.Observed
+		case "observability-logging":
+			logging = c.Observed
+		// The profile counts these from scenarios and the evaluator
+		// judges them; the provider has no check for them.
+		case "namespaces", "security-zones", "microservices":
+			t.Errorf("tier evidence carries a %q check: %+v", c.Requirement, c)
 		}
 	}
 	if nodes != "4 Ready of 4 (1 control-plane, 3 worker)" {
 		t.Errorf("nodes observed %q, want the mock cluster's four nodes", nodes)
+	}
+	if !strings.HasPrefix(logging, "pod logs read through the API on 4 of 4 Ready nodes") {
+		t.Errorf("observability-logging observed %q, want a log read on each of the four nodes", logging)
 	}
 }
 
@@ -1084,6 +1103,7 @@ func TestConformance_LabBelowTheTierIsNotDeclaredConformant(t *testing.T) {
 		"nodes: 1 Ready of 1",
 		"at least 3 Ready nodes",
 		"certificate-management: deployment cert-manager/cert-manager not found",
+		"observability-logging: pod logs read through the API on 0 of 1 Ready nodes",
 	} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("reason %q does not carry %q", reason, want)
@@ -1121,6 +1141,10 @@ func TestConformance_TierEvidenceStaysOutOfTheRequirementsMap(t *testing.T) {
 				Observed    string `json:"observed"`
 				Status      string `json:"status"`
 			} `json:"checks"`
+			Observations []struct {
+				Subject  string `json:"subject"`
+				Observed string `json:"observed"`
+			} `json:"observations"`
 		} `json:"tier_evidence"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
@@ -1146,6 +1170,21 @@ func TestConformance_TierEvidenceStaysOutOfTheRequirementsMap(t *testing.T) {
 		if c.Requirement == "" || c.Required == "" || c.Observed == "" || c.Status == "" {
 			t.Errorf("check with an empty field on the wire: %+v", c)
 		}
+		if c.Status != "met" && c.Status != "unmet" {
+			t.Errorf("check %q has status %q on the wire, want met or unmet", c.Requirement, c.Status)
+		}
+	}
+	// What the lab holds of the scenario-counted figures travels beside
+	// the checks, with no requirement and no status.
+	var subjects []string
+	for _, o := range wire.TierEvidence.Observations {
+		if o.Observed == "" {
+			t.Errorf("observation with nothing observed on the wire: %+v", o)
+		}
+		subjects = append(subjects, o.Subject)
+	}
+	if want := []string{"namespaces", "security-zones", "deployments"}; !slices.Equal(subjects, want) {
+		t.Errorf("observation subjects = %v, want %v", subjects, want)
 	}
 }
 

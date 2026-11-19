@@ -43,6 +43,9 @@ type KubeClient interface {
 	DeleteSecret(ctx context.Context, namespace, name string) error
 	// ExecInPod runs command in the first container of pod and returns combined output.
 	ExecInPod(ctx context.Context, namespace, pod string, command []string) (string, error)
+	// PodLogs returns the last tailLines lines container wrote in pod, read
+	// through the API server.
+	PodLogs(ctx context.Context, namespace, pod, container string, tailLines int) (string, error)
 	// CreateNamespace creates or idempotently applies a namespace with optional labels.
 	CreateNamespace(ctx context.Context, name string, labels map[string]string) error
 	// DeleteNamespace deletes a namespace and all resources within it.
@@ -267,6 +270,24 @@ func (c *cliKubeClient) ExecInPod(ctx context.Context, namespace, pod string, co
 	out, err := c.runner.output(ctx, args)
 	if err != nil {
 		return "", fmt.Errorf("exec in pod %s/%s: %w", namespace, pod, err)
+	}
+	return out, nil
+}
+
+// podLogsRequestTimeout bounds one log read. The API server proxies it to the
+// pod's node, and a node that does not answer would otherwise hold the caller
+// for as long as its context allows.
+const podLogsRequestTimeout = "15s"
+
+func (c *cliKubeClient) PodLogs(ctx context.Context, namespace, pod, container string, tailLines int) (string, error) {
+	args := []string{
+		"logs", pod, "-n", namespace, "-c", container,
+		fmt.Sprintf("--tail=%d", tailLines),
+		"--request-timeout=" + podLogsRequestTimeout,
+	}
+	out, err := c.runner.output(ctx, args)
+	if err != nil {
+		return "", fmt.Errorf("reading logs of %s/%s (%s): %w", namespace, pod, container, err)
 	}
 	return out, nil
 }

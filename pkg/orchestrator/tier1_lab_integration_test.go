@@ -7,7 +7,7 @@ package orchestrator_test
 // The test creates its own kind cluster through the same orchestrator and
 // provider `petri create --oasis` and `petri serve` use, with state and
 // kubeconfig under a temp directory, and deletes it when it is done. It
-// asserts three things against the live cluster, each read by kubectl and not
+// asserts four things against the live cluster, each read by kubectl and not
 // through the code under test:
 //
 //  1. the lab has at least three nodes, and a scenario that declares three
@@ -16,7 +16,10 @@ package orchestrator_test
 //     having it issue a certificate;
 //  3. the provider's conformance response carries tier evidence that matches
 //     what kubectl sees, and stops saying the tier is met when the cluster
-//     stops meeting it.
+//     stops meeting it;
+//  4. the evidence's logging check names, on every Ready node, a pod whose
+//     log kubectl reads too, and the evidence holds no check for the figures
+//     the profile counts from scenarios.
 //
 // Run it with:
 //
@@ -163,11 +166,62 @@ func TestIntegration_Level1LabMeetsTier1(t *testing.T) {
 			t.Errorf("%s evidence = %q (%s), want met", requirement, got.Observed, got.Status)
 		}
 	}
-	// What the lab has, reported and not judged.
-	for _, requirement := range []string{"namespaces", "security-zones", "microservices"} {
-		if got := evidenceCheck(t, ev, requirement); got.Status != preflight.TierStatusNotAssessed || got.Observed == "" {
-			t.Errorf("%s evidence = %q (%s), want a not_assessed observation", requirement, got.Observed, got.Status)
+	// ── 4. Logging, and what is not the provider's to judge ──────────────
+	// Workload logs are readable through the API on every Ready node: the
+	// evidence names one pod per node, and kubectl reads that pod's log.
+	logging := evidenceCheck(t, ev, "observability-logging")
+	wantLogging := fmt.Sprintf("pod logs read through the API on %d of %d Ready nodes (", ready, ready)
+	if logging.Status != preflight.TierStatusMet || !strings.HasPrefix(logging.Observed, wantLogging) {
+		t.Errorf("observability-logging evidence = %q (%s), want met with prefix %q", logging.Observed, logging.Status, wantLogging)
+	}
+	read := strings.TrimSuffix(strings.TrimPrefix(logging.Observed, wantLogging), ")")
+	probed := map[string]string{}
+	for _, entry := range strings.Split(read, ", ") {
+		if node, pod, ok := strings.Cut(entry, ": kube-system/"); ok {
+			probed[node] = pod
 		}
+	}
+	for _, n := range nodes {
+		if !n.ready {
+			continue
+		}
+		pod, ok := probed[n.name]
+		if !ok {
+			t.Errorf("observability-logging evidence names no pod on Ready node %s: %q", n.name, logging.Observed)
+			continue
+		}
+		if got := kube.jsonpath(ctx, "pod", "kube-system", pod, "{.spec.nodeName}"); got != n.name {
+			t.Errorf("evidence reads %s as a pod on %s; kubectl sees it on %s", pod, n.name, got)
+		}
+		if out := kube.run(ctx, "logs", pod, "-n", "kube-system", "--tail=1"); out == "" {
+			t.Errorf("kubectl reads no log line from kube-system/%s on %s, which the evidence says it read", pod, n.name)
+		}
+	}
+	// The profile counts namespaces, security zones and microservices from
+	// what scenarios declare, and the evaluator judges them. The evidence
+	// holds no check for them and no status but met and unmet; what the lab
+	// holds is an observation.
+	for _, c := range ev.Checks {
+		switch c.Requirement {
+		case "namespaces", "security-zones", "microservices":
+			t.Errorf("tier evidence carries a %q check: %+v", c.Requirement, c)
+		}
+		if c.Status != preflight.TierStatusMet && c.Status != preflight.TierStatusUnmet {
+			t.Errorf("check %q has status %q, want met or unmet", c.Requirement, c.Status)
+		}
+	}
+	subjects := map[string]string{}
+	for _, o := range ev.Observations {
+		t.Logf("tier observation: %-22s %s", o.Subject, o.Observed)
+		subjects[o.Subject] = o.Observed
+	}
+	for _, subject := range []string{"namespaces", "security-zones", "deployments"} {
+		if subjects[subject] == "" {
+			t.Errorf("tier evidence has no %q observation", subject)
+		}
+	}
+	if got := kube.run(ctx, "get", "namespaces", "-o", "name"); !strings.HasPrefix(subjects["namespaces"], fmt.Sprintf("%d: ", len(strings.Fields(got)))) {
+		t.Errorf("namespaces observation = %q, kubectl sees %d namespaces", subjects["namespaces"], len(strings.Fields(got)))
 	}
 	// Nothing the level lists is missing from the lab.
 	if len(lab.Metadata.NotInstalled) != 0 {

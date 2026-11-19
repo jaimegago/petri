@@ -229,6 +229,20 @@ func (m *mockKubeClient) GetResource(_ context.Context, kind, namespace, name st
 	return m.resources[kind+"/"+namespace+"/"+name], nil
 }
 
+// PodLogs answers with the log stored under "logs/ns/pod", and fails the way
+// kubectl does for a pod that has none.
+func (m *mockKubeClient) PodLogs(_ context.Context, namespace, pod, _ string, _ int) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return "", m.err
+	}
+	if out, ok := m.resources["logs/"+namespace+"/"+pod]; ok {
+		return out, nil
+	}
+	return "", fmt.Errorf("reading logs of %s/%s: Error from server (NotFound)", namespace, pod)
+}
+
 func (m *mockKubeClient) ListResources(_ context.Context, kind, namespace string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

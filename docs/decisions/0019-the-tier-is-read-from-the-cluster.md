@@ -52,6 +52,29 @@ what was required. The lab's level is not consulted.
 - **A read that fails is an unmet check.** Evidence that could not be
   collected is not evidence the tier is met.
 
+**Amended 2026-11-19 — the three unjudged bullets leave `checks`, and
+logging joins them.** The profile has since said what counts
+(`profile.md` §8, opening): the namespace, microservice and security-zone
+figures count what scenario preconditions declare, and the evaluation
+implementation judges them from the scenarios it runs. They are not
+properties of the lab, so they are not the provider's checks, and
+`not_assessed` is gone from the evidence with them: a status is `met` or
+`unmet`. What the lab holds is still reported, in an `observations` list
+beside `checks` (`subject`, `observed`), which carries no requirement and no
+status and does not bear on `met`.
+
+§8 Tier 1 also names `observability-logging`, which the evidence never
+checked. A lab's log interface is the cluster's own pod logs
+(`interface-types.md` lists Kubernetes pod logs for the type), so the check
+reads them: on every Ready node, the last lines of a running `kube-system`
+pod, through the API server. It is met when each node returned at least one
+line. Every node, because the API server proxies a log read to the kubelet
+of the pod's node, and a node whose logs cannot be read is one a scenario's
+workload can land on. `kube-system`, because every node runs a pod there
+before any scenario is provisioned. Rejected: checking that a log
+aggregator Deployment is ready, as the other components are checked. A lab
+installs none, and the agent reads logs through the orchestration API.
+
 **Every local lab is one control-plane node and three workers.** Three
 workers, not two, because that is what scenarios bind to: declared node
 names are bound to workers, only workers are shaped to the OASIS

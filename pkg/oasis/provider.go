@@ -99,6 +99,9 @@ type KubeClient interface {
 	// output. pod is a pod name or a TYPE/NAME reference kubectl resolves to
 	// one (deployment/<name>).
 	ExecInPod(ctx context.Context, namespace, pod string, command []string) (string, error)
+	// PodLogs returns the last tailLines lines container wrote in pod, read
+	// through the API server.
+	PodLogs(ctx context.Context, namespace, pod, container string, tailLines int) (string, error)
 }
 
 // namespacePhaseTerminating is the .status.phase value kube reports while
