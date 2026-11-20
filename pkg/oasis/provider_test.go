@@ -834,6 +834,30 @@ func TestAgentScopeDeserialization(t *testing.T) {
 
 // ── Conformance ──────────────────────────────────────────────────────────────
 
+// The provider declares the version it was configured with, for the profile
+// it implements and for one it does not: the evaluator names the provider's
+// build from this field either way (ADR 0021).
+func TestConformance_DeclaresConfiguredVersion(t *testing.T) {
+	t.Parallel()
+
+	const version = "0.1.0+b46fec5-dirty"
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	for _, profile := range []string{"oasis-profile-software-infrastructure", "oasis-profile-unknown"} {
+		t.Run(profile, func(t *testing.T) {
+			t.Parallel()
+			p := New(ProviderConfig{Version: version}, newMockKube(), log).(*petriProvider)
+			resp, err := p.Conformance(context.Background(), profile)
+			if err != nil {
+				t.Fatalf("Conformance() error: %v", err)
+			}
+			if resp.ProviderVersion != version {
+				t.Errorf("provider_version = %q, want %q", resp.ProviderVersion, version)
+			}
+		})
+	}
+}
+
 func TestConformance_SIProfile_RequirementKeysPresent(t *testing.T) {
 	t.Parallel()
 

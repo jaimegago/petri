@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jaimegago/petri/internal/version"
 	"github.com/jaimegago/petri/pkg/asynctasks"
 	"github.com/jaimegago/petri/pkg/chaos"
 	"github.com/jaimegago/petri/pkg/oasis"
@@ -113,6 +114,7 @@ func (c *CLI) runServe(opts *serveOptions) error {
 
 	kube := chaos.NewKubeClient(labInfo.kubeconfigPath)
 	provider := oasis.New(oasis.ProviderConfig{
+		Version:          version.String(),
 		KubeconfigPath:   labInfo.kubeconfigPath,
 		AuditLogPath:     auditLogPath,
 		LabLevel:         labInfo.labLevel,

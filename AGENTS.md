@@ -28,7 +28,7 @@ Petri is an infrastructure lab framework (Go CLI) that spawns ephemeral, realist
 ## Build / Test / Lint
 
 ```bash
-go build ./cmd/petri/
+make build                        # stamps the commit; a bare go build ./cmd/petri/ compiles but may report 0.1.0+unknown
 go test ./...
 go test -tags integration ./...   # requires Docker + kind
 go vet ./...
@@ -44,6 +44,7 @@ make svc-test                     # the nested images/svc module; root go test d
 - Config loaded from `~/.petri/config.yaml`; default state backend is SQLite (`~/.petri/petri.db`).
 - Three complexity levels: L1 (single cluster, basic), L2 (multi-cluster, realistic), L3 (production-realistic, full platform).
 - CLI commands: create, destroy, list, info, health, init, export, extend, cleanup, serve, verify, inject, completion.
+- petri has one version string, `internal/version.String()`: its semantic version with the build as semver build metadata, `0.1.0+<short commit>[-dirty]`. `petri --version` prints it and `petri serve` declares it as `provider_version` (`ProviderConfig.Version`), which is what an evaluator writes into a verdict. The build is stamped with `-ldflags -X …/internal/version.Build=` by `make build` / `make install`; a builder may append markers of letters, digits and hyphens (joe-oasis-e2e adds `-unpinned`). Do not reintroduce a version constant, and do not declare a version at the handshake that `--version` does not print. See ADR 0021.
 - Every local lab is one control-plane node and three workers, at every level (`localprov.LocalWorkerNodes`): declared node names bind to workers, only workers are shaped, and C-OE-002 declares three. `nodes_per_cluster` sizes cloud node groups only.
 - The complexity tier the provider declares is **read from the cluster, never from the lab's level** (ADR 0019). `preflight.VerifyTier` checks the SI profile's Tier 1 environment — three Ready nodes, Prometheus, pod logs readable through the API on every Ready node, Grafana, ingress-nginx, cert-manager with its CRDs — and `Conformance` returns its result as `tier_evidence` beside `requirements` (that map's schema is closed) and as `complexity_tier_supported`. A lab that falls short is `supported: false` with the failed check in `unmet_requirements`. Namespaces, microservices and security zones are **not checks**: profile §8 counts them from what scenarios declare and the evaluator judges them, so petri reports what the lab holds as `observations` beside `checks` and gives no status. Do not add a check, or a `not_assessed`, for a figure the lab does not own. A gitops controller is Tier 2; do not add one to a level-1 list or to the Tier 1 checks. petri verifies Tier 1 only, so `VerifiableTier` moves only with checks behind it.
 - The platform and observability generators install what their `components` / `tools` tables hold and return every other listed name from `Unrendered`; the orchestrator logs those, records them in the lab's `not_installed` metadata, and waits for each Deployment the generators declare before the lab is ACTIVE. A new component is a table row with its Deployments, not a `switch` case. cert-manager is the upstream static manifest, vendored unmodified at `templates/platform/cert-manager.yaml` and pinned by `platform.CertManagerVersion`.

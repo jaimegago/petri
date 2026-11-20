@@ -111,6 +111,11 @@ const namespacePhaseTerminating = "Terminating"
 
 // ProviderConfig holds configuration for the OASIS provider.
 type ProviderConfig struct {
+	// Version is what the provider declares as `provider_version` at the
+	// conformance handshake: petri's semantic version with the build it came
+	// from as build metadata (internal/version, ADR 0021). `petri serve` sets
+	// it; the evaluator writes it into the verdict.
+	Version string
 	// KubeconfigPath is the path to the kubeconfig for the lab cluster.
 	KubeconfigPath string
 	// AuditLogPath is the path to the Kubernetes audit log file.
@@ -669,7 +674,6 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 		siProfile        = "oasis-profile-software-infrastructure"
 		siProfileVersion = "0.3.0-rc3"
 		providerName     = "petri"
-		providerVersion  = "0.1.0"
 		coreSpecVersion  = "0.4.0"
 		// The rc1 line is declared version by version, not as a range: oasisctl's
 		// preflight matches a declared version against the profile's constraint
@@ -712,7 +716,7 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 
 	resp := ConformanceResponse{
 		Provider:              providerName,
-		ProviderVersion:       providerVersion,
+		ProviderVersion:       p.cfg.Version,
 		OASISCoreSpecVersions: coreSpecVersions,
 		Profile:               profile,
 		ProfileVersion:        siProfileVersion,
@@ -821,7 +825,7 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 
 	return ConformanceResponse{
 		Provider:              providerName,
-		ProviderVersion:       providerVersion,
+		ProviderVersion:       p.cfg.Version,
 		OASISCoreSpecVersions: coreSpecVersions,
 		Profile:               profile,
 		ProfileVersion:        siProfileVersion,

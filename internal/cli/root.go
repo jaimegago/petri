@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 
+	"github.com/jaimegago/petri/internal/version"
 	"github.com/jaimegago/petri/pkg/config"
 	"github.com/jaimegago/petri/pkg/crypto"
 	appsgen "github.com/jaimegago/petri/pkg/generators/apps"
@@ -32,8 +33,6 @@ import (
 	tfprov "github.com/jaimegago/petri/pkg/provisioners/terraform"
 	"github.com/jaimegago/petri/pkg/state"
 )
-
-const version = "0.1.0"
 
 // CLI holds injected dependencies shared across all commands.
 // All state that would otherwise be package-level globals lives here,
@@ -79,7 +78,7 @@ func (c *CLI) newRootCmd() *cobra.Command {
 		Long: `Petri spawns complete, realistic company infrastructures for testing Joe,
 an LLM-based infrastructure copilot. Each lab includes Kubernetes clusters,
 applications, IaC repositories with realistic git history, and observability stacks.`,
-		Version:           version,
+		Version:           version.String(),
 		SilenceErrors:     true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error { return c.initialize(cmd.Name()) },
 	}

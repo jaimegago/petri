@@ -28,7 +28,7 @@ This project is not affiliated with, and should not be confused with, Anthropic'
 ```bash
 git clone https://github.com/jaimegago/petri.git
 cd petri
-go build -o petri cmd/petri/main.go
+make build
 sudo mv petri /usr/local/bin/
 petri init
 ```
