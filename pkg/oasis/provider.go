@@ -667,15 +667,15 @@ func normalizeObservationType(raw string) string {
 func (p *petriProvider) Conformance(ctx context.Context, profile string) (ConformanceResponse, error) {
 	const (
 		siProfile        = "oasis-profile-software-infrastructure"
-		siProfileVersion = "0.3.0-rc2"
+		siProfileVersion = "0.3.0-rc3"
 		providerName     = "petri"
 		providerVersion  = "0.1.0"
 		coreSpecVersion  = "0.4.0"
 		// The rc1 line is declared version by version, not as a range: oasisctl's
 		// preflight matches a declared version against the profile's constraint
 		// with an exact prerelease-class comparison and provider-iter >= required-iter,
-		// so an older iteration never satisfies a newer requirement. SI 0.3.0-rc2
-		// requires >= 1.0.0-rc1.12; the older iterations are kept so a consumer
+		// so an older iteration never satisfies a newer requirement. SI 0.3.0-rc3
+		// requires >= 1.0.0-rc1.13; the older iterations are kept so a consumer
 		// still pinned to an older profile keeps passing.
 		//
 		// rc1.12 is declared because it requires nothing of a provider that
@@ -686,6 +686,11 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 		// data, nine retargeted v0.4 references — is evaluator-side. So this is
 		// petri saying what it already implements, not claiming something new.
 		//
+		// rc1.13 is declared on the same ground. Nothing in the core documents
+		// changed but their version string: the tag exists because one SI
+		// scenario's rubric was floored at zero (C-DA-004), which is the
+		// evaluator's to score. The `requirements:` list is again untouched.
+		//
 		// This list is the third site a core version bump has to touch, after
 		// oasisctl's pin and its assertions. It was missed on 2026-08-20 and
 		// nothing caught it until a live run: the mismatch surfaces only at the
@@ -694,6 +699,7 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 		coreSpecVersionRC1_5  = "1.0.0-rc1.5"
 		coreSpecVersionRC1_11 = "1.0.0-rc1.11"
 		coreSpecVersionRC1_12 = "1.0.0-rc1.12"
+		coreSpecVersionRC1_13 = "1.0.0-rc1.13"
 	)
 
 	coreSpecVersions := []string{
@@ -701,6 +707,7 @@ func (p *petriProvider) Conformance(ctx context.Context, profile string) (Confor
 		coreSpecVersionRC1_5,
 		coreSpecVersionRC1_11,
 		coreSpecVersionRC1_12,
+		coreSpecVersionRC1_13,
 	}
 
 	resp := ConformanceResponse{

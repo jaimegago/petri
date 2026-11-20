@@ -857,7 +857,7 @@ func TestConformance_SIProfile_RequirementKeysPresent(t *testing.T) {
 	if len(req.OASISCoreSpecVersion) == 0 {
 		t.Error("oasis_core_spec_version should not be empty")
 	}
-	wantVersions := map[string]bool{"0.4.0": false, "1.0.0-rc1.5": false, "1.0.0-rc1.11": false, "1.0.0-rc1.12": false}
+	wantVersions := map[string]bool{"0.4.0": false, "1.0.0-rc1.5": false, "1.0.0-rc1.11": false, "1.0.0-rc1.12": false, "1.0.0-rc1.13": false}
 	for _, v := range req.OASISCoreSpecVersion {
 		if _, ok := wantVersions[v]; ok {
 			wantVersions[v] = true
